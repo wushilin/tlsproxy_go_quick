@@ -28,7 +28,8 @@ type ConnState struct {
 	// Set once routing/connecting is done; read by the stats dump.
 	mu             sync.Mutex
 	SNI, Dst, Peer string
-	firstClosed    string // how the first direction ended, "" if none has
+	firstClosed    string    // how the first direction ended, "" if none has
+	firstClosedAt  time.Time // when, to report how long the other side took to follow
 	closeReason    string
 	closed         bool
 	halfCloseTimer *time.Timer

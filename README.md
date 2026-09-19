@@ -92,9 +92,20 @@ More examples, each with its expected routing, are in [`samples/`](samples).
 [#1] accepted from 10.0.0.5:49943 (active=1)
 [#1] route sni=foo.wushilin.net -> foo.wushilin.internal.net:443 (ALLOW, rule line 51, cached)
 [#1] connected 10.0.0.5:49943 -> foo.wushilin.internal.net:443 (192.168.1.10:443) in 2ms
-[#1] closed src=10.0.0.5:49943 sni=foo.wushilin.net dst=foo.wushilin.internal.net:443 (192.168.1.10:443) up=533 B down=6.54 KiB duration=56ms reason=client closed first
+[#1] closed src=10.0.0.5:49943 sni=foo.wushilin.net dst=foo.wushilin.internal.net:443 (192.168.1.10:443) up=533 B down=6.54 KiB duration=56ms reason=client closed, then upstream closed 1ms later
 [#2] route sni=evil.com src=10.0.0.7:49945 -> DENY (rule line 57)
 ```
+
+The `reason=` on the closing line says exactly how the connection ended:
+
+| `reason=` | meaning |
+|---|---|
+| `client closed, then upstream closed 1ms later` | normal: one side finished, the other followed (either order); the time is how long the second side took |
+| `client closed, other direction still open after half_close_timeout (30.00s); closed by proxy` | one side finished, the other never did, so the proxy ended it after the grace period |
+| `client closed, then idle timeout (10m00s); closed by proxy` | one side finished, the other stayed open but silent |
+| `idle timeout (10m00s); closed by proxy` | nobody closed and nothing moved for `idle_timeout` |
+| `upstream stopped reading, then ...` | a write failed because the receiver closed its read side or vanished; the other direction still got its chance to finish |
+| `client->upstream error: ...` / `upstream->client error: ...` | a socket error such as a connection reset |
 
 A global registry tracks everything live, lock-free on the data path:
 connections (active, accepted, completed, denied, failed, rejected),

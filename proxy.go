@@ -427,9 +427,9 @@ func (r *relay) idleReason() string {
 	first := r.c.firstClosed
 	r.c.mu.Unlock()
 	if first != "" {
-		first += " first, then "
+		first += ", then "
 	}
-	return fmt.Sprintf("%sidle timeout (%s)", first, humanDuration(r.cfg.IdleTimeout))
+	return fmt.Sprintf("%sidle timeout (%s); closed by proxy", first, humanDuration(r.cfg.IdleTimeout))
 }
 
 // endDirection: direction d is over, because its source reached EOF (forward
@@ -451,18 +451,20 @@ func (r *relay) endDirection(d direction, how string, forward bool) {
 		return
 	}
 	if r.dirState(1-d).Load() == dirHalfClosed {
-		first := c.firstClosed
-		if first == "" {
-			first = "both closed"
+		// The other side had already ended: a normal, mutual close.
+		c.closed = true
+		if c.firstClosed != "" {
+			c.closeReason = fmt.Sprintf("%s, then %s %s later", c.firstClosed, how, humanDuration(time.Since(c.firstClosedAt)))
+		} else {
+			c.closeReason = how + ", both directions ended"
 		}
-		c.closed, c.closeReason = true, first+" first"
 		c.mu.Unlock()
 		return
 	}
-	c.firstClosed = how
+	c.firstClosed, c.firstClosedAt = how, time.Now()
 	if limit := r.cfg.HalfCloseTimeout; limit > 0 {
 		c.halfCloseTimer = time.AfterFunc(limit, func() {
-			r.closeAll(fmt.Sprintf("%s first, other side still open after half_close_timeout (%s)", how, humanDuration(limit)))
+			r.closeAll(fmt.Sprintf("%s, other direction still open after half_close_timeout (%s); closed by proxy", how, humanDuration(limit)))
 		})
 	}
 	c.mu.Unlock()
