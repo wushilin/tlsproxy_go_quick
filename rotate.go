@@ -158,6 +158,14 @@ func (l *FileLogger) waitIdle() {
 	}
 }
 
+// Close waits until the logger no longer has a compressor manipulating its
+// generation files. This matters when a config reload opens a replacement for
+// the same path: the replacement must not rotate those files concurrently.
+func (l *FileLogger) Close() error {
+	l.waitIdle()
+	return l.file.Close()
+}
+
 // gzipFile compresses src into dst (written via a temporary file, so dst
 // only ever appears complete).
 func gzipFile(src, dst string) (err error) {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -96,6 +98,47 @@ func TestSNIRejectsExcessiveRecordFragmentation(t *testing.T) {
 	data := wrapRecords(buildClientHello(&name, 0), 1)
 	if _, err := parseClientHello(data); err == nil || err == errNeedMore {
 		t.Fatalf("excessively fragmented ClientHello was not rejected: %v", err)
+	}
+}
+
+type oneByteReader struct{ data []byte }
+
+func (r *oneByteReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	p[0] = r.data[0]
+	r.data = r.data[1:]
+	return 1, nil
+}
+
+func (r *oneByteReader) Write([]byte) (int, error)        { return 0, errors.New("unused") }
+func (r *oneByteReader) Close() error                     { return nil }
+func (r *oneByteReader) LocalAddr() net.Addr              { return nil }
+func (r *oneByteReader) RemoteAddr() net.Addr             { return nil }
+func (r *oneByteReader) SetDeadline(time.Time) error      { return nil }
+func (r *oneByteReader) SetReadDeadline(time.Time) error  { return nil }
+func (r *oneByteReader) SetWriteDeadline(time.Time) error { return nil }
+
+func TestReadHelloDoesNotReparseTrickledFinalRecord(t *testing.T) {
+	name := "trickle.example.com"
+	hs := buildClientHello(&name, 30000)
+	// Put substantial data in 31 completed records, then deliver the final
+	// record one byte per Read. This was the remaining quadratic attack shape.
+	chunk := (len(hs) + 30) / 31
+	data := wrapRecords(hs, chunk)
+	var info helloInfo
+	var got []byte
+	var err error
+	allocs := testing.AllocsPerRun(1, func() {
+		r := &oneByteReader{data: data}
+		info, got, err = readHello(r, make([]byte, 0, len(data)))
+	})
+	if err != nil || info.SNI != name || len(got) != len(data) {
+		t.Fatalf("sni=%q bytes=%d/%d err=%v", info.SNI, len(got), len(data), err)
+	}
+	if allocs > 200 {
+		t.Fatalf("trickled ClientHello caused %.0f allocations", allocs)
 	}
 }
 

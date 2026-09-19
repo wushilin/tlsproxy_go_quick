@@ -274,6 +274,14 @@ func isTimeout(err error) bool {
 // that doesn't fit spills into a heap slice, which is returned instead.
 func readHello(client net.Conn, buf []byte) (info helloInfo, data []byte, err error) {
 	data = buf[:0]
+	// Keep framing state across reads. Calling parseHello after every Read would
+	// rebuild all preceding handshake fragments each time; a peer could exploit
+	// that by trickling the final record one byte at a time. We only invoke the
+	// full parser once the record framing proves that the complete ClientHello
+	// is present.
+	scanAt, records, handshakeBytes := 0, 0, 0
+	headerBytes, helloBytes := 0, -1
+	var header [4]byte
 	for {
 		if len(data) == cap(data) {
 			if cap(data) > maxClientHello+16 {
@@ -286,12 +294,53 @@ func readHello(client net.Conn, buf []byte) (info helloInfo, data []byte, err er
 		n, rerr := client.Read(data[len(data):cap(data)])
 		data = data[:len(data)+n]
 		if n > 0 {
-			info, perr := parseHello(data)
-			if perr == nil {
-				return info, data, nil
-			}
-			if perr != errNeedMore {
-				return info, data, perr
+			for {
+				if len(data)-scanAt < 5 {
+					if len(data) > scanAt && data[scanAt] != 0x16 {
+						return info, data, fmt.Errorf("not a TLS handshake record (content type 0x%02x)", data[scanAt])
+					}
+					break
+				}
+				if data[scanAt] != 0x16 {
+					return info, data, fmt.Errorf("not a TLS handshake record (content type 0x%02x)", data[scanAt])
+				}
+				if records >= maxClientHelloRecords {
+					return info, data, fmt.Errorf("ClientHello spans more than %d TLS records", maxClientHelloRecords)
+				}
+				if data[scanAt+1] != 0x03 {
+					return info, data, fmt.Errorf("unsupported TLS record version %02x%02x", data[scanAt+1], data[scanAt+2])
+				}
+				recordBytes := int(data[scanAt+3])<<8 | int(data[scanAt+4])
+				if recordBytes == 0 {
+					return info, data, errors.New("empty TLS record")
+				}
+				recordEnd := scanAt + 5 + recordBytes
+				if recordEnd > maxClientHello {
+					return info, data, errors.New("ClientHello too large")
+				}
+				if len(data) < recordEnd {
+					break
+				}
+				payload := data[scanAt+5 : recordEnd]
+				if headerBytes < len(header) {
+					headerBytes += copy(header[headerBytes:], payload)
+					if headerBytes == len(header) {
+						if header[0] != 0x01 {
+							return info, data, fmt.Errorf("first handshake message is not ClientHello (type %d)", header[0])
+						}
+						helloBytes = 4 + int(header[1])<<16 + int(header[2])<<8 + int(header[3])
+						if helloBytes > maxClientHello {
+							return info, data, errors.New("ClientHello too large")
+						}
+					}
+				}
+				handshakeBytes += recordBytes
+				if helloBytes >= 0 && handshakeBytes >= helloBytes {
+					info, perr := parseHello(data)
+					return info, data, perr
+				}
+				scanAt = recordEnd
+				records++
 			}
 		}
 		if rerr != nil {

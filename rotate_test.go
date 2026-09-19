@@ -123,6 +123,27 @@ func TestCompressGuardLetsTheFileOutgrow(t *testing.T) {
 	}
 }
 
+func TestFileLoggerCloseWaitsForCompression(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wait.log")
+	l, err := OpenFileLogger(path, LogConfig{MaxSize: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle := make(chan struct{})
+	l.idle = idle
+	done := make(chan error, 1)
+	go func() { done <- l.Close() }()
+	select {
+	case <-done:
+		t.Fatal("Close returned while compression was still active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(idle)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLogEdgeSettings(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
