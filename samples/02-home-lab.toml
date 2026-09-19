@@ -1,0 +1,48 @@
+# Home lab: one public IP on :443, several internal services by name.
+#
+#> nas.home.example.com      => 192.168.1.10:5001
+#> photos.home.example.com   => 192.168.1.10:2342
+#> ha.home.example.com       => 192.168.1.20:8123
+#> vpn.home.example.com      => 192.168.1.1:4443
+#> www.home.example.com      => 192.168.1.30:443
+#> home.example.com          => 192.168.1.30:443
+#> admin.home.example.com    => DENY
+#> random.com                => DENY
+
+[global]
+bind = 0.0.0.0
+port = 443
+idle_timeout = 3600          # long-lived sessions (NAS, Home Assistant websockets)
+
+[[host]]
+pattern = nas\.home\.example\.com
+target_host = 192.168.1.10
+target_port = 5001
+
+[[host]]
+pattern = photos\.home\.example\.com
+target_host = 192.168.1.10
+target_port = 2342
+
+[[host]]
+pattern = ha\.home\.example\.com
+target_host = 192.168.1.20
+target_port = 8123
+
+[[host]]
+pattern = vpn\.home\.example\.com
+target_host = 192.168.1.1
+target_port = 4443
+
+# Never expose the admin UI, even though the next rule would match it.
+[[host]]
+pattern = admin\.home\.example\.com
+action = deny
+
+[[host]]
+pattern = (www\.)?home\.example\.com
+target_host = 192.168.1.30
+
+[[host]]
+pattern = .*
+action = deny

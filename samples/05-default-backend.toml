@@ -1,0 +1,23 @@
+# Specific routes first, then a catch-all default backend (which also takes
+# clients that send no SNI at all, e.g. old devices or bare-IP access).
+#
+#> api.example.com     => 10.0.0.21:443
+#> shop.example.com    => 10.0.0.22:443
+#> anything.else.org   => 10.0.0.99:443
+#> <none>              => 10.0.0.99:443
+
+[global]
+bind = 0.0.0.0
+port = 443
+
+[[host]]
+pattern = api\.example\.com
+target_host = 10.0.0.21
+
+[[host]]
+pattern = shop\.example\.com
+target_host = 10.0.0.22
+
+[[host]]
+pattern = .*
+target_host = 10.0.0.99

@@ -1,0 +1,52 @@
+# tlsproxy config. Values may be bare, "double-quoted" or 'single-quoted'.
+#
+# Every commented-out setting below shows its DEFAULT value: uncommenting a
+# line unchanged changes nothing (this is checked by `go test`). Only
+# `port` is required.
+
+[global]
+bind = 0.0.0.0                  # (default: 0.0.0.0) listen address; "::" for IPv6
+port = 443                      # (required) listen port
+
+# --- Timeouts, in seconds -----------------------------------------------
+# handshake_timeout = 10        # (default: 10) max time to receive the whole ClientHello
+# connect_timeout = 10          # (default: 10) max time to connect to the target
+# idle_timeout = 600            # (default: 600) close after N s with no traffic either way; 0 = never
+# half_close_timeout = 30       # (default: 30) after one side closes, the other gets N s; 0 = unlimited
+
+# --- Limits and memory ----------------------------------------------------
+# max_connections = 1024        # (default: 1024) more are rejected; goroutines <= 2 x this
+# buffer_size = 65536           # (default: 65536) bytes per pooled buffer; 2 held per open connection
+# buffer_pool_max_idle = 3072   # (default: 3 x max_connections) free buffers kept for reuse
+
+# --- Route cache (LRU, keyed by lowercased SNI; cleared on every reload) ------
+# allow_cache_size = 4096       # (default: 4096) cached allowed names -> target; 0 = off
+# deny_cache_size = 4096        # (default: 4096) cached denied names, kept separately so a
+#                               #   flood of junk names can't evict the allowed ones; 0 = off
+
+# --- Hot reload ------------------------------------------------------------------
+# reload_interval = 5           # (default: 5) check this file every N s and apply changes;
+#                               #   min 5 (at most one reload per 5 s), 0 = never.
+#                               #   bind/port changes need a restart; an invalid file is ignored
+
+# --- State reporting ------------------------------------------------------------
+# stats_interval = 60           # (default: 60) log one summary line every N s; 0 = never.
+#                               #   `kill -USR1 <pid>` logs the summary plus every open connection
+
+# --- Rules -------------------------------------------------------------------
+# Checked top to bottom; the first match wins; a name matching no rule is denied.
+# pattern     (required) case-insensitive mini regex, must match the WHOLE SNI;
+#             a client without SNI is matched as "" (use ^$ to target it)
+# action      (default: allow) allow | deny; deny sends a TLS access_denied alert
+# target_host (required for allow) may use $1 / ${1} for groups, $0 = whole SNI
+# target_port (default: 443)
+
+[[host]]
+pattern = (.*)\.wushilin\.net
+action = allow
+target_host = $1.wushilin.internal.net
+target_port = 443
+
+[[host]]
+pattern = .*
+action = deny

@@ -1,0 +1,22 @@
+# The original example: map *.wushilin.net to *.wushilin.internal.net.
+#
+# Expected routing (checked by `go test`):
+#> foo.wushilin.net        => foo.wushilin.internal.net:443
+#> a.b.wushilin.net        => a.b.wushilin.internal.net:443
+#> wushilin.net            => DENY
+#> foo.wushilin.net.evil.io => DENY
+#> <none>                  => DENY
+
+[global]
+bind = 0.0.0.0
+port = 443
+
+[[host]]
+pattern = (.*)\.wushilin\.net
+action = allow
+target_host = $1.wushilin.internal.net
+target_port = 443
+
+[[host]]
+pattern = .*
+action = deny

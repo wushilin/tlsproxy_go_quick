@@ -1,0 +1,26 @@
+# Listen on all IPv6 (and, depending on OS settings, IPv4) addresses with
+# every tuning knob spelled out. Values may be quoted or bare.
+#
+#> mail.example.com   => ::1:993
+#> x.example.com      => DENY
+
+[global]
+bind = "::"
+port = "443"
+handshake_timeout = 5        # seconds to receive the ClientHello
+connect_timeout = 3          # seconds to connect to the target
+idle_timeout = 300           # no traffic for N seconds closes; 0 disables
+half_close_timeout = 10      # after one side closes, the other gets N seconds; 0 = unlimited
+max_connections = 4096
+buffer_size = 65536          # bytes per pooled buffer, 2 held per connection (512..1048576)
+buffer_pool_max_idle = 1024  # free buffers kept for reuse; default 3 x max_connections
+
+[[host]]
+pattern = "mail\.example\.com"
+action = "allow"
+target_host = "::1"
+target_port = "993"
+
+[[host]]
+pattern = '.*'
+action = 'deny'

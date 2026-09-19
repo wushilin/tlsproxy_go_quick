@@ -1,0 +1,68 @@
+# Tests on Linux and on a real FreeBSD VM, cross-builds static FreeBSD
+# binaries, and attaches them to a GitHub Release for tags "v*".
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: Cross-build (static, no cgo)
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in freebsd/amd64 freebsd/arm64 linux/amd64 linux/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build -trimpath -ldflags="-s -w" \
+              -o "tlsproxy-${target%/*}-${target#*/}" .
+          done
+          sha256sum tlsproxy-* > SHA256SUMS
+          ls -l tlsproxy-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: |
+            tlsproxy-*
+            SHA256SUMS
+            config.toml
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" tlsproxy-* SHA256SUMS config.toml --clobber
+
+  freebsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          prepare: pkg install -y go
+          run: |
+            set -e
+            freebsd-version
+            go version
+            CGO_ENABLED=0 go test -count=1 ./...
+            CGO_ENABLED=0 go build -o tlsproxy .
+            file tlsproxy
+            ./tlsproxy config.toml --test foo.wushilin.net evil.com
