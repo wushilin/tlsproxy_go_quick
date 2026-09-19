@@ -204,6 +204,27 @@ func TestMissingSNIMatchesEmptyString(t *testing.T) {
 	}
 }
 
+func TestNonePatternRoutesClientsWithoutSNI(t *testing.T) {
+	t.Parallel()
+	def, named := echoBackend(t, "D"), echoBackend(t, "N")
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=NONE\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\npattern=(.*)\\.named\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\npattern=.*\naction=deny\n", def, named))
+	noSNI := wrapRecords(buildClientHello(nil, 0), 16384)
+	for i := 0; i < 2; i++ { // the second round is served from the route cache
+		c := dial(t, p)
+		c.Write(noSNI)
+		got := readN(t, c, 1+len(noSNI))
+		if got[0] != 'D' || !bytes.Equal(got[1:], noSNI) {
+			t.Fatalf("no-SNI client must reach the default target, got tag %q", got[:1])
+		}
+		c.Close()
+	}
+	roundtrip(t, p, "a.named.test", "N")
+	expectDenied(t, p, clientHello("none")) // a host called "none" has an SNI
+	expectDenied(t, p, clientHello("other.test"))
+}
+
 func TestNonTLSIsDroppedWithoutReply(t *testing.T) {
 	t.Parallel()
 	p := startProxy(t, "", allowAll(echoBackend(t, "")))

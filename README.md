@@ -25,6 +25,7 @@ For the full-featured proxy (TLS termination, ACME, admin UI) see
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o tlsproxy .
 ./tlsproxy config.toml                                 # run (logs to stderr)
 ./tlsproxy config.toml --test foo.wushilin.net x.com   # dry run: show routing only
+./tlsproxy config.toml --test ""                       # dry run for a client without SNI
 go test ./...                                          # ~25 s
 ```
 
@@ -55,8 +56,11 @@ action = deny
   SNI. A reference to a group that doesn't exist is rejected at load time.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
   `access_denied` alert. `target_port` defaults to 443.
-- A client that sends no SNI is matched as the empty string, so `.*` catches
-  it and `^$` targets it specifically.
+- `pattern = NONE` (any letter case) matches only clients that send **no SNI**,
+  for example to send them to a default target; its `target_host` must be a
+  literal. For regex patterns a missing SNI is matched as the empty string, so
+  a catch-all `.*` also catches it. A host literally named `none` is matched
+  with `^none$`.
 - Values may be bare, `"double-quoted"` or `'single-quoted'`. `#` starts a comment.
 
 Optional `[global]` settings; [`config.toml`](config.toml) lists every one

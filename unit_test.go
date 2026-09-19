@@ -232,6 +232,42 @@ func TestConfigRouting(t *testing.T) {
 	}
 }
 
+func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
+	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern = NONE\ntarget_host = 10.0.0.99\ntarget_port = 8443\n"+
+		"[[host]]\npattern = (.*)\\.ok\ntarget_host = $1.lan\n")
+	for sni, want := range map[string]string{
+		"": "10.0.0.99:8443", "a.ok": "a.lan:443",
+		"none":  "DENY", // a host literally named "none" is not "no SNI"
+		"other": "DENY",
+	} {
+		if got := route(t, c, sni); got != want {
+			t.Errorf("%q: got %s want %s", sni, got, want)
+		}
+	}
+	// Any letter case, quoted or not; and it can deny ahead of a catch-all allow.
+	for _, form := range []string{"none", "None", `"NONE"`, "'none'"} {
+		c := mustParse(t, "[global]\nport=1\n[[host]]\npattern="+form+"\naction=deny\n[[host]]\npattern=.*\ntarget_host=$0\n")
+		if d := c.Route(""); d.Allow || d.RuleLine != 3 {
+			t.Errorf("%s: %+v", form, d)
+		}
+		if got := route(t, c, "x.com"); got != "x.com:443" {
+			t.Errorf("%s: %s", form, got)
+		}
+	}
+	// The literal host name is still reachable with an explicit regex.
+	lit := mustParse(t, "[global]\nport=1\n[[host]]\npattern=^none$\ntarget_host=n.lan\n")
+	if route(t, lit, "none") != "n.lan:443" || route(t, lit, "") != "DENY" {
+		t.Error("^none$ must match the host name, not a missing SNI")
+	}
+	// No groups to expand: $0 is empty (route error), $1 doesn't exist (load error).
+	if got := route(t, mustParse(t, "[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=$0\n"), ""); got != "ERROR" {
+		t.Error(got)
+	}
+	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=$1.lan\n"); err == nil {
+		t.Error("$1 with pattern NONE must be rejected")
+	}
+}
+
 func TestConfigIgnoresRustOnlyKeys(t *testing.T) {
 	c := mustParse(t, "[global]\nport=1\nio_model=events\nworker_threads=4\nshort_read_delay_us=50\n")
 	if c.ShortReadDelay != 50*time.Microsecond {

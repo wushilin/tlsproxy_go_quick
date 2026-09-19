@@ -42,8 +42,11 @@ type Config struct {
 }
 
 type Rule struct {
-	Line       int
-	Source     string
+	Line   int
+	Source string
+	// NoSNI is set by `pattern = NONE` (any case): the rule matches only
+	// connections without an SNI, and Pattern is nil.
+	NoSNI      bool
 	Pattern    *regexp.Regexp
 	Allow      bool
 	TargetHost string
@@ -68,8 +71,13 @@ func isHostChar(b byte) bool {
 func (c *Config) Route(sni string) Decision {
 	for i := range c.Rules {
 		r := &c.Rules[i]
-		m := r.Pattern.FindStringSubmatchIndex(sni)
-		if m == nil {
+		var m []int
+		if r.NoSNI {
+			if sni != "" {
+				continue
+			}
+			m = []int{0, 0} // group 0 (the empty whole match); there are no others
+		} else if m = r.Pattern.FindStringSubmatchIndex(sni); m == nil {
 			continue
 		}
 		if !r.Allow {
@@ -309,12 +317,19 @@ func ParseConfig(text string) (*Config, error) {
 		if r.pattern == nil {
 			return nil, fail("pattern is required")
 		}
-		// Whole-name, case-insensitive match.
-		re, err := regexp.Compile("(?i)^(?:" + *r.pattern + ")$")
-		if err != nil {
-			return nil, fail("bad pattern %q: %v", *r.pattern, err)
+		rule := Rule{Line: r.line, Source: *r.pattern}
+		groups := 0
+		var err error
+		if strings.EqualFold(*r.pattern, "none") {
+			rule.NoSNI = true
+		} else {
+			// Whole-name, case-insensitive match.
+			rule.Pattern, err = regexp.Compile("(?i)^(?:" + *r.pattern + ")$")
+			if err != nil {
+				return nil, fail("bad pattern %q: %v", *r.pattern, err)
+			}
+			groups = rule.Pattern.NumSubexp()
 		}
-		rule := Rule{Line: r.line, Source: *r.pattern, Pattern: re}
 		action := "allow"
 		if r.action != nil {
 			action = strings.ToLower(*r.action)
@@ -334,7 +349,7 @@ func ParseConfig(text string) (*Config, error) {
 				}
 			}
 			// Catch bad group references now rather than per connection.
-			probe := make([]int, 2*(re.NumSubexp()+1))
+			probe := make([]int, 2*(groups+1))
 			if _, err := expand(rule.TargetHost, "", probe); err != nil {
 				return nil, fail("target_host: %v", err)
 			}

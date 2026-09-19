@@ -40,7 +40,8 @@ port = 443                      # (required) listen port
 # --- Rules -------------------------------------------------------------------
 # Checked top to bottom; the first match wins; a name matching no rule is denied.
 # pattern     (required) case-insensitive mini regex, must match the WHOLE SNI;
-#             a client without SNI is matched as "" (use ^$ to target it)
+#             or the literal NONE (any case): only clients that send no SNI.
+#             (for the regex form, a client without SNI is matched as "")
 # action      (default: allow) allow | deny; deny sends a TLS access_denied alert
 # target_host (required for allow) may use $1 / ${1} for groups, $0 = whole SNI
 # target_port (default: 443)

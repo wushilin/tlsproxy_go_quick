@@ -44,6 +44,9 @@ func main() {
 	if testMode { // dry run: print routing decisions and exit
 		for _, sni := range testSNIs {
 			d := cfg.Route(strings.ToLower(sni))
+			if sni == "" {
+				sni = "<none>" // --test "" asks about a client without SNI
+			}
 			switch {
 			case d.Err != "":
 				fmt.Printf("%s -> ERROR %s\n", sni, d.Err)
