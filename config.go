@@ -53,7 +53,7 @@ type Config struct {
 
 	Console *ConsoleConfig // the [console] section; nil = no web console
 	Rules   []Rule
-	// Settings from the Rust version that no longer apply and were ignored.
+	// Legacy settings that no longer apply and were ignored.
 	Ignored []string
 }
 
@@ -81,11 +81,15 @@ type Rule struct {
 
 	// TLS termination: set when the rule has cert = auto | <dir>. Without it
 	// the rule passes TLS through untouched.
-	Cert              string   // "", "auto", or a directory holding cert.pem + key.pem (+ ca.pem)
-	CertDomains       []string // names to issue for when Cert is "auto"
-	UpstreamTLS       bool     // connect to the target with TLS (default true)
-	UpstreamTLSVerify bool     // verify the target's certificate (default true)
-	UpstreamSNI       string   // SNI sent to (and verified against) the target; "" = the client's SNI
+	Cert        string   // "", "auto", or a directory holding cert.pem + key.pem (+ ca.pem)
+	CertDomains []string // names to issue for when Cert is "auto"
+	// CertValidateScript decides about names that match the pattern but are
+	// not in CertDomains: run as `<script> <name>` only when a certificate has
+	// to be issued or renewed; exit status 0 accepts the name.
+	CertValidateScript string
+	UpstreamTLS        bool   // connect to the target with TLS (default true)
+	UpstreamTLSVerify  bool   // verify the target's certificate (default true)
+	UpstreamSNI        string // SNI sent to (and verified against) the target; "" = the client's SNI
 }
 
 // Terminates reports whether the proxy terminates TLS for this rule.
@@ -196,9 +200,9 @@ func expand(template, input string, m []int) (string, error) {
 const LetsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
 type rawRule struct {
-	cert, certDomains, upstreamTLS, upstreamVerify, upstreamSNI *string
-	line                                                        int
-	pattern, action, targetHost, tport                          *string
+	cert, certDomains, certScript, upstreamTLS, upstreamVerify, upstreamSNI *string
+	line                                                                    int
+	pattern, action, targetHost, tport                                      *string
 }
 
 func ParseConfig(text string) (*Config, error) {
@@ -359,7 +363,7 @@ func ParseConfig(text string) (*Config, error) {
 			case "acme_ca_file":
 				cfg.AcmeCAFile = value
 			case "io_model", "worker_threads":
-				// Rust-version tuning knobs; goroutines make them moot.
+				// Legacy tuning knobs; goroutines make them moot.
 				cfg.Ignored = append(cfg.Ignored, key)
 			default:
 				return nil, fail("unknown key %q in [global]", key)
@@ -423,6 +427,8 @@ func ParseConfig(text string) (*Config, error) {
 				r.cert = &v
 			case "cert_domains":
 				r.certDomains = &v
+			case "cert_validate_script":
+				r.certScript = &v
 			case "upstream_tls":
 				r.upstreamTLS = &v
 			case "upstream_tls_verify":
@@ -476,6 +482,13 @@ func ParseConfig(text string) (*Config, error) {
 				return nil, fail("target_host is required for allow")
 			}
 			rule.TargetHost = *r.targetHost
+			// The port always goes in target_port. A ':' is only legal in an
+			// IPv6 address; "host:8080" would otherwise be dialled as a name.
+			if strings.Contains(rule.TargetHost, ":") {
+				if _, err := netip.ParseAddr(rule.TargetHost); err != nil {
+					return nil, fail("target_host %q must not contain a port: use target_port (an IPv6 address is written without brackets)", rule.TargetHost)
+				}
+			}
 			rule.TargetPort = 443
 			if r.tport != nil {
 				if rule.TargetPort, err = parsePort(*r.tport); err != nil {
@@ -546,7 +559,7 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 		for _, kv := range []struct {
 			name string
 			v    *string
-		}{{"cert_domains", r.certDomains}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify}, {"upstream_sni", r.upstreamSNI}} {
+		}{{"cert_domains", r.certDomains}, {"cert_validate_script", r.certScript}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify}, {"upstream_sni", r.upstreamSNI}} {
 			if kv.v != nil {
 				return fmt.Errorf("%s only applies when the rule terminates TLS (set cert = auto or a directory)", kv.name)
 			}
@@ -581,6 +594,9 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 		if r.certDomains != nil {
 			return fmt.Errorf("cert_domains only applies to cert = auto")
 		}
+		if r.certScript != nil {
+			return fmt.Errorf("cert_validate_script only applies to cert = auto")
+		}
 		return nil
 	}
 	rule.Cert = "auto"
@@ -595,8 +611,13 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 	} else if host, ok := literalHost(rule.Source); ok {
 		rule.CertDomains = []string{host}
 	}
-	if len(rule.CertDomains) == 0 {
-		return fmt.Errorf("cert = auto with a regex pattern needs cert_domains = name1, name2 (certificates are issued per exact name)")
+	if r.certScript != nil {
+		if rule.CertValidateScript = *r.certScript; rule.CertValidateScript == "" {
+			return fmt.Errorf("cert_validate_script must not be empty")
+		}
+	}
+	if len(rule.CertDomains) == 0 && rule.CertValidateScript == "" {
+		return fmt.Errorf("cert = auto with a regex pattern needs cert_domains = name1, name2 (certificates are issued per exact name) or a cert_validate_script that decides per name")
 	}
 	for _, d := range rule.CertDomains {
 		if !validDomain(d) {

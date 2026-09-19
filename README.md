@@ -8,10 +8,8 @@ instead **terminate TLS**, with certificates issued and renewed automatically
 by Let's Encrypt over TLS-ALPN-01 (port 443 only, no port 80), or loaded from
 a directory.
 
-This is the Go port of [tlsproxy_rs_quick](https://github.com/wushilin/tlsproxy_rs_quick),
-with identical behaviour, config format and log lines. It exists because a
-firewall such as **pfSense** has no C compiler or linker, so Rust programs
-cannot be built on it, while Go can:
+It is written in Go because a firewall such as **pfSense** has no C compiler
+or linker, so anything that needs one cannot be built on it, while Go can:
 
 - **Standard library plus one vendored package.** ACME uses the Go team's
   `golang.org/x/crypto/acme`, which itself needs only the standard library and
@@ -20,9 +18,6 @@ cannot be built on it, while Go can:
   package, or cross-compile anywhere: `GOOS=freebsd GOARCH=amd64 go build`.
 - **Static binary.** It doesn't link libc, so one build runs on any FreeBSD
   version (14, 15, 16...).
-
-For the full-featured proxy (TLS termination, ACME, admin UI) see
-[tlsproxy_rs](https://github.com/wushilin/tlsproxy_rs).
 
 ## Build and run
 
@@ -59,6 +54,9 @@ action = deny
   in the name length, whatever the pattern.
 - `target_host` can use `$1` / `${1}` for capture groups; `$0` is the whole
   SNI. A reference to a group that doesn't exist is rejected at load time.
+- The port is always separate: `target_host` is a name or an IP address (IPv6
+  without brackets) and the port goes in `target_port`. `target_host =
+  10.0.0.1:8080` is rejected at load time.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
   `access_denied` alert. `target_port` defaults to 443.
 - `pattern = NONE` (any letter case) matches only clients that send **no SNI**,
@@ -87,8 +85,8 @@ with its default, and a test keeps that file in step with the code:
 | `stats_interval`       | 60      | log a one-line state summary every N seconds; 0 = never              |
 | `short_read_delay_us`  | 0       | pause N µs after a short read so data batches up. Measured in Go: a few percent more throughput at best, +37 µs (50) or +210 µs (200) per round trip, so leave it off unless your box shows otherwise |
 
-`io_model` and `worker_threads` from the Rust version
-are accepted and ignored (with a log line), so the same file works for both.
+The legacy keys `io_model` and `worker_threads` are accepted and ignored (with
+a log line), so older config files keep loading.
 All options, by section, with a complete example in
 [`samples/12-everything.toml`](samples/12-everything.toml) (a test fails if an
 option is missing from it, from `config.toml` or from this README):
@@ -96,7 +94,7 @@ option is missing from it, from `config.toml` or from this README):
 | section | options |
 |---|---|
 | `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
-| `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `upstream_tls` `upstream_tls_verify` `upstream_sni` |
+| `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `upstream_tls` `upstream_tls_verify` `upstream_sni` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | `[console]` | `listen` `port` `password` `password_hash` `hostnames` |
 
@@ -154,7 +152,8 @@ target_host = 192.168.1.40
 | per rule | default | meaning |
 |---|---|---|
 | `cert` | (none) | `auto`: issue and renew via ACME. `<dir>`: use `cert.pem` + `key.pem` (+ `ca.pem`) from that directory; must exist at startup, re-read when the files change. None: pass through |
-| `cert_domains` | from a literal pattern | exact names to issue; required when `pattern` is a regex (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
+| `cert_domains` | from a literal pattern | exact names to issue, separated by `,` or `;`. Required when `pattern` is a regex, unless a `cert_validate_script` decides (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
+| `cert_validate_script` | (none) | decides about names that match the pattern but are not in `cert_domains`; see below. Must exist and be executable at start-up and on reload |
 | `upstream_tls` | true | speak TLS to the target; `false` = plaintext |
 | `upstream_tls_verify` | true | verify the target's certificate against the system roots |
 | `upstream_sni` | the client's SNI | name sent to the target as SNI, and the name its certificate is verified against. The default passes the client's name through, so a target that routes or selects certificates by SNI works even when `target_host` is an IP address |
@@ -170,6 +169,49 @@ target_host = 192.168.1.40
 | `public_ip_address` | (none) | `;`-separated. A name is only sent to the CA if it publicly resolves to one of these; without it the check is skipped (with a warning) |
 | `dns_resolvers` | 1.1.1.1; 8.8.8.8 | resolvers for that check; deliberately not the local one, which may return LAN addresses |
 
+**Names decided by a script.** When the names are not known in advance
+(customer subdomains, say), let a script decide per name:
+
+```toml
+[[host]]
+pattern = (.*)\.customers\.example\.com
+cert = auto
+cert_domains = www.customers.example.com        # optional: always issued, never put to the script
+cert_validate_script = /usr/local/etc/tlsproxy/domains.sh
+target_host = 192.168.1.50
+```
+
+```sh
+#!/bin/sh
+# domains.sh <name>: exit 0 = issue a certificate for it, anything else = don't
+grep -qxF "$1" /usr/local/etc/tlsproxy/customers.txt
+```
+
+- The script is run as `<script> <name>`, without a shell, and only with names
+  that are valid host names matching the rule. Exit status 0 accepts the name;
+  any other status refuses it. It is killed after 20 seconds, and no answer
+  (killed, or it could not be started) counts as a refusal.
+- **It runs only when a certificate has to be issued or renewed**: the first
+  time a client asks for a name that has no certificate, and again each time
+  that certificate comes up for renewal. Never per connection, and not after a
+  restart for names whose certificate in `cert_path` is still good.
+- Connections are never held up by it. The script runs in the background;
+  until the certificate is there clients get the placeholder. Up to 4 names
+  are handled at once, so the script may run up to 4 times in parallel, but
+  never twice at the same time for the same name.
+- A refused new name is not asked about again for 10 minutes (or until the
+  config is reloaded). A refused **renewal** keeps the current certificate in
+  use until it expires and asks again every 6 hours.
+- Every decision is logged with the script's exit status, run time and the
+  first 300 bytes of its output, so print the reason:
+  `cert: x.customers.example.com: REFUSED by cert_validate_script /usr/.../domains.sh (exit status 1 in 12ms, output "unknown customer"); no certificate is requested ...`
+  and `ACCEPTED by cert_validate_script ... (exit status 0 in 9ms); requesting the certificate`.
+- Accepted names appear on the console's Certificates page like any other.
+- At most 64 names wait for a decision at a time; the DNS pre-check and the
+  3-tries-then-6-hours schedule apply to accepted names as usual. The script
+  runs as the proxy's user, so whoever can edit the config (the console
+  included) can run commands as that user.
+
 How it works:
 
 - **TLS-ALPN-01 only.** The CA connects to the name on public port 443 with
@@ -183,9 +225,11 @@ How it works:
   untouched: always for pass-through rules, and for terminating rules too when
   `upstream_tls = true` (normal traffic for that name is still terminated
   here). With a plaintext upstream nobody could answer, so it is refused.
-- **One job at a time, urgent first.** At startup and every 10 minutes: names
-  with no or an expired certificate first, then renewals by due date. A
-  failure is retried after 6 hours. Certificates found in `cert_path` are
+- **Urgent first, up to 4 names at once.** At startup and every 10 minutes:
+  names with no or an expired certificate first, then renewals by due date.
+  Names don't depend on each other, so a slow one (a hanging validation, a
+  slow script) doesn't hold up the rest; one name never has two jobs running
+  at the same time. A failure is retried after 6 hours. Certificates found in `cert_path` are
   reused after a restart.
 - **Three quick tries, then six hours.** Each job is attempted up to 3 times,
   5 seconds apart, to ride out temporary failures. Two kinds of failure are
@@ -413,19 +457,17 @@ idle time and the state of each direction (`open` / `half-closed`).
 
 ## Performance
 
-Measured with the Rust repo's benchmark (`--proxy ./tlsproxy`) on an Apple M3
-Max, client, backend and proxy sharing the machine:
+Measured on an Apple M3 Max, client, backend and proxy sharing the machine:
 
-| | Go (this) | Rust, event loop | Rust, threads |
-|---|---|---|---|
-| 64-byte round trip, added (p50) | +20 µs | +19 µs | +15 µs |
-| connect + ClientHello, added (p50) | **+111 µs** | +197 µs | +165 µs |
-| new connections/s (32 parallel) | **9,800** | 5,300 | 6,300 |
-| 1-stream throughput | 630–1,070 MiB/s (run to run) | 730 MiB/s | 588 MiB/s |
-| proxy CPU per GiB relayed | 0.6–1.0 s | 0.4–0.55 s | 0.5–0.75 s |
-| memory with 2,000 open connections | 121 MiB (~50 KiB each) | 3.9 MiB | 130 MiB |
-| binary | 2.7 MB static | 0.4 MB | 0.4 MB |
+| | |
+|---|---|
+| 64-byte round trip, added (p50) | +20 µs |
+| connect + ClientHello, added (p50) | +111 µs |
+| new connections/s (32 parallel) | 9,800 |
+| 1-stream throughput | 630–1,070 MiB/s (run to run) |
+| proxy CPU per GiB relayed | 0.6–1.0 s |
+| memory with 2,000 open connections | 121 MiB (~50 KiB each) |
+| binary | 2.7 MB static |
 
-Go is the quickest at setting up connections and somewhat more expensive per
-byte; at gateway speeds (1 Gbit/s ≈ 0.12 CPU-seconds per second) neither
-matters. Lower `buffer_size` if memory is tight.
+At gateway speeds (1 Gbit/s ≈ 0.12 CPU-seconds per second) the per-byte cost
+does not matter. Lower `buffer_size` if memory is tight.

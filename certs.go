@@ -9,11 +9,18 @@ package main
 //                  "acme-tls/1" and we answer with a special self-signed
 //                  certificate. No port 80 involved.
 //
-// Issuance runs one job at a time in a background goroutine: names with no
-// (or an expired) certificate first, renewals after. A failed name is retried
-// after certRetryInterval. Before ordering, the name must resolve (via public
+// Issuance runs in the background: names with no (or an expired) certificate
+// first, renewals after. Names are independent of each other, so up to
+// maxParallelJobs run at once; one name never has two jobs at a time. A failed
+// name is retried after certRetryInterval. Before ordering, the name must resolve (via public
 // resolvers, not the local one, which may be split-horizon) to one of
 // public_ip_address, so misconfigured names don't burn the CA's rate limits.
+//
+// A rule's names are those in cert_domains. With cert_validate_script, other
+// names matching the rule's pattern can earn a certificate too: the script is
+// run as `<script> <name>` and exit status 0 accepts the name. It is asked only
+// when a certificate has to be issued or renewed, never per connection and not
+// for a name whose certificate on disk is still good.
 
 import (
 	"context"
@@ -31,7 +38,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +53,17 @@ const (
 	certRetryInterval = 6 * time.Hour
 	certCheckInterval = 10 * time.Minute
 	certJobTimeout    = 5 * time.Minute
+
+	maxParallelJobs = 4 // names being validated / issued at the same time
+
+	maxCandidates = 64   // names waiting for the script; they come from clients
+	maxRejected   = 1024 // remembered refusals; likewise
+)
+
+// Overridable in tests.
+var (
+	validateScriptTimeout = 20 * time.Second // then the script is killed
+	validateRejectTTL     = 10 * time.Minute // a refused name is not asked about again for this long
 )
 
 // Each job is tried this many times, this far apart, to ride out temporary
@@ -77,8 +97,17 @@ type CertManager struct {
 	nextTry      map[string]time.Time
 	lastError    map[string]string // why a name is waiting for its next attempt
 	announced    map[string]string // last status logged per name, to log changes only
-	wake         chan struct{}
-	started      bool
+
+	// Names decided by a rule's cert_validate_script rather than cert_domains.
+	dynamic    map[string]bool      // accepted: managed like a cert_domains name
+	candidates map[string]bool      // requested by a client, no usable certificate, script not asked yet
+	rejected   map[string]time.Time // refused by the script; not asked again before this time
+	queueFull  time.Time            // when "too many candidates" was last logged
+
+	inFlight  map[string]bool // names with a job running: the per-name guard
+	accountMu sync.Mutex      // the ACME account key is shared by all jobs: create it once
+	wake      chan struct{}
+	started   bool
 
 	// Overridable in tests.
 	issueFunc     func(ctx context.Context, cfg *Config, domain string) error
@@ -95,6 +124,10 @@ func NewCertManager() *CertManager {
 		nextTry:       map[string]time.Time{},
 		lastError:     map[string]string{},
 		announced:     map[string]string{},
+		dynamic:       map[string]bool{},
+		candidates:    map[string]bool{},
+		rejected:      map[string]time.Time{},
+		inFlight:      map[string]bool{},
 		wake:          make(chan struct{}, 1),
 		retryInterval: certRetryInterval,
 		checkInterval: certCheckInterval,
@@ -110,8 +143,33 @@ func (m *CertManager) Apply(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	if err := checkScripts(cfg); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	m.cfg, m.files = cfg, loaded
+	// The rules or the script may have changed: forget refusals, and let go of
+	// accepted names that no rule with a script covers any more.
+	m.rejected = map[string]time.Time{}
+	for d := range m.dynamic {
+		if scriptFor(cfg, d) == "" {
+			delete(m.dynamic, d)
+		}
+	}
+	for d := range m.candidates {
+		if scriptFor(cfg, d) == "" {
+			delete(m.candidates, d)
+		}
+	}
+	// Certificates issued earlier for script-accepted names are picked up
+	// again after a restart, so they keep being renewed.
+	if entries, err := os.ReadDir(cfg.CertPath); err == nil {
+		for _, e := range entries {
+			if d := e.Name(); e.IsDir() && !m.dynamic[d] && scriptFor(cfg, d) != "" {
+				m.candidates[d] = true
+			}
+		}
+	}
 	m.mu.Unlock()
 	for _, d := range cfg.AutoDomains() {
 		m.loadAutoFromDisk(cfg, d)
@@ -127,8 +185,99 @@ func (m *CertManager) Apply(cfg *Config) error {
 // Check reports whether cfg's directory certificates can be loaded, without
 // changing anything (the console validates unsaved text with it).
 func (m *CertManager) Check(cfg *Config) error {
-	_, err := loadDirCerts(cfg)
-	return err
+	if _, err := loadDirCerts(cfg); err != nil {
+		return err
+	}
+	return checkScripts(cfg)
+}
+
+// checkScripts makes sure every cert_validate_script is there and executable.
+func checkScripts(cfg *Config) error {
+	for i := range cfg.Rules {
+		script := cfg.Rules[i].CertValidateScript
+		if script == "" {
+			continue
+		}
+		st, err := os.Stat(script)
+		if err == nil && (st.IsDir() || st.Mode()&0o111 == 0) {
+			err = errors.New("not an executable file")
+		}
+		if err != nil {
+			return fmt.Errorf("[[host]] at line %d: cert_validate_script = %s: %w", cfg.Rules[i].Line, script, err)
+		}
+	}
+	return nil
+}
+
+// scriptFor returns the cert_validate_script in charge of a name: the name is
+// routed to a cert = auto rule that has one and does not list it in
+// cert_domains. "" otherwise.
+func scriptFor(cfg *Config, domain string) string {
+	if !validDomain(domain) || domain[0] == '-' { // never hand the script something that looks like an option
+		return ""
+	}
+	d := cfg.Route(domain)
+	if d.Rule == nil || d.Rule.Cert != "auto" || slices.Contains(d.Rule.CertDomains, domain) {
+		return ""
+	}
+	return d.Rule.CertValidateScript
+}
+
+// managedLocked lists every name with an automatic certificate: those from
+// cert_domains, then those a script accepted.
+func (m *CertManager) managedLocked(cfg *Config) []string {
+	out := cfg.AutoDomains()
+	var extra []string
+	for d := range m.dynamic {
+		if !slices.Contains(out, d) {
+			extra = append(extra, d)
+		}
+	}
+	sort.Strings(extra)
+	return append(out, extra...)
+}
+
+// runValidateScript asks a cert_validate_script about one name. Exit status 0
+// accepts it. detail describes the outcome for the log; err is set when the
+// script could not give an answer at all (which counts as a refusal).
+func runValidateScript(script, domain string) (accepted bool, detail string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), validateScriptTimeout)
+	defer cancel()
+	start := time.Now()
+	out := &cappedBuffer{max: 300}
+	cmd := exec.CommandContext(ctx, script, domain)
+	cmd.Stdout, cmd.Stderr = out, out
+	cmd.WaitDelay = 2 * time.Second // a child holding the pipes open can't stall us
+	runErr := cmd.Run()
+	said := ""
+	if text := strings.Join(strings.Fields(string(out.b)), " "); text != "" {
+		said = fmt.Sprintf(", output %q", text)
+	}
+	took := humanDuration(time.Since(start))
+	var exit *exec.ExitError
+	switch {
+	case runErr == nil:
+		return true, fmt.Sprintf("exit status 0 in %s%s", took, said), nil
+	case ctx.Err() != nil:
+		return false, "", fmt.Errorf("no answer within %s%s", humanDuration(validateScriptTimeout), said)
+	case errors.As(runErr, &exit) && exit.ExitCode() > 0:
+		return false, fmt.Sprintf("exit status %d in %s%s", exit.ExitCode(), took, said), nil
+	default:
+		return false, "", fmt.Errorf("%v%s", runErr, said)
+	}
+}
+
+// cappedBuffer keeps the first max bytes written to it.
+type cappedBuffer struct {
+	b   []byte
+	max int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.max - len(c.b); room > 0 {
+		c.b = append(c.b, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
 }
 
 func loadDirCerts(cfg *Config) (map[string]*fileCert, error) {
@@ -198,8 +347,14 @@ func (m *CertManager) loadAutoFromDisk(cfg *Config, domain string) {
 func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, error) {
 	m.mu.RLock()
 	var cert *tls.Certificate
+	propose := false
 	if rule.Cert == "auto" {
 		cert = m.auto[sni]
+		// A name only the rule's script can vouch for, seen for the first time.
+		// The connection is not held up: the worker asks the script, and
+		// clients get the placeholder until a certificate is there.
+		propose = cert == nil && rule.CertValidateScript != "" && !slices.Contains(rule.CertDomains, sni) &&
+			!m.dynamic[sni] && !m.candidates[sni] && time.Now().After(m.rejected[sni])
 	} else if fc := m.files[rule.Cert]; fc != nil {
 		cert = fc.cert
 	}
@@ -207,6 +362,9 @@ func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, 
 		cert = m.placeholders[sni]
 	}
 	m.mu.RUnlock()
+	if propose {
+		m.propose(sni)
+	}
 	if cert != nil {
 		return cert, nil
 	}
@@ -225,6 +383,31 @@ func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, 
 	m.placeholders[sni] = ph
 	m.mu.Unlock()
 	return ph, nil
+}
+
+// propose queues a client-requested name for the rule's cert_validate_script.
+func (m *CertManager) propose(sni string) {
+	m.mu.Lock()
+	cfg := m.cfg
+	switch {
+	case cfg == nil || scriptFor(cfg, sni) == "":
+		m.mu.Unlock()
+		return
+	case len(m.candidates) >= maxCandidates:
+		if time.Since(m.queueFull) > time.Minute {
+			m.queueFull = time.Now()
+			errorf("cert: %s: %d names are already waiting for a cert_validate_script decision; this one is not queued (it is considered again when it is next requested)", sni, maxCandidates)
+		}
+		m.mu.Unlock()
+		return
+	}
+	m.candidates[sni] = true
+	m.mu.Unlock()
+	logf("cert: %s: requested by a client, not in cert_domains and no certificate yet; cert_validate_script %s will be asked", sni, scriptFor(cfg, sni))
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Challenge returns the pending TLS-ALPN-01 answer for a name, if any.
@@ -277,6 +460,29 @@ type certJob struct {
 	due    time.Time
 }
 
+// adoptCandidates settles candidates that need no decision: a name whose
+// certificate on disk is still good becomes managed without asking the script
+// (it is asked at renewal), and one no script covers any more is dropped. The
+// rest stay candidates and become urgent jobs.
+func (m *CertManager) adoptCandidates(cfg *Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for d := range m.candidates {
+		if scriptFor(cfg, d) == "" {
+			delete(m.candidates, d)
+			continue
+		}
+		fc, err := loadDirCert(autoDir(cfg, d))
+		if err != nil || time.Now().After(fc.cert.Leaf.NotAfter) {
+			continue
+		}
+		m.auto[d], m.dynamic[d] = fc.cert, true
+		delete(m.candidates, d)
+		delete(m.placeholders, d)
+		logf("cert: %s: certificate found in %s, issued earlier with the approval of cert_validate_script; the script is asked again when it is due for renewal", d, autoDir(cfg, d))
+	}
+}
+
 // pendingJobs lists what needs doing now: urgent names first, then renewals
 // by due date.
 func (m *CertManager) pendingJobs(now time.Time) []certJob {
@@ -286,8 +492,13 @@ func (m *CertManager) pendingJobs(now time.Time) []certJob {
 		return nil
 	}
 	var jobs []certJob
-	for _, d := range m.cfg.AutoDomains() {
-		if now.Before(m.nextTry[d]) {
+	candidates := make([]string, 0, len(m.candidates))
+	for d := range m.candidates {
+		candidates = append(candidates, d)
+	}
+	sort.Strings(candidates)
+	for _, d := range append(m.managedLocked(m.cfg), candidates...) {
+		if m.inFlight[d] || now.Before(m.nextTry[d]) {
 			continue
 		}
 		c := m.auto[d]
@@ -331,7 +542,7 @@ func (m *CertManager) announce(cfg *Config, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := map[string]bool{}
-	for _, d := range cfg.AutoDomains() {
+	for _, d := range m.managedLocked(cfg) {
 		current[d] = true
 		status := certStatus(m.auto[d], cfg.ExpiryThresholdDays, now)
 		key := strings.SplitN(status, "(", 2)[0] // ignore the day counter
@@ -360,16 +571,45 @@ func (m *CertManager) worker() {
 		cfg := m.cfg
 		m.mu.RUnlock()
 		if cfg != nil {
+			m.adoptCandidates(cfg)
 			m.announce(cfg, time.Now())
 		}
+		// Most urgent first, as many as there are free slots. A finished job
+		// wakes this loop, which then starts whatever is next.
 		for _, job := range m.pendingJobs(time.Now()) {
-			m.runJob(cfg, job)
+			if !m.startJob(cfg, job) {
+				break
+			}
 		}
 		select {
 		case <-m.wake:
 		case <-time.After(m.checkInterval):
 		}
 	}
+}
+
+// startJob runs a job in its own goroutine. False if every slot is taken.
+func (m *CertManager) startJob(cfg *Config, job certJob) bool {
+	m.mu.Lock()
+	if len(m.inFlight) >= maxParallelJobs {
+		m.mu.Unlock()
+		return false
+	}
+	m.inFlight[job.domain] = true // pendingJobs skips it until the job is done
+	m.mu.Unlock()
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.inFlight, job.domain)
+			m.mu.Unlock()
+			select {
+			case m.wake <- struct{}{}:
+			default:
+			}
+		}()
+		m.runJob(cfg, job)
+	}()
+	return true
 }
 
 // runJob issues or renews one name: up to certAttempts tries a few seconds
@@ -379,6 +619,9 @@ func (m *CertManager) runJob(cfg *Config, job certJob) {
 	previous := m.lastError[job.domain]
 	current := m.auto[job.domain]
 	m.mu.RUnlock()
+	if !slices.Contains(cfg.AutoDomains(), job.domain) && !m.scriptAllows(cfg, job, current) {
+		return
+	}
 	what := "issuing a new certificate"
 	if !job.urgent {
 		what = "renewing"
@@ -429,6 +672,62 @@ func (m *CertManager) runJob(cfg *Config, job certJob) {
 	}
 	errorf("cert: %s: giving up for now; next attempt at %s (in %s); %s", job.domain,
 		next.UTC().Format("2006-01-02T15:04Z"), humanDuration(m.retryInterval), serving)
+}
+
+// scriptAllows asks the rule's cert_validate_script whether a name that is not
+// in cert_domains may get (or renew) its certificate, and logs the answer.
+func (m *CertManager) scriptAllows(cfg *Config, job certJob, current *tls.Certificate) bool {
+	domain := job.domain
+	script := scriptFor(cfg, domain)
+	usable := current != nil && current.Leaf != nil && time.Now().Before(current.Leaf.NotAfter)
+	why := "a new certificate is needed"
+	if !job.urgent {
+		why = "its certificate is due for renewal"
+	} else if current != nil {
+		why = "its certificate has expired"
+	}
+	if script == "" { // the config changed under us
+		m.mu.Lock()
+		delete(m.candidates, domain)
+		delete(m.dynamic, domain)
+		m.mu.Unlock()
+		logf("cert: %s: no rule with a cert_validate_script covers this name any more; nothing is requested", domain)
+		return false
+	}
+	logf("cert: %s: %s; asking cert_validate_script: %s %s", domain, why, script, domain)
+	accepted, detail, err := runValidateScript(script, domain)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if accepted {
+		delete(m.candidates, domain)
+		m.dynamic[domain] = true
+		logf("cert: %s: ACCEPTED by cert_validate_script %s (%s); requesting the certificate", domain, script, detail)
+		return true
+	}
+	if err != nil {
+		errorf("cert: %s: cert_validate_script %s gave no answer, which counts as a refusal: %v", domain, script, err)
+		detail = err.Error()
+	}
+	if usable {
+		// Still serving a good certificate: keep it, ask again later.
+		next := time.Now().Add(m.retryInterval)
+		m.nextTry[domain], m.lastError[domain] = next, "not renewed: refused by cert_validate_script ("+detail+")"
+		errorf("cert: %s: REFUSED by cert_validate_script %s (%s); the certificate is NOT renewed. The current one stays in use until %s; the script is asked again at %s",
+			domain, script, detail, current.Leaf.NotAfter.UTC().Format("2006-01-02"), next.UTC().Format("2006-01-02T15:04Z"))
+		return false
+	}
+	delete(m.candidates, domain)
+	delete(m.dynamic, domain)
+	delete(m.auto, domain)
+	delete(m.nextTry, domain)
+	delete(m.lastError, domain)
+	if len(m.rejected) >= maxRejected {
+		m.rejected = map[string]time.Time{}
+	}
+	m.rejected[domain] = time.Now().Add(validateRejectTTL)
+	errorf("cert: %s: REFUSED by cert_validate_script %s (%s); no certificate is requested and clients get the self-signed placeholder. The script is asked again if the name is requested after %s, or after a config reload",
+		domain, script, detail, humanDuration(validateRejectTTL))
+	return false
 }
 
 // refreshFileCerts re-reads cert = <dir> certificates whose files changed.
@@ -495,6 +794,8 @@ func (m *CertManager) acmeClient(cfg *Config) (*acme.Client, error) {
 	dir := filepath.Join(cfg.CertPath, "_account")
 	keyFile := filepath.Join(dir, "account.key")
 	var key crypto.Signer
+	m.accountMu.Lock() // two first-ever jobs must not each create a key
+	defer m.accountMu.Unlock()
 	if data, err := os.ReadFile(keyFile); err == nil {
 		block, _ := pem.Decode(data)
 		if block == nil {
@@ -753,6 +1054,11 @@ func (m *CertManager) Snapshot() []CertInfo {
 			lines[k] = append(lines[k], r.Line)
 		}
 	}
+	for _, d := range m.managedLocked(m.cfg) { // names accepted by a script
+		if _, seen := lines[d]; !seen {
+			order, lines[d] = append(order, d), []int{m.cfg.Route(d).RuleLine}
+		}
+	}
 	var out []CertInfo
 	for _, k := range order {
 		info := CertInfo{RuleLines: lines[k]}
@@ -770,6 +1076,9 @@ func (m *CertManager) Snapshot() []CertInfo {
 			c := m.auto[k]
 			fill(&info, c)
 			info.Detail = certStatus(c, m.cfg.ExpiryThresholdDays, now)
+			if m.dynamic[k] {
+				info.Detail += "; accepted by cert_validate_script"
+			}
 			if c != nil && c.Leaf != nil {
 				info.RenewFrom = day(renewAt(c.Leaf, m.cfg.ExpiryThresholdDays))
 			}
@@ -791,9 +1100,7 @@ func (m *CertManager) RetryNow(domain string) bool {
 	m.mu.Lock()
 	known := false
 	if m.cfg != nil {
-		for _, d := range m.cfg.AutoDomains() {
-			known = known || d == domain
-		}
+		known = slices.Contains(m.managedLocked(m.cfg), domain)
 	}
 	if known {
 		delete(m.nextTry, domain)

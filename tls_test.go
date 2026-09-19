@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -622,5 +623,60 @@ func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
 	}
 	if !strings.Contains(testLog.String(), "passed through untouched to the TLS upstream") {
 		t.Error("the pass-through decision should be logged")
+	}
+}
+
+// Names are independent: several jobs run at once, but never two for one name.
+func TestCertificateJobsRunInParallelPerName(t *testing.T) {
+	names := []string{"a.par.test", "b.par.test", "c.par.test", "d.par.test", "e.par.test", "f.par.test"}
+	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n[[host]]\npattern=.*\\.par\\.test\ncert=auto\ncert_domains=%s\ntarget_host=x.lan\n",
+		t.TempDir(), strings.Join(names, ",")))
+	m := NewCertManager()
+	var mu sync.Mutex
+	running, peak, done := map[string]int{}, 0, map[string]int{}
+	m.issueFunc = func(_ context.Context, _ *Config, domain string) error {
+		mu.Lock()
+		running[domain]++
+		if running[domain] > 1 {
+			t.Errorf("%s: two jobs at the same time", domain)
+		}
+		peak = max(peak, len(running))
+		mu.Unlock()
+		time.Sleep(150 * time.Millisecond)
+		nb := time.Now()
+		m.mu.Lock()
+		m.auto[domain] = &tls.Certificate{Leaf: &x509.Certificate{NotBefore: nb, NotAfter: nb.Add(90 * 24 * time.Hour)}}
+		m.mu.Unlock()
+		mu.Lock()
+		delete(running, domain)
+		done[domain]++
+		mu.Unlock()
+		return nil
+	}
+	if err := m.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	m.Start()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		mu.Lock()
+		n := len(done)
+		mu.Unlock()
+		if n == len(names) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d names issued", n, len(names))
+		}
+	}
+	time.Sleep(300 * time.Millisecond) // a wrongly repeated job would show up now
+	mu.Lock()
+	defer mu.Unlock()
+	if peak != maxParallelJobs {
+		t.Errorf("peak concurrency %d, want %d", peak, maxParallelJobs)
+	}
+	for _, d := range names {
+		if done[d] != 1 {
+			t.Errorf("%s issued %d times", d, done[d])
+		}
 	}
 }

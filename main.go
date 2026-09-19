@@ -1,6 +1,7 @@
-// tlsproxy: SNI-routing TLS pass-through proxy. It peeks at the ClientHello,
-// picks a backend from config.toml and relays the raw (still encrypted)
-// stream. No TLS termination. Standard library only.
+// tlsproxy: SNI-routing TLS proxy. It peeks at the ClientHello, picks a
+// backend from config.toml and relays the raw (still encrypted) stream. Per
+// rule it can terminate TLS instead, with certificates from ACME or a
+// directory. Standard library plus the vendored golang.org/x/crypto/acme.
 package main
 
 import (

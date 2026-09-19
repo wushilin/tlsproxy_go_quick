@@ -269,7 +269,7 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 	}
 }
 
-func TestConfigIgnoresRustOnlyKeys(t *testing.T) {
+func TestConfigIgnoresLegacyKeys(t *testing.T) {
 	c := mustParse(t, "[global]\nport=1\nio_model=events\nworker_threads=4\nshort_read_delay_us=50\n")
 	if c.ShortReadDelay != 50*time.Microsecond {
 		t.Fatal(c.ShortReadDelay)
@@ -286,7 +286,9 @@ func TestConfigErrors(t *testing.T) {
 		"[global]\nport=1\n[other]\n", "[global]\nport=1\nfoo=bar\n", "[global]\nport=1\nnovalue\n", "[global\nport=1\n",
 		"[global]\nport=1\nbuffer_size=100\n", "[global]\nport=1\nbuffer_size=99999999\n",
 		"[global]\nport=1\nreload_interval=1\n", "[global]\nport=1\nreload_interval=4\n",
-		"[global]\nport=1\n[[host]]\npattern=a\n", // allow without target
+		"[global]\nport=1\n[[host]]\npattern=a\n",                            // allow without target
+		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=10.0.0.1:8080\n", // the port belongs in target_port
+		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=[::1]:443\n", "[global]\nport=1\n[[host]]\npattern=(.*)\ntarget_host=$1:8080\n",
 		"[global]\nport=1\n[[host]]\npattern=a\naction=nope\n",
 		"[global]\nport=1\n[[host]]\npattern=\"abc\n", "[global]\nport=1\n[[host]]\npattern='abc\n",
 		"[global]\nport=1\n[[host]]\npattern=\"a\" junk\n",

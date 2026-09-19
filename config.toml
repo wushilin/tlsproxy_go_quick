@@ -70,8 +70,8 @@ port = 443                      # (required) listen port
 #                               #   not rotate again, the live file just grows past max_size.
 
 # --- Compatibility ---------------------------------------------------------------
-# io_model and worker_threads belong to the Rust version (tlsproxy_rs_quick). They
-# are accepted here and ignored (with a log line), so one file works for both.
+# io_model and worker_threads are legacy keys. They are accepted and ignored
+# (with a log line), so older config files keep loading.
 
 # --- Web console (optional) ---------------------------------------------------
 # Dashboard, connections, certificates, log and a config editor on its own port,
@@ -99,10 +99,15 @@ port = 443                      # (required) listen port
 #
 # TLS termination (optional; without cert the TLS stream is passed through untouched):
 # cert        auto       issue and renew through ACME with TLS-ALPN-01 (the CA connects to public
-#                        port 443; no port 80 needed). A regex pattern also needs cert_domains.
+#                        port 443; no port 80 needed). A regex pattern also needs cert_domains
+#                        and/or cert_validate_script.
 #             <dir>      use <dir>/cert.pem (leaf + chain) and <dir>/key.pem, plus optional ca.pem;
 #                        re-read when the files change. Must exist at startup.
 # cert_domains           names to issue, e.g. a.example.com, b.example.com (each must match pattern)
+# cert_validate_script   decides about names that match pattern but are not in cert_domains:
+#                        run as `<script> <name>`, exit 0 = issue a certificate, anything else = don't.
+#                        Only run when a certificate must be issued or renewed (never per connection);
+#                        killed after 20 s, which counts as a refusal. Every decision is logged.
 # upstream_tls           (default: true) connect to the target with TLS; set false for a plaintext target
 # upstream_tls_verify    (default: true) verify the target's certificate against the system roots
 # upstream_sni           the name sent to the target as SNI and checked in its certificate.

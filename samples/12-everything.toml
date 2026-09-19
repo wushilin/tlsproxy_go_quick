@@ -42,7 +42,7 @@ acme_ca_file = /usr/local/etc/ssl/private-ca.pem   # extra root for the ACME ser
 public_ip_address = 203.0.113.7; 2001:db8::1       # only ask the CA for names resolving to one of these
 dns_resolvers = 9.9.9.9; 1.1.1.1:53                # resolvers for that check (host or host:port)
 
-# Accepted for compatibility with the Rust version's files, and ignored:
+# Legacy keys, accepted so older config files keep loading, and ignored:
 io_model = events
 worker_threads = 4
 
@@ -89,6 +89,19 @@ cert_domains = www.example.com, blog.example.com
 target_host = 192.168.1.30
 target_port = 8080
 upstream_tls = false               # plaintext upstream: only http/1.1 is offered to clients
+
+# Terminate TLS for names that are not known in advance: a script decides, per
+# name, whether a certificate is requested. Run as `<script> <name>` when a
+# certificate has to be issued or renewed; exit 0 accepts, anything else refuses
+# (so does no answer within 20 s). cert_domains may be given as well: listed
+# names are never put to the script.
+[[host]]
+pattern = (.*)\.customers\.example\.com
+cert = auto
+cert_validate_script = /usr/local/etc/tlsproxy/domains.sh
+target_host = 192.168.1.50
+target_port = 8080
+upstream_tls = false
 
 # Terminate TLS with your own certificate: <dir>/cert.pem (leaf + chain),
 # <dir>/key.pem and optionally <dir>/ca.pem; re-read when cert.pem changes.
