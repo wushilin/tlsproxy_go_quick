@@ -773,19 +773,27 @@ func checkDNS(ctx context.Context, cfg *Config, domain string) error {
 			lastErr = err
 			continue
 		}
-		var got []string
+		// Every address must be ours, A and AAAA alike: the CA picks one itself
+		// and prefers IPv6, so a stray AAAA record fails the validation even
+		// when the A record is right.
+		var got, foreign []string
 		for _, a := range addrs {
 			ip := a.Unmap().String()
 			got = append(got, ip)
-			for _, want := range cfg.PublicIPs {
-				if ip == want {
-					logf("cert: %s: DNS pre-check ok (%s via resolver %s)", domain, ip, server)
-					return nil
-				}
+			if !slices.Contains(cfg.PublicIPs, ip) {
+				foreign = append(foreign, ip)
 			}
 		}
-		return permanentError{fmt.Errorf("DNS pre-check: %s resolves to %s, none of which is in public_ip_address (%s); not asking the CA",
-			domain, strings.Join(got, ", "), strings.Join(cfg.PublicIPs, ", "))}
+		if len(foreign) == 0 && len(got) > 0 {
+			logf("cert: %s: DNS pre-check ok (%s via resolver %s)", domain, strings.Join(got, ", "), server)
+			return nil
+		}
+		hint := ""
+		if len(foreign) < len(got) {
+			hint = ". The CA may validate against any of the name's addresses and prefers IPv6, so all of them must lead here"
+		}
+		return permanentError{fmt.Errorf("DNS pre-check: %s resolves to %s, of which %s is not in public_ip_address (%s)%s; not asking the CA",
+			domain, strings.Join(got, ", "), strings.Join(foreign, ", "), strings.Join(cfg.PublicIPs, ", "), hint)}
 	}
 	return fmt.Errorf("DNS pre-check: cannot resolve %s: %w", domain, lastErr)
 }

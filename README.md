@@ -136,6 +136,30 @@ Samples, each with its expected routing checked by `go test`:
 | [`12-everything`](samples/12-everything.toml) | every option, annotated |
 | [`13-rule-precedence`](samples/13-rule-precedence.toml) | literal, wildcard (`*`, `**`), regex and catch-all rules written broadest first, and which one wins |
 
+## IPv6
+
+- **Clients.** `bind = ::` listens on IPv6 **and** IPv4 with one socket;
+  `0.0.0.0`, the default, is IPv4 only (enforced: left to itself Go would make
+  it dual-stack); a specific address of either family
+  works too, and `[::]` is accepted as a spelling of `::`. Client addresses are
+  logged as `[2001:db8::5]:49943`, IPv4 clients of a dual-stack listener as
+  plain `10.0.0.5:49943`.
+- **Targets.** `target_host` may be an IPv6 address, written without brackets
+  (`target_host = 2001:db8::10`, or `fe80::1%em0` with its zone for a
+  link-local address); logs show it as `[2001:db8::10]:443`. A host name with
+  both A and AAAA records is dialled with Happy Eyeballs: IPv6 first, IPv4
+  0.3 s later if that has not connected, whichever answers first wins, all
+  within `connect_timeout`.
+- **Certificates.** Let's Encrypt validates over IPv6 when a name has an AAAA
+  record. The DNS pre-check therefore requires **every** address of the name, A
+  and AAAA, to be in `public_ip_address`; a stray AAAA record is reported
+  instead of costing a failed validation. With an IPv6 address in
+  `public_ip_address` and an IPv4-only `bind`, a warning tells you the CA could
+  not reach the proxy. `dns_resolvers` may be IPv6 (`2606:4700:4700::1111`, or
+  `[2606:4700:4700::1111]:53` with a port).
+- The console's `listen` follows the same rules, and its Host check accepts
+  IPv6 literals.
+
 ## TLS termination and automatic certificates
 
 Without `cert`, a rule passes TLS through untouched (the backend keeps its own
@@ -187,7 +211,7 @@ target_host = 192.168.1.40
 | `acme_email` | (none) | contact for the ACME account |
 | `acme_directory` | Let's Encrypt production | use `https://acme-staging-v02.api.letsencrypt.org/directory` while testing |
 | `acme_ca_file` | (none) | extra root for the ACME server's own HTTPS (private CA, Pebble) |
-| `public_ip_address` | (none) | `;`-separated. A name is only sent to the CA if it publicly resolves to one of these; without it the check is skipped (with a warning) |
+| `public_ip_address` | (none) | `;`-separated, IPv4 and IPv6. A name is only sent to the CA if **all** its public addresses (A and AAAA) are among these; without it the check is skipped (with a warning) |
 | `dns_resolvers` | 1.1.1.1; 8.8.8.8 | resolvers for that check; deliberately not the local one, which may return LAN addresses |
 
 **Names decided by a script.** When the names are not known in advance

@@ -1,7 +1,7 @@
 # Listen on all IPv6 (and, depending on OS settings, IPv4) addresses with
 # every tuning knob spelled out. Values may be quoted or bare.
 #
-#> mail.example.com   => ::1:993
+#> mail.example.com   => [::1]:993
 #> x.example.com      => DENY
 
 [global]

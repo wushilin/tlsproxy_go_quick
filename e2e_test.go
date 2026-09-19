@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -659,5 +660,88 @@ func TestStatsTrackConnectionsGoroutinesAndBytes(t *testing.T) {
 		st.BytesUp.Load() != want || st.BytesDown.Load() != want ||
 		st.GoroutinesStarted.Load() != 7 || st.GoroutinesFinished.Load() != 7 {
 		t.Fatalf("%s", st.Summary(p.srv.runtime.Load()))
+	}
+}
+
+// IPv6 on both sides over real sockets: a dual-stack listener (bind = ::) takes
+// IPv4 and IPv6 clients, and targets may be IPv6 addresses or names that
+// resolve to one.
+func TestIPv6DownstreamAndUpstream(t *testing.T) {
+	up, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback here: %v", err)
+	}
+	t.Cleanup(func() { up.Close() })
+	go func() {
+		for {
+			c, err := up.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); io.Copy(c, c) }()
+		}
+	}()
+	port := up.Addr().(*net.TCPAddr).Port
+	cfg := mustParse(t, fmt.Sprintf("[global]\nbind=[::]\nport=1\nstats_interval=0\n"+
+		"[[host]]\npattern=six.test\ntarget_host=::1\ntarget_port=%d\n"+
+		"[[host]]\npattern=*.zone.test\ntarget_host=fe80::1%%lo0\ntarget_port=%d\n", port, port))
+	if cfg.Bind != "::" {
+		t.Fatalf("bind = [::] and bind = :: are the same: %q", cfg.Bind)
+	}
+	// A zoned link-local address is a valid target and keeps its zone.
+	if got := route(t, cfg, "a.zone.test"); got != fmt.Sprintf("[fe80::1%%lo0]:%d", port) {
+		t.Fatal(got)
+	}
+	l, err := net.Listen(listenNetwork(cfg.Bind), net.JoinHostPort(cfg.Bind, "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// bind = 0.0.0.0 means IPv4 only (Go's plain "tcp" would make it dual-stack).
+	v4, err := net.Listen(listenNetwork("0.0.0.0"), "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v4.Close()
+	if c, err := net.DialTimeout("tcp", net.JoinHostPort("::1", strconv.Itoa(v4.Addr().(*net.TCPAddr).Port)), time.Second); err == nil {
+		c.Close()
+		t.Fatal("bind = 0.0.0.0 must not accept IPv6 clients")
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(l, "")
+	t.Cleanup(func() { l.Close() })
+	proxyPort := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	mark := len(testLog.String())
+	for _, client := range []string{"127.0.0.1", "::1"} {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort(client, proxyPort), T)
+		if err != nil {
+			t.Fatalf("%s: the listener should be dual-stack: %v", client, err)
+		}
+		hello := clientHello("six.test")
+		c.Write(hello)
+		c.Write([]byte("ping"))
+		got := make([]byte, len(hello)+4)
+		c.SetReadDeadline(time.Now().Add(T))
+		if _, err := io.ReadFull(c, got); err != nil || string(got[len(hello):]) != "ping" {
+			t.Fatalf("%s: %v %q", client, err, got)
+		}
+		c.Close()
+	}
+	log := ""
+	for deadline := time.Now().Add(T); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if log = testLog.String()[mark:]; strings.Count(log, fmt.Sprintf("-> [::1]:%d ([::1]", port)) == 2 {
+			break
+		}
+	}
+	for _, want := range []string{
+		fmt.Sprintf("route sni=six.test -> [::1]:%d (ALLOW", port), // unambiguous, not ::1:443
+		"accepted from 127.0.0.1:", "accepted from [::1]:",
+		fmt.Sprintf("-> [::1]:%d ([::1]:%d)", port, port),
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log lacks %q\n%s", want, log)
+		}
 	}
 }

@@ -78,7 +78,7 @@ type Console struct {
 }
 
 func (s *Server) startConsole(cfg *ConsoleConfig) error {
-	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Listen, strconv.Itoa(cfg.Port)))
+	ln, err := net.Listen(listenNetwork(cfg.Listen), net.JoinHostPort(cfg.Listen, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		return err
 	}
@@ -542,7 +542,7 @@ func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 			row["kind"], row["pattern"] = d.Rule.Kind.String(), d.Rule.Source
 		}
 		if d.Allow {
-			row["target"] = fmt.Sprintf("%s:%d", d.Host, d.Port)
+			row["target"] = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 			row["terminated"] = d.Rule.Terminates()
 		}
 		results = append(results, row)

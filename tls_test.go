@@ -316,7 +316,7 @@ func TestDirectoryCertificateIsReloadedAndRequiredAtStartup(t *testing.T) {
 }
 
 func TestCertConfigValidation(t *testing.T) {
-	auto := "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\n"
+	auto := "[global]\nbind=::\nport=443\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\n"
 	c := mustParse(t, auto+"[[host]]\npattern=nas\\.example\\.com\ncert=auto\ntarget_host=10.0.0.5\n"+
 		"[[host]]\npattern=(.*)\\.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=$1.lan\n"+
 		"[[host]]\npattern=plain\\.example\\.com\ntarget_host=10.0.0.6\n")
@@ -327,6 +327,10 @@ func TestCertConfigValidation(t *testing.T) {
 	if !r[0].UpstreamTLS || !r[0].UpstreamTLSVerify || r[1].UpstreamTLS || r[2].Terminates() || len(c.Warnings) != 0 ||
 		fmt.Sprint(c.PublicIPs) != "[203.0.113.7 2001:db8::1]" || c.CertPath != "./certs" || c.ExpiryThresholdDays != 15 {
 		t.Fatalf("%+v\n%+v", r, c)
+	}
+	// An IPv6 public address behind an IPv4-only listener: the CA could not get in.
+	if c := mustParse(t, strings.Replace(auto, "bind=::", "bind=0.0.0.0", 1)+"[[host]]\npattern=a.b.com\ncert=auto\ntarget_host=x.lan\n"); len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "listens on IPv4 only") {
+		t.Fatalf("%q", c.Warnings)
 	}
 	c = mustParse(t, "[global]\nport=8443\nacme_agree_tos=true\n[[host]]\npattern=a\\.b\\.com\ncert=auto\ntarget_host=x.lan\n")
 	if len(c.Warnings) != 2 { // not on 443, and no public_ip_address
@@ -382,8 +386,9 @@ func TestRenewalScheduleAndPriority(t *testing.T) {
 	}
 }
 
-// fakeDNS answers every A query with ip (and AAAA with no records).
-func fakeDNS(t *testing.T, ip string) string {
+// fakeDNS answers every A query with ip, and every AAAA query with ip6 if one
+// is given (with no records otherwise).
+func fakeDNS(t *testing.T, ip string, ip6 ...string) string {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -415,6 +420,10 @@ func fakeDNS(t *testing.T, ip string) string {
 				binary.BigEndian.PutUint16(resp[6:], 1)
 				resp = append(resp, 0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
 				resp = append(resp, net.ParseIP(ip).To4()...)
+			} else if binary.BigEndian.Uint16(q[end-4:]) == 28 && len(ip6) > 0 { // type AAAA
+				binary.BigEndian.PutUint16(resp[6:], 1)
+				resp = append(resp, 0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16)
+				resp = append(resp, net.ParseIP(ip6[0]).To16()...)
 			}
 			pc.WriteTo(resp, addr)
 		}
@@ -439,6 +448,16 @@ func TestDNSPreCheckUsesTheConfiguredResolvers(t *testing.T) {
 	}
 	if err := checkDNS(ctx, mustParse(t, "[global]\nport=443\n"), "anything.test"); err != nil {
 		t.Fatalf("no public_ip_address = check skipped: %v", err)
+	}
+	// A and AAAA: the CA prefers IPv6, so a right A record is not enough when
+	// the AAAA record leads elsewhere. Both must be ours.
+	dns = fakeDNS(t, "203.0.113.7", "2001:db8::bad")
+	err = checkDNS(ctx, cfg("203.0.113.7"), "www.example.test")
+	if err == nil || !strings.Contains(err.Error(), "of which 2001:db8::bad is not in public_ip_address") || !strings.Contains(err.Error(), "prefers IPv6") {
+		t.Fatalf("a stray AAAA record must fail the pre-check: %v", err)
+	}
+	if err := checkDNS(ctx, cfg("203.0.113.7; 2001:DB8::BAD"), "www.example.test"); err != nil {
+		t.Fatalf("both addresses listed (in any spelling): %v", err)
 	}
 }
 

@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -162,7 +164,7 @@ func route(t *testing.T, c *Config, sni string) string {
 	case d.Err != "":
 		return "ERROR"
 	case d.Allow:
-		return fmt.Sprintf("%s:%d", d.Host, d.Port)
+		return net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 	}
 	return "DENY"
 }

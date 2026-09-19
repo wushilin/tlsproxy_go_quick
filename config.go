@@ -166,10 +166,13 @@ func (r *Rule) decide(sni string, m []int) Decision {
 	}
 	host, err := expand(r.TargetHost, sni, m)
 	if err == nil {
-		for i := 0; i < len(host); i++ {
-			if !isHostChar(host[i]) && host[i] != ':' {
+		if strings.Contains(host, ":") {
+			// Only an IPv6 address has colons (fe80::1%em0 with its zone included).
+			_, err = netip.ParseAddr(host)
+		}
+		for i := 0; i < len(host) && err == nil && !strings.Contains(host, ":"); i++ {
+			if !isHostChar(host[i]) {
 				err = fmt.Errorf("invalid")
-				break
 			}
 		}
 		if host == "" || err != nil {
@@ -353,6 +356,16 @@ func expand(template, input string, m []int) (string, error) {
 	return out.String(), nil
 }
 
+// listenNetwork makes a listen address mean what it says. Go's "tcp" turns
+// 0.0.0.0 into a dual-stack [::] socket, which would also accept IPv6 clients;
+// an IPv4 address gets "tcp4" instead. "::" stays dual-stack.
+func listenNetwork(addr string) string {
+	if a, err := netip.ParseAddr(addr); err == nil && a.Is4() {
+		return "tcp4"
+	}
+	return "tcp"
+}
+
 // LetsEncryptDirectory is the default ACME directory.
 const LetsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
@@ -453,7 +466,7 @@ func ParseConfig(text string) (*Config, error) {
 		case "global":
 			switch key {
 			case "bind":
-				cfg.Bind = value
+				cfg.Bind = strings.Trim(value, "[]") // [::] and :: are the same thing
 			case "port":
 				if cfg.Port, err = parsePort(value); err != nil {
 					return nil, fail("%v", err)
@@ -531,7 +544,7 @@ func ParseConfig(text string) (*Config, error) {
 		case "console":
 			switch key {
 			case "listen":
-				cfg.Console.Listen = value
+				cfg.Console.Listen = strings.Trim(value, "[]")
 			case "port":
 				if cfg.Console.Port, err = parsePort(value); err != nil {
 					return nil, fail("%v", err)
@@ -686,6 +699,14 @@ func ParseConfig(text string) (*Config, error) {
 	if auto := cfg.AutoDomains(); len(auto) > 0 {
 		if cfg.Port != 443 {
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: the CA validates on public port 443, but this proxy listens on %d; make sure 443 is forwarded here", cfg.Port))
+		}
+		if bind, err := netip.ParseAddr(cfg.Bind); err == nil && bind.Unmap().Is4() {
+			for _, ip := range cfg.PublicIPs {
+				if a, _ := netip.ParseAddr(ip); a.Is6() {
+					cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: public_ip_address lists the IPv6 address %s, but bind = %s listens on IPv4 only. The CA prefers IPv6 when a name has an AAAA record, and would not reach this proxy; use bind = :: to listen on both", ip, cfg.Bind))
+					break
+				}
+			}
 		}
 		if len(cfg.PublicIPs) == 0 {
 			cfg.Warnings = append(cfg.Warnings, "cert = auto without public_ip_address: the DNS pre-check is skipped, so a misconfigured name will burn CA rate limits")

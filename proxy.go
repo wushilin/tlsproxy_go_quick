@@ -73,7 +73,7 @@ func Run(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	l, err := net.Listen("tcp", net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port)))
+	l, err := net.Listen(listenNetwork(cfg.Bind), net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		return err
 	}
@@ -342,7 +342,7 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 		return
 	}
 	dest := net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
-	destDisp := fmt.Sprintf("%s:%d", d.Host, d.Port)
+	destDisp := dest // [2001:db8::1]:443 for an IPv6 target
 	logf("[#%d] route sni=%s -> %s (ALLOW, rule line %d%s)", id, sniDisp, destDisp, d.RuleLine, cached)
 	c.mu.Lock()
 	c.SNI, c.Dst = sni, destDisp
