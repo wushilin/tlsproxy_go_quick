@@ -68,11 +68,11 @@ func main() {
 			case d.Err != "":
 				fmt.Printf("%s -> ERROR %s\n", sni, d.Err)
 			case d.Allow:
-				fmt.Printf("%s -> %s:%d (rule line %d)\n", sni, d.Host, d.Port, d.RuleLine)
+				fmt.Printf("%s -> %s:%d (rule line %d, %s: %s)\n", sni, d.Host, d.Port, d.RuleLine, d.Rule.Kind, d.Rule.Source)
 			case d.RuleLine == 0:
 				fmt.Printf("%s -> DENY (no rule matched)\n", sni)
 			default:
-				fmt.Printf("%s -> DENY (rule line %d)\n", sni, d.RuleLine)
+				fmt.Printf("%s -> DENY (rule line %d, %s: %s)\n", sni, d.RuleLine, d.Rule.Kind, d.Rule.Source)
 			}
 		}
 		return

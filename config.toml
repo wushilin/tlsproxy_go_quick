@@ -89,10 +89,17 @@ port = 443                      # (required) listen port
 # section is hidden from the console's editor and cannot be changed there.
 
 # --- Rules -------------------------------------------------------------------
-# Checked top to bottom; the first match wins; a name matching no rule is denied.
-# pattern     (required) case-insensitive mini regex, must match the WHOLE SNI;
-#             or the literal NONE (any case): only clients that send no SNI.
-#             (for the regex form, a client without SNI is matched as "")
+# The most specific rule wins, wherever it stands in the file; a name matching no
+# rule is denied. All matching ignores case.
+# pattern     (required) one of, in order of precedence:
+#               NONE                 only clients that send no SNI
+#               vq.example.com       a literal name: exact match, always wins
+#               *.example.com        wildcard: * is one label (or part of one: api-*.x.com), so it
+#                                    does not match a.b.example.com; ** is one or more labels.
+#                                    More literal characters win. $1 is what the first * matched
+#               (www|blog)\.x\.com   regular expression (RE2), must match the WHOLE SNI; regexes
+#                                    are tried in file order (a client without SNI is matched as "")
+#               .*                   the catch-all: always last
 # action      (default: allow) allow | deny; deny sends a TLS access_denied alert
 # target_host (required for allow) may use $1 / ${1} for groups, $0 = whole SNI
 # target_port (default: 443)

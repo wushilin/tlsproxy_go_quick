@@ -550,3 +550,80 @@ func TestEveryOptionIsDocumented(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------- rule precedence
+
+func TestPatternKinds(t *testing.T) {
+	for pattern, want := range map[string]ruleKind{
+		"NONE": kindNone, "none": kindNone,
+		"vq.wushilin.net": kindLiteral, `vq\.wushilin\.net`: kindLiteral, "^Archmange.wushilin.net$": kindLiteral, "^none$": kindLiteral, "localhost": kindLiteral,
+		"*.wushilin.net": kindWildcard, "api-*.x.com": kindWildcard, "**.wushilin.net": kindWildcard, "a.*.com": kindWildcard, "*.*.net": kindWildcard,
+		`(.*)\.wushilin\.net`: kindRegex, `.*\.wushilin\.net`: kindRegex, ".*.wushilin.net": kindRegex, `(www|blog)\.x\.com`: kindRegex, "^$": kindRegex, ".+": kindRegex,
+		".*": kindCatchAll, "(.*)": kindCatchAll, "^.*$": kindCatchAll, "*": kindCatchAll, "**": kindCatchAll,
+	} {
+		if got, _, _, _, err := classify(pattern); err != nil || got != want {
+			t.Errorf("%q: got %v (%v), want %v", pattern, got, err, want)
+		}
+	}
+	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=***.x.com\ntarget_host=a\n"); err == nil {
+		t.Error("*** should be rejected")
+	}
+}
+
+func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
+	// Broadest first: under first-match-wins the catch-all would take everything.
+	// The wildcard is a bare value: no quotes are needed after the "=".
+	c := mustParse(t, "[global]\nport=1\n"+
+		"[[host]]\npattern = .*\ntarget_host=catchall\n"+
+		"[[host]]\npattern = (.*)\\.wushilin\\.net\ntarget_host=regex-$1\n"+
+		"[[host]]\npattern = **.wushilin.net\ntarget_host=deep-$1\n"+
+		"[[host]]\npattern = *.wushilin.net   # one label\ntarget_host=wild-$1\n"+
+		"[[host]]\npattern = api-*.wushilin.net\ntarget_host=api-$1\n"+
+		"[[host]]\npattern = \"*.*.example.org\"\ntarget_host=$2-$1\n"+
+		"[[host]]\npattern = VQ.Wushilin.Net\ntarget_host=literal\ntarget_port=8003\n"+
+		"[[host]]\npattern = blocked.wushilin.net\naction=deny\n"+
+		"[[host]]\npattern = none\ntarget_host=nosni\n")
+	for sni, want := range map[string]string{
+		"vq.wushilin.net":      "literal:8003", // 1. a literal always wins
+		"blocked.wushilin.net": "DENY",         //    also when it denies
+		"api-7.wushilin.net":   "api-7:443",    // 2. the longer wildcard wins
+		"a.wushilin.net":       "wild-a:443",   //    * before ** and before the regex
+		"a.a.wushilin.net":     "deep-a.a:443", // 3. * is one label only; ** spans several
+		"wushilin.net":         "catchall:443", //    and a wildcard needs its label
+		"x.y.example.org":      "y-x:443",      //    each * is a capture group
+		"x.com":                "catchall:443", // 4. the catch-all is last
+		"":                     "nosni:443",    // 5. NONE is explicit, and beats the catch-all
+	} {
+		if got := route(t, c, sni); got != want {
+			t.Errorf("%q: got %s, want %s", sni, got, want)
+		}
+	}
+	if d := c.Route("vq.wushilin.net"); d.Rule.Kind != kindLiteral || d.RuleLine != 21 {
+		t.Fatalf("%+v", d)
+	}
+	// Reading the file top to bottom would give other answers: say so, once.
+	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "evaluated by specificity, not file order") ||
+		!strings.Contains(c.Warnings[0], "line 21 (VQ.Wushilin.Net, literal) wins over line 3 (.*, catch-all)") {
+		t.Fatalf("%q", c.Warnings)
+	}
+	// A file already written most specific first gets no such note.
+	if c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=none\ntarget_host=a\n[[host]]\npattern=a.x.com\ntarget_host=a\n"+
+		"[[host]]\npattern=*.x.com\ntarget_host=a\n[[host]]\npattern=(.*)\\.y\\.com\ntarget_host=a\n[[host]]\npattern=b.z.com\ntarget_host=a\n[[host]]\npattern=.*\naction=deny\n"); len(c.Warnings) != 0 {
+		t.Fatalf("%q", c.Warnings)
+	}
+	// Regexes keep their file order among themselves.
+	r := mustParse(t, "[global]\nport=1\n[[host]]\npattern=(a|b)\\.x\\.com\ntarget_host=first\n[[host]]\npattern=(.*)\\.x\\.com\ntarget_host=second\n")
+	if got := route(t, r, "a.x.com"); got != "first:443" {
+		t.Fatal(got)
+	}
+	// Rules that could never match are errors, not surprises.
+	for name, text := range map[string]string{
+		"same literal twice": "[[host]]\npattern=a.x.com\ntarget_host=a\n[[host]]\npattern=^A\\.x\\.com$\naction=deny\n",
+		"two catch-alls":     "[[host]]\npattern=.*\ntarget_host=a\n[[host]]\npattern=*\naction=deny\n",
+		"two NONE rules":     "[[host]]\npattern=NONE\ntarget_host=a\n[[host]]\npattern=none\naction=deny\n",
+	} {
+		if _, err := ParseConfig("[global]\nport=1\n" + text); err == nil {
+			t.Errorf("%s: should be rejected", name)
+		}
+	}
+}

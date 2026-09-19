@@ -34,7 +34,8 @@ pattern = vpn\.home\.example\.com
 target_host = 192.168.1.1
 target_port = 4443
 
-# Never expose the admin UI, even though the next rule would match it.
+# Never expose the admin UI. A literal name always wins, so this holds wherever
+# the rule stands and whatever broader allow rules are added later.
 [[host]]
 pattern = admin\.home\.example\.com
 action = deny

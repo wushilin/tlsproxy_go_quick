@@ -538,6 +538,9 @@ func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 		}
 		d := cfg.Route(name)
 		row := map[string]any{"sni": sni, "allow": d.Allow, "ruleLine": d.RuleLine, "error": d.Err}
+		if d.Rule != nil { // which rule won, and why it outranks the others
+			row["kind"], row["pattern"] = d.Rule.Kind.String(), d.Rule.Source
+		}
 		if d.Allow {
 			row["target"] = fmt.Sprintf("%s:%d", d.Host, d.Port)
 			row["terminated"] = d.Rule.Terminates()

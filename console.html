@@ -327,8 +327,8 @@ $("test").onclick = async () => {
   const d = (await api("/api/config/test", { text: $("cfg").value, snis })).data;
   if (!d.ok) return message("bad", d.error);
   message("ok", d.results.map(r => r.error ? `${r.sni}  ->  ERROR ${r.error}`
-    : r.allow ? `${r.sni}  ->  ${r.target}${r.terminated ? "  (TLS terminated here)" : "  (passed through)"}`
-    : `${r.sni}  ->  DENY${r.ruleLine ? "" : "  (no rule matched)"}`).join("\n"));
+    : r.allow ? `${r.sni}  ->  ${r.target}${r.terminated ? "  (TLS terminated here)" : "  (passed through)"}  [${r.kind}: ${r.pattern}]`
+    : `${r.sni}  ->  DENY${r.ruleLine ? `  [${r.kind}: ${r.pattern}]` : "  (no rule matched)"}`).join("\n"));
 };
 $("save").onclick = async () => {
   const d = (await api("/api/config/save", { text: $("cfg").value, baseHash: cfgHash, baseMtime: cfgMtime })).data;

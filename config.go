@@ -7,14 +7,17 @@ package main
 //	key = value         value may be "double quoted", 'single quoted' or bare
 //	# comment           full line; also trailing " # ..." after a value
 //
-// Rules are evaluated top to bottom; the first match wins. A host that
-// matches no rule is denied.
+// Rules are evaluated by specificity, not by their position in the file (see
+// ruleKind): NONE and literal names first, then wildcards (more literal
+// characters first), then regexes in file order, the catch-all last. A host
+// that matches no rule is denied.
 
 import (
 	"fmt"
 	"net"
 	"net/netip"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -52,7 +55,11 @@ type Config struct {
 	Warnings            []string // non-fatal findings, logged at startup / reload
 
 	Console *ConsoleConfig // the [console] section; nil = no web console
-	Rules   []Rule
+	Rules   []Rule         // in file order
+	// How Route evaluates them: literal names by lookup, everything else in
+	// order of specificity.
+	literals   map[string]*Rule
+	byPriority []*Rule
 	// Legacy settings that no longer apply and were ignored.
 	Ignored []string
 }
@@ -68,9 +75,30 @@ type ConsoleConfig struct {
 	Hostnames    []string // extra names the console may be addressed by (Host header check)
 }
 
+// ruleKind is how specific a rule's pattern is. It decides which rule wins when
+// several match, whatever their order in the file. All matching ignores case.
+type ruleKind int
+
+const (
+	kindNone     ruleKind = iota // pattern = NONE: only clients without SNI
+	kindLiteral                  // a plain host name: exact match, always wins over the kinds below
+	kindWildcard                 // *.example.com: * is one label (or part of one), ** one or more labels
+	kindRegex                    // anything else: a regular expression; file order among themselves
+	kindCatchAll                 // .* (or * / **): always last
+)
+
+func (k ruleKind) String() string {
+	return [...]string{"no SNI", "literal", "wildcard", "regex", "catch-all"}[k]
+}
+
 type Rule struct {
 	Line   int
 	Source string
+	Kind   ruleKind
+	// literalChars ranks wildcards (more is more specific); multiLabel (a **
+	// in the pattern) ranks after an equally long single-label wildcard.
+	literalChars int
+	multiLabel   bool
 	// NoSNI is set by `pattern = NONE` (any case): the rule matches only
 	// connections without an SNI, and Pattern is nil.
 	NoSNI      bool
@@ -101,7 +129,7 @@ type Decision struct {
 	Host     string
 	Port     int
 	RuleLine int    // 0 = no rule matched
-	Rule     *Rule  // the matched allow rule (nil otherwise)
+	Rule     *Rule  // the rule that matched (nil if none did)
 	Err      string // non-empty: routing failed (treated as deny)
 }
 
@@ -110,10 +138,13 @@ func isHostChar(b byte) bool {
 		b == '.' || b == '-' || b == '_'
 }
 
-// Route evaluates the rules for a lowercased SNI. No SNI is matched as "".
+// Route evaluates the rules for a lowercased SNI, most specific first. No SNI
+// is matched as "" by regexes and the catch-all (after a NONE rule, if any).
 func (c *Config) Route(sni string) Decision {
-	for i := range c.Rules {
-		r := &c.Rules[i]
+	if r := c.literals[sni]; r != nil {
+		return r.decide(sni, []int{0, len(sni)})
+	}
+	for _, r := range c.byPriority {
 		var m []int
 		if r.NoSNI {
 			if sni != "" {
@@ -123,27 +154,153 @@ func (c *Config) Route(sni string) Decision {
 		} else if m = r.Pattern.FindStringSubmatchIndex(sni); m == nil {
 			continue
 		}
-		if !r.Allow {
-			return Decision{RuleLine: r.Line}
-		}
-		host, err := expand(r.TargetHost, sni, m)
-		if err == nil {
-			for i := 0; i < len(host); i++ {
-				if !isHostChar(host[i]) && host[i] != ':' {
-					err = fmt.Errorf("invalid")
-					break
-				}
-			}
-			if host == "" || err != nil {
-				err = fmt.Errorf("rule at line %d produced invalid target host %q", r.Line, host)
-			}
-		}
-		if err != nil {
-			return Decision{RuleLine: r.Line, Err: err.Error()}
-		}
-		return Decision{Allow: true, Host: host, Port: r.TargetPort, RuleLine: r.Line, Rule: r}
+		return r.decide(sni, m)
 	}
 	return Decision{}
+}
+
+// decide is the outcome of a rule that matched sni with submatch indexes m.
+func (r *Rule) decide(sni string, m []int) Decision {
+	if !r.Allow {
+		return Decision{RuleLine: r.Line, Rule: r}
+	}
+	host, err := expand(r.TargetHost, sni, m)
+	if err == nil {
+		for i := 0; i < len(host); i++ {
+			if !isHostChar(host[i]) && host[i] != ':' {
+				err = fmt.Errorf("invalid")
+				break
+			}
+		}
+		if host == "" || err != nil {
+			err = fmt.Errorf("rule at line %d produced invalid target host %q", r.Line, host)
+		}
+	}
+	if err != nil {
+		return Decision{RuleLine: r.Line, Rule: r, Err: err.Error()}
+	}
+	return Decision{Allow: true, Host: host, Port: r.TargetPort, RuleLine: r.Line, Rule: r}
+}
+
+// classify works out what kind of pattern this is and returns the regular
+// expression that implements it (unanchored; "" for NONE).
+//
+//	NONE                          no SNI
+//	vq.example.com                literal; so are vq\.example\.com and ^vq.example.com$
+//	*.example.com  api-*.x.com    wildcard: * stays within one label, so *.example.com
+//	**.example.com                does not match a.b.example.com; ** spans one or more labels
+//	.*  (.*)  *  **               catch-all
+//	anything else                 regular expression (RE2)
+//
+// A wildcard has no backslash and no empty label; its *s are capture groups,
+// so $1 works in target_host as it does for a regex.
+func classify(pattern string) (kind ruleKind, expr string, literalChars int, multiLabel bool, err error) {
+	if strings.EqualFold(pattern, "none") {
+		return kindNone, "", 0, false, nil
+	}
+	bare := strings.TrimSuffix(strings.TrimPrefix(pattern, "^"), "$")
+	switch bare {
+	case ".*", "(.*)":
+		return kindCatchAll, pattern, 0, false, nil
+	case "*", "**":
+		return kindCatchAll, "(.*)", 0, false, nil
+	}
+	hostOnly := func(s string, star bool) bool {
+		for i := 0; i < len(s); i++ {
+			if !isHostChar(s[i]) && !(star && s[i] == '*') {
+				return false
+			}
+		}
+		return s != ""
+	}
+	if name := literalName(pattern); hostOnly(name, false) {
+		return kindLiteral, regexp.QuoteMeta(name), len(name), false, nil
+	}
+	if !strings.Contains(pattern, "*") || !hostOnly(pattern, true) ||
+		strings.HasPrefix(pattern, ".") || strings.HasSuffix(pattern, ".") || strings.Contains(pattern, "..") {
+		return kindRegex, pattern, 0, false, nil
+	}
+	if strings.Contains(pattern, "***") {
+		return 0, "", 0, false, fmt.Errorf("bad wildcard %q: use * for one label or ** for one or more", pattern)
+	}
+	var out strings.Builder
+	for i := 0; i < len(pattern); i++ {
+		switch {
+		case strings.HasPrefix(pattern[i:], "**"):
+			out.WriteString(`([^.]+(?:\.[^.]+)*)`)
+			multiLabel = true
+			i++
+		case pattern[i] == '*':
+			out.WriteString(`([^.]+)`)
+		default:
+			out.WriteString(regexp.QuoteMeta(pattern[i : i+1]))
+			literalChars++
+		}
+	}
+	return kindWildcard, out.String(), literalChars, multiLabel, nil
+}
+
+// literalName is the host name a literal pattern stands for: vq\.example\.com,
+// ^vq.example.com$ and VQ.example.com are all vq.example.com.
+func literalName(pattern string) string {
+	bare := strings.TrimSuffix(strings.TrimPrefix(pattern, "^"), "$")
+	return strings.ToLower(strings.ReplaceAll(bare, `\.`, "."))
+}
+
+// prioritise builds the lookup structures Route uses and reports rules that
+// can never match. Called once all rules are parsed (Rules no longer moves).
+func (c *Config) prioritise() error {
+	c.literals = map[string]*Rule{}
+	var first [kindCatchAll + 1]*Rule // the first NONE and catch-all rule
+	for i := range c.Rules {
+		r := &c.Rules[i]
+		switch r.Kind {
+		case kindLiteral:
+			name := literalName(r.Source)
+			if prev := c.literals[name]; prev != nil {
+				return fmt.Errorf("[[host]] at line %d: %s already has a rule at line %d; only one of them could ever match", r.Line, name, prev.Line)
+			}
+			c.literals[name] = r
+			continue
+		case kindNone, kindCatchAll:
+			if prev := first[r.Kind]; prev != nil {
+				return fmt.Errorf("[[host]] at line %d: pattern = %s can never match, the rule at line %d (%s) already matches the same clients", r.Line, r.Source, prev.Line, prev.Source)
+			}
+			first[r.Kind] = r
+		}
+		c.byPriority = append(c.byPriority, r)
+	}
+	sort.SliceStable(c.byPriority, func(i, j int) bool {
+		a, b := c.byPriority[i], c.byPriority[j]
+		switch {
+		case a.Kind != b.Kind:
+			return a.Kind < b.Kind
+		case a.Kind != kindWildcard:
+			return false // regexes keep their file order
+		case a.literalChars != b.literalChars:
+			return a.literalChars > b.literalChars
+		default:
+			return !a.multiLabel && b.multiLabel
+		}
+	})
+	// Say so once when that differs from a top-to-bottom reading of the file:
+	// a rule that an earlier, broader rule would have caught.
+	var later []string
+	for i := range c.Rules {
+		r := &c.Rules[i]
+		for k := 0; k < i; k++ {
+			prev := &c.Rules[k]
+			name := literalName(r.Source)
+			if prev.Kind > r.Kind && (prev.Kind == kindCatchAll || r.Kind == kindLiteral && prev.Pattern.MatchString(name)) {
+				later = append(later, fmt.Sprintf("line %d (%s, %s) wins over line %d (%s, %s)", r.Line, r.Source, r.Kind, prev.Line, prev.Source, prev.Kind))
+				break
+			}
+		}
+	}
+	if len(later) > 0 {
+		c.Warnings = append(c.Warnings, "rules are evaluated by specificity, not file order (literal names, then wildcards, then regexes, the catch-all last): "+strings.Join(later, "; "))
+	}
+	return nil
 }
 
 // expand replaces $N / ${N} in template with capture groups ($0 = whole
@@ -459,12 +616,16 @@ func ParseConfig(text string) (*Config, error) {
 		}
 		rule := Rule{Line: r.line, Source: *r.pattern}
 		groups := 0
+		expr := ""
 		var err error
-		if strings.EqualFold(*r.pattern, "none") {
+		if rule.Kind, expr, rule.literalChars, rule.multiLabel, err = classify(*r.pattern); err != nil {
+			return nil, fail("%v", err)
+		}
+		if rule.Kind == kindNone {
 			rule.NoSNI = true
 		} else {
 			// Whole-name, case-insensitive match.
-			rule.Pattern, err = regexp.Compile("(?i)^(?:" + *r.pattern + ")$")
+			rule.Pattern, err = regexp.Compile("(?i)^(?:" + expr + ")$")
 			if err != nil {
 				return nil, fail("bad pattern %q: %v", *r.pattern, err)
 			}
@@ -507,6 +668,9 @@ func ParseConfig(text string) (*Config, error) {
 			return nil, fail("%v", err)
 		}
 		cfg.Rules = append(cfg.Rules, rule)
+	}
+	if err := cfg.prioritise(); err != nil {
+		return nil, err
 	}
 	if c := cfg.Console; c != nil {
 		if c.Port == 0 {

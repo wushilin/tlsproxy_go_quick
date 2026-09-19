@@ -60,7 +60,7 @@ password_hash = "pbkdf2-sha256$600000$rbT1NRdts8POqh5mv9xJ4w$2aWzIzv9nmj1Xh6pT3q
 # password = plain text here instead; the proxy replaces it with password_hash on start
 hostnames = console.example.com, admin.example.com
 
-# ---- rules: first match wins; no match = deny -------------------------------
+# ---- rules: the most specific wins (see 13-rule-precedence); no match = deny --
 
 # Clients without SNI (pattern NONE, any letter case).
 [[host]]

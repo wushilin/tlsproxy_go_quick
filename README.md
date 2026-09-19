@@ -47,24 +47,44 @@ pattern = .*
 action = deny
 ```
 
-- Rules are checked top to bottom. **The first match wins.** A hostname that
-  matches no rule is denied.
-- `pattern` is a regular expression ([RE2 syntax](https://pkg.go.dev/regexp/syntax))
-  that must match the **whole** SNI, ignoring case. Matching time is linear
-  in the name length, whatever the pattern.
-- `target_host` can use `$1` / `${1}` for capture groups; `$0` is the whole
-  SNI. A reference to a group that doesn't exist is rejected at load time.
+- **The most specific rule wins, wherever it stands in the file.** A hostname
+  that matches no rule is denied. `pattern` takes one of these forms, tried in
+  this order; all matching ignores case:
+
+  | | form | example | matches |
+  |---|---|---|---|
+  | 1 | `NONE` | `NONE` | only clients that send **no SNI** |
+  | 1 | literal name | `vq.example.com` | exactly that name. `vq\.example\.com` and `^vq.example.com$` mean the same. Looked up, not scanned |
+  | 2 | wildcard | `*.example.com`, `api-*.example.com`, `**.example.com` | `*` is one label or part of one, so `*.example.com` does **not** match `a.b.example.com`; `**` is one or more labels. The wildcard with more literal characters wins; `*` beats `**`; then file order |
+  | 3 | regular expression | `(www\|blog)\.example\.com`, `node(\d+)\.example\.com` | [RE2 syntax](https://pkg.go.dev/regexp/syntax), must match the **whole** SNI; linear time whatever the pattern. Among themselves regexes are tried in **file order** |
+  | 4 | catch-all | `.*` (or `*`) | everything, always last |
+
+  So a literal `deny` beats a wildcard `allow`, a literal `allow` beats a
+  broader `deny`, and a `.*` in the middle of the file shadows nothing. A
+  wildcard contains only host-name characters and `*`; anything with `\ ( ) [
+  ] | + ? ^ $` is a regular expression. The same literal name twice, two
+  catch-alls or two `NONE` rules are start-up errors, since only one could ever
+  match. If the file reads differently top to bottom than it is evaluated, one
+  log line says which rules win over which. `--test` and the console's *Test
+  routing* show the winning rule and its kind.
+- `target_host` can use `$1` / `${1}` for capture groups (each `*` of a wildcard
+  is one); `$0` is the whole SNI. A reference to a group that doesn't exist is rejected at load time.
 - The port is always separate: `target_host` is a name or an IP address (IPv6
   without brackets) and the port goes in `target_port`. `target_host =
   10.0.0.1:8080` is rejected at load time.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
   `access_denied` alert. `target_port` defaults to 443.
-- `pattern = NONE` (any letter case) matches only clients that send **no SNI**,
-  for example to send them to a default target; its `target_host` must be a
-  literal. For regex patterns a missing SNI is matched as the empty string, so
-  a catch-all `.*` also catches it. A host literally named `none` is matched
-  with `^none$`.
-- Values may be bare, `"double-quoted"` or `'single-quoted'`. `#` starts a comment.
+- `pattern = NONE` (any letter case) is explicit: it matches only clients that
+  send no SNI, for example to send them to a default target; its `target_host`
+  must be a literal. Without such a rule a missing SNI is matched as the empty
+  string by regexes and the catch-all, so `.*` also catches it. A host
+  literally named `none` is matched with `^none$`.
+- Values need no quotes: everything after the `=` up to the end of the line (or
+  a ` #` comment) is the value, so `pattern = *.example.com` and `pattern =
+  (.*)\.example\.com` work as they are. `"double-quoted"` (with `\"`, `\\`,
+  `\t`, `\n`; any other backslash is kept, so `"\."` works) and
+  `'single-quoted'` (nothing is special) are there for values that start with a
+  quote, contain ` #`, or need leading or trailing spaces.
 
 Optional `[global]` settings; [`config.toml`](config.toml) lists every one
 with its default, and a test keeps that file in step with the code:
@@ -103,7 +123,7 @@ Samples, each with its expected routing checked by `go test`:
 | file | shows |
 |---|---|
 | [`01-basic`](samples/01-basic.toml) | map `*.wushilin.net` to internal names with a capture group |
-| [`02-home-lab`](samples/02-home-lab.toml) | several internal services behind one public IP; a deny ahead of a broader allow |
+| [`02-home-lab`](samples/02-home-lab.toml) | several internal services behind one public IP; a literal deny that beats a broader allow |
 | [`03-egress-allowlist`](samples/03-egress-allowlist.toml) | outbound allowlist, connecting to the real host with `$0` |
 | [`04-blocklist`](samples/04-blocklist.toml) | pass everything except blocked names |
 | [`05-default-backend`](samples/05-default-backend.toml) | specific routes, then a catch-all backend |
@@ -114,6 +134,7 @@ Samples, each with its expected routing checked by `go test`:
 | [`10-logging`](samples/10-logging.toml) | rotating, compressed log files |
 | [`11-web-console`](samples/11-web-console.toml) | the console on loopback, published through a terminating rule |
 | [`12-everything`](samples/12-everything.toml) | every option, annotated |
+| [`13-rule-precedence`](samples/13-rule-precedence.toml) | literal, wildcard (`*`, `**`), regex and catch-all rules written broadest first, and which one wins |
 
 ## TLS termination and automatic certificates
 
