@@ -569,3 +569,58 @@ func TestUpstreamSNIDefaultsToTheClientsName(t *testing.T) {
 		}
 	}
 }
+
+func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	// The upstream runs its own ACME client: it answers acme-tls/1 itself.
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	upstreamAnswer, _ := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("upstream-token", "vq.test")
+	tlsPort := backend(t, func(c *net.TCPConn) {
+		tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{upstreamAnswer}, NextProtos: []string{acme.ALPNProto}})
+		tc.Handshake()
+	})
+	dir := ca.certDir(t, "vq.test", "plain.test")
+	p := startProxy(t, "", fmt.Sprintf(
+		"[[host]]\npattern=vq\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\npattern=plain\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+		dir, tlsPort, dir, echoBackend(t, "")))
+	challenge := func(name string) (*tls.Conn, error) {
+		return tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: name, NextProtos: []string{acme.ALPNProto}})
+	}
+
+	// Not our challenge + TLS upstream: the CA must reach the UPSTREAM's answer,
+	// even though this rule normally terminates TLS here.
+	tc, err := challenge("vq.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := tc.ConnectionState()
+	if st.NegotiatedProtocol != acme.ALPNProto || !bytes.Equal(st.PeerCertificates[0].Raw, upstreamAnswer.Certificate[0]) {
+		t.Fatalf("the CA did not get the upstream's challenge certificate (alpn=%q)", st.NegotiatedProtocol)
+	}
+	// Ordinary clients of the same name are still terminated here.
+	tc, err = tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "vq.test"})
+	if err != nil || tc.ConnectionState().PeerCertificates[0].Subject.CommonName != "vq.test" {
+		t.Fatalf("normal traffic must still be terminated here: %v", err)
+	}
+
+	// Once WE have a challenge pending for the name, we answer it ourselves.
+	ours, _ := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("our-token", "vq.test")
+	m := p.srv.certs
+	m.mu.Lock()
+	m.challenges["vq.test"] = &ours
+	m.mu.Unlock()
+	if tc, err = challenge("vq.test"); err != nil || !bytes.Equal(tc.ConnectionState().PeerCertificates[0].Raw, ours.Certificate[0]) {
+		t.Fatalf("our own pending challenge must be answered here: %v", err)
+	}
+
+	// Not ours + plaintext upstream: nobody can answer; refuse rather than
+	// present an ordinary certificate to the CA.
+	if tc, err := challenge("plain.test"); err == nil {
+		t.Fatalf("expected a refusal, got a handshake with %q", tc.ConnectionState().PeerCertificates[0].Subject)
+	}
+	if !strings.Contains(testLog.String(), "passed through untouched to the TLS upstream") {
+		t.Error("the pass-through decision should be logged")
+	}
+}

@@ -150,8 +150,13 @@ How it works:
   ALPN `acme-tls/1`; the proxy already reads every ClientHello, so it answers
   those itself with the challenge certificate. Port 80 is never needed. If the
   proxy listens on another port, forward public 443 to it (a warning reminds
-  you). A challenge for a name the proxy is not currently validating is routed
-  normally, so a passed-through backend can still run its own ACME client.
+  you).
+- **Challenges that are not ours go to the upstream.** Only a name with an
+  order in progress here is answered here. Any other `acme-tls/1` connection
+  belongs to an ACME client behind the proxy, so it is handed to the upstream
+  untouched: always for pass-through rules, and for terminating rules too when
+  `upstream_tls = true` (normal traffic for that name is still terminated
+  here). With a plaintext upstream nobody could answer, so it is refused.
 - **One job at a time, urgent first.** At startup and every 10 minutes: names
   with no or an expired certificate first, then renewals by due date. A
   failure is retried after 6 hours. Certificates found in `cert_path` are

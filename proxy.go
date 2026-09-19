@@ -339,7 +339,22 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 
 	var clientSide, serverSide duplex = client, up.(*net.TCPConn)
 	mode := ""
-	if d.Rule != nil && d.Rule.Terminates() {
+	terminateHere := d.Rule != nil && d.Rule.Terminates()
+	if terminateHere && info.offers(acme.ALPNProto) {
+		// A TLS-ALPN-01 validation that is not ours (ours was answered above):
+		// the upstream is running its own ACME client for this name. Only it
+		// can answer, so hand the connection over untouched instead of
+		// terminating it. That needs an upstream that speaks TLS.
+		if !d.Rule.UpstreamTLS {
+			rt.pool.Put(helloBuf)
+			s.stats.Failed.Add(1)
+			logf("[#%d] closed src=%s sni=%s dst=%s: TLS-ALPN-01 challenge that this proxy did not start, and the upstream is plaintext so it cannot answer either", id, src, sniDisp, destDisp)
+			return
+		}
+		terminateHere = false
+		mode = "TLS-ALPN-01 challenge not started here: passed through untouched to the TLS upstream"
+	}
+	if terminateHere {
 		// Terminate TLS here. The upstream is contacted first so the client is
 		// offered exactly the application protocol (h2, http/1.1) the upstream
 		// agreed to; the ClientHello we already read is replayed into our TLS
@@ -357,7 +372,11 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 		}
 		logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
 	} else {
-		logf("[#%d] connected %s -> %s (%s) in %s", id, src, destDisp, peer, humanDuration(time.Since(t0)))
+		if mode != "" {
+			logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
+		} else {
+			logf("[#%d] connected %s -> %s (%s) in %s", id, src, destDisp, peer, humanDuration(time.Since(t0)))
+		}
 		if cfg.IdleTimeout > 0 {
 			up.SetWriteDeadline(time.Now().Add(cfg.IdleTimeout))
 		}
