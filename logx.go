@@ -42,10 +42,22 @@ func ConfigureLogging(cfg LogConfig) error {
 		errl = out // both streams share one file
 	default:
 		if errl, err = OpenFileLogger(cfg.Stderr, cfg); err != nil {
+			if out != nil {
+				out.file.Close()
+			}
 			return fmt.Errorf("cannot open log file %s: %w", cfg.Stderr, err)
 		}
 	}
+	oldOut, oldErr := sinkOut, sinkErr
 	sinkCfg, sinkOut, sinkErr = &cfg, out, errl
+	// A reload may redirect either stream.  Do this after publishing the new
+	// sinks, and only once when stdout and stderr shared one logger.
+	if oldOut != nil {
+		oldOut.file.Close()
+	}
+	if oldErr != nil && oldErr != oldOut {
+		oldErr.file.Close()
+	}
 	return nil
 }
 

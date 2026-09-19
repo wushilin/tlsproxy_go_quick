@@ -10,6 +10,12 @@ import (
 
 const maxClientHello = 64 * 1024
 
+// Real ClientHellos normally occupy one record (occasionally a small handful).
+// Bound this independently from their byte size: otherwise a valid-looking
+// hello split into tiny records turns parsing and repeated incremental reads
+// into disproportionate work.
+const maxClientHelloRecords = 32
+
 // errNeedMore means the ClientHello is not complete yet.
 var errNeedMore = errors.New("need more data")
 
@@ -61,6 +67,9 @@ func parseHello(data []byte) (helloInfo, error) {
 		}
 		if rest[0] != 0x16 {
 			return helloInfo{}, fmt.Errorf("not a TLS handshake record (content type 0x%02x)", rest[0])
+		}
+		if records >= maxClientHelloRecords {
+			return helloInfo{}, fmt.Errorf("ClientHello spans more than %d TLS records", maxClientHelloRecords)
 		}
 		if rest[1] != 0x03 {
 			return helloInfo{}, fmt.Errorf("unsupported TLS record version %02x%02x", rest[1], rest[2])

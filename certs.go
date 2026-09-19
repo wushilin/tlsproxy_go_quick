@@ -826,7 +826,7 @@ func (m *CertManager) acmeClient(cfg *Config) (*acme.Client, error) {
 		}
 		key = k
 	}
-	transport := &http.Transport{}
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, IdleConnTimeout: time.Minute, TLSHandshakeTimeout: 15 * time.Second}
 	client := &acme.Client{Key: key, DirectoryURL: cfg.AcmeDirectory, UserAgent: "tlsproxy_go_quick",
 		HTTPClient: &http.Client{Timeout: time.Minute, Transport: &orderLocationFixer{next: transport}}}
 	if cfg.AcmeCAFile != "" {
@@ -886,6 +886,11 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 	client, err := m.acmeClient(cfg)
 	if err != nil {
 		return err
+	}
+	if fixer, ok := client.HTTPClient.Transport.(*orderLocationFixer); ok {
+		if transport, ok := fixer.next.(*http.Transport); ok {
+			defer transport.CloseIdleConnections()
+		}
 	}
 	acct := &acme.Account{}
 	if cfg.AcmeEmail != "" {
@@ -996,10 +1001,35 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 
 func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// fsync the directory as well as the new file. Without this, a power loss
+	// can lose the rename even though the temporary file's contents reached
+	// disk first.
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	if closeErr := dir.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // CertInfo describes one certificate for the console.

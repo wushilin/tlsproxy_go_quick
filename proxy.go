@@ -7,6 +7,7 @@ package main
 // kqueue/epoll by the Go runtime, so this is plain blocking-style code.
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -29,18 +30,27 @@ var alertAccessDenied = []byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 49}
 // swapped atomically on reload: new connections use the new one, existing
 // connections keep the one they started with. A new Runtime has empty caches.
 type Runtime struct {
-	cfg   *Config
-	pool  *BufferPool
-	cache *RouteCache
+	cfg              *Config
+	pool             *BufferPool
+	cache            *RouteCache
+	upstreamSessions map[*Rule]tls.ClientSessionCache
 }
 
 func newRuntime(cfg *Config, prev *Runtime) *Runtime {
-	rt := &Runtime{cfg: cfg, cache: NewRouteCache(cfg.AllowCacheSize, cfg.DenyCacheSize)}
+	rt := &Runtime{cfg: cfg, cache: NewRouteCache(cfg.AllowCacheSize, cfg.DenyCacheSize), upstreamSessions: make(map[*Rule]tls.ClientSessionCache)}
+	for i := range cfg.Rules {
+		if cfg.Rules[i].Terminates() && cfg.Rules[i].UpstreamTLS {
+			rt.upstreamSessions[&cfg.Rules[i]] = tls.NewLRUClientSessionCache(64)
+		}
+	}
 	if prev != nil && prev.cfg.BufferSize == cfg.BufferSize && prev.cfg.BufferPoolMaxIdle == cfg.BufferPoolMaxIdle {
 		rt.pool = prev.pool
 	} else {
 		// A replaced pool is simply dropped: its parked buffers are garbage
 		// collected, and buffers still in use are freed when returned.
+		if prev != nil {
+			prev.pool.Stop()
+		}
 		rt.pool = NewBufferPool(cfg.BufferSize, cfg.BufferPoolMaxIdle)
 	}
 	return rt
@@ -55,6 +65,30 @@ type Server struct {
 	configPath string        // "" when the config did not come from a file
 	reloadNow  chan struct{} // poked by the console after a save
 	console    *Console
+
+	ticketMu      sync.Mutex
+	ticketKeys    [][32]byte
+	ticketRotated time.Time
+}
+
+// sessionTicketKeys returns a stable current key and yesterday's key.  TLS
+// configs are deliberately built per connection (ALPN differs), so without
+// this shared server state every ticket would be unusable on the next one.
+func (s *Server) sessionTicketKeys() [][32]byte {
+	s.ticketMu.Lock()
+	defer s.ticketMu.Unlock()
+	if len(s.ticketKeys) == 0 || time.Since(s.ticketRotated) >= 24*time.Hour {
+		var key [32]byte
+		if _, err := rand.Read(key[:]); err != nil {
+			panic(fmt.Sprintf("TLS ticket key randomness: %v", err))
+		}
+		s.ticketKeys = append([][32]byte{key}, s.ticketKeys...)
+		if len(s.ticketKeys) > 2 {
+			s.ticketKeys = s.ticketKeys[:2]
+		}
+		s.ticketRotated = time.Now()
+	}
+	return append([][32]byte(nil), s.ticketKeys...)
 }
 
 // NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
@@ -206,6 +240,11 @@ func (s *Server) watchConfig(path string) {
 		}
 		if s.console != nil {
 			s.console.update(cfg.Console)
+			if cfg.Console == nil {
+				errorf("config reload: [console] was removed but stopping it needs a restart")
+			}
+		} else if cfg.Console != nil {
+			errorf("config reload: [console] was added but needs a restart")
 		}
 		for _, w := range cfg.Warnings {
 			errorf("config: %s", w)
@@ -308,8 +347,10 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 			tc.Close()
 			rt.pool.Put(helloBuf)
 			if err != nil {
+				s.stats.Failed.Add(1)
 				errorf("[#%d] cert: TLS-ALPN-01 challenge for %s from %s failed: %v", id, sni, src, err)
 			} else {
+				s.stats.Completed.Add(1)
 				logf("[#%d] cert: answered the TLS-ALPN-01 challenge for %s from %s", id, sni, src)
 			}
 			return
@@ -389,7 +430,7 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 		// offered exactly the application protocol (h2, http/1.1) the upstream
 		// agreed to; the ClientHello we already read is replayed into our TLS
 		// server instead of being forwarded.
-		tlsClient, tlsServer, how, err := s.terminate(client, up, hello, info, d, cfg)
+		tlsClient, tlsServer, how, err := s.terminate(client, up, hello, info, d, cfg, rt)
 		rt.pool.Put(helloBuf)
 		if err != nil {
 			s.stats.Failed.Add(1)
@@ -471,7 +512,7 @@ func (p *prefixConn) Read(b []byte) (int, error) {
 // terminate completes TLS with the client (and with the upstream, if the rule
 // says so). It returns the two sides to relay between (upstream is nil when it
 // stays plaintext) and a short description for the log.
-func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d Decision, cfg *Config) (*tls.Conn, *tls.Conn, string, error) {
+func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d Decision, cfg *Config, rt *Runtime) (*tls.Conn, *tls.Conn, string, error) {
 	rule := d.Rule
 	var offer []string // what the client asked for, minus ACME's pseudo protocol
 	for _, p := range info.ALPN {
@@ -499,6 +540,7 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 			InsecureSkipVerify: !rule.UpstreamTLSVerify,
 			NextProtos:         offer,
 			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: rt.upstreamSessions[rule],
 		})
 		tlsUp.SetDeadline(time.Now().Add(cfg.ConnectTimeout))
 		if err := tlsUp.Handshake(); err != nil {
@@ -517,7 +559,7 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 		protos = []string{"http/1.1"} // a plaintext upstream can't do h2 over TLS ALPN
 	}
 	var served *tls.Certificate
-	tlsClient := tls.Server(&prefixConn{Conn: client, prefix: hello}, &tls.Config{
+	clientConfig := &tls.Config{
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 			c, err := s.certs.CertificateFor(rule, info.SNI)
 			served = c
@@ -525,7 +567,9 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 		},
 		NextProtos: protos,
 		MinVersion: tls.VersionTLS12,
-	})
+	}
+	clientConfig.SetSessionTicketKeys(s.sessionTicketKeys())
+	tlsClient := tls.Server(&prefixConn{Conn: client, prefix: hello}, clientConfig)
 	tlsClient.SetDeadline(time.Now().Add(cfg.HandshakeTimeout))
 	if err := tlsClient.Handshake(); err != nil {
 		return nil, nil, "", fmt.Errorf("client TLS handshake failed: %v", err)

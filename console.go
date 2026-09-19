@@ -70,6 +70,7 @@ type Console struct {
 	addr string // actual listen address
 
 	mu          sync.Mutex
+	verifyMu    sync.Mutex // serialises deliberately expensive password checks
 	hash        string
 	hostnames   map[string]bool
 	sessions    map[string]*session
@@ -104,7 +105,7 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("POST /api/config/save", c.authed(c.configSave))
 	mux.HandleFunc("GET /api/config/backups", c.authed(c.backups))
 	mux.HandleFunc("GET /api/config/backup", c.authed(c.backupGet))
-	server := &http.Server{Handler: c.guard(mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	server := &http.Server{Handler: c.guard(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 	logf("console: listening on http://%s (plain HTTP; password required)", c.addr)
 	go func() {
 		if err := server.Serve(ln); err != nil {
@@ -209,10 +210,12 @@ func (c *Console) authed(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func randomToken() string {
+func randomToken() (string, error) {
 	b := make([]byte, 32)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (c *Console) login(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +224,10 @@ func (c *Console) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
+	// Queue verifications as well as recording failures.  Checking the
+	// lockout before PBKDF2 alone lets a parallel burst all start hashing.
+	c.verifyMu.Lock()
+	defer c.verifyMu.Unlock()
 	c.mu.Lock()
 	if wait := time.Until(c.lockedUntil); wait > 0 {
 		c.mu.Unlock()
@@ -251,7 +258,19 @@ func (c *Console) login(w http.ResponseWriter, r *http.Request) {
 			delete(c.sessions, id)
 		}
 	}
-	id, s := randomToken(), &session{csrf: randomToken(), expires: time.Now().Add(sessionLifetime)}
+	id, err := randomToken()
+	if err != nil {
+		errorf("console: cannot generate session token: %v", err)
+		fail(w, http.StatusInternalServerError, "cannot create session")
+		return
+	}
+	csrf, err := randomToken()
+	if err != nil {
+		errorf("console: cannot generate CSRF token: %v", err)
+		fail(w, http.StatusInternalServerError, "cannot create session")
+		return
+	}
+	s := &session{csrf: csrf, expires: time.Now().Add(sessionLifetime)}
 	c.sessions[id] = s
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionLifetime.Seconds())})

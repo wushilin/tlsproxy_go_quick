@@ -614,7 +614,7 @@ func ParseConfig(text string) (*Config, error) {
 	}
 
 	if poolMaxIdle < 0 {
-		poolMaxIdle = 3 * cfg.MaxConnections
+		poolMaxIdle = 2 * cfg.MaxConnections
 	}
 	cfg.BufferPoolMaxIdle = poolMaxIdle
 	if cfg.Port == 0 {

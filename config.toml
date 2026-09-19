@@ -17,7 +17,7 @@ port = 443                      # (required) listen port
 # --- Limits and memory ----------------------------------------------------
 # max_connections = 1024        # (default: 1024) more are rejected; goroutines <= 2 x this
 # buffer_size = 65536           # (default: 65536) bytes per pooled buffer; 2 held per open connection
-# buffer_pool_max_idle = 3072   # (default: 3 x max_connections) free buffers kept for reuse
+# buffer_pool_max_idle = 2048   # (default: 2 x max_connections) free buffers kept for reuse
 
 # --- Route cache (LRU, keyed by lowercased SNI; cleared on every reload) ------
 # allow_cache_size = 4096       # (default: 4096) cached allowed names -> target; 0 = off

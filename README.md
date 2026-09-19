@@ -98,7 +98,7 @@ with its default, and a test keeps that file in step with the code:
 | `half_close_timeout`   | 30      | after one side closes, the other side gets N seconds to finish (0 = unlimited) |
 | `max_connections`      | 1024    | further connections are rejected; goroutines ≤ 2 × this              |
 | `buffer_size`          | 65536   | bytes per pooled buffer; each open connection holds two              |
-| `buffer_pool_max_idle` | 3 × max_connections | capacity of the pool's channel                           |
+| `buffer_pool_max_idle` | 2 × max_connections | capacity of the pool's channel                           |
 | `allow_cache_size`     | 4096    | LRU cache of allowed SNI → target decisions (0 = off)                |
 | `deny_cache_size`      | 4096    | separate LRU cache of denied SNIs (0 = off)                          |
 | `reload_interval`      | 5       | check the config file every N seconds and apply changes; minimum 5, 0 = never |

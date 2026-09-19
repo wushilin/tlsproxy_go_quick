@@ -87,6 +87,18 @@ func TestSNIFragmentedAndIncremental(t *testing.T) {
 	}
 }
 
+func TestSNIRejectsExcessiveRecordFragmentation(t *testing.T) {
+	name := "fragmented.example.com"
+	hs := buildClientHello(&name, 0)
+	if _, err := parseClientHello(wrapRecords(hs, (len(hs)+4)/5)); err != nil {
+		t.Fatalf("five-record ClientHello rejected: %v", err)
+	}
+	data := wrapRecords(buildClientHello(&name, 0), 1)
+	if _, err := parseClientHello(data); err == nil || err == errNeedMore {
+		t.Fatalf("excessively fragmented ClientHello was not rejected: %v", err)
+	}
+}
+
 func TestSNILargePostQuantumHello(t *testing.T) {
 	for _, pad := range []int{1800, 30000} {
 		name := "pq.example.com"
@@ -202,7 +214,7 @@ func TestConfigDefaultsAndValueForms(t *testing.T) {
 		"[[host]]\r\npattern = \"(.*)\\.a\\.com\"  # comment\r\ntarget_host = '$1.b'\r\n")
 	if c.Bind != "0.0.0.0" || c.IdleTimeout != 0 || c.HandshakeTimeout != 10*time.Second ||
 		c.HalfCloseTimeout != 30*time.Second || c.BufferSize != 65536 ||
-		c.BufferPoolMaxIdle != 3*c.MaxConnections || c.ReloadInterval != 5*time.Second {
+		c.BufferPoolMaxIdle != 2*c.MaxConnections || c.ReloadInterval != 5*time.Second {
 		t.Fatalf("%+v", c)
 	}
 	if got := route(t, c, "x.a.com"); got != "x.b:443" { // action defaults to allow, port to 443

@@ -32,12 +32,13 @@ func defaultLogConfig() LogConfig {
 //
 // Callers serialise WriteLine (logf/errorf hold logMu).
 type FileLogger struct {
-	cfg         LogConfig
-	path        string
-	file        *os.File
-	size        int64
-	compressing atomic.Bool
-	idle        chan struct{} // closed when the current compression is done
+	cfg            LogConfig
+	path           string
+	file           *os.File
+	size           int64
+	compressing    atomic.Bool
+	rotationFailed atomic.Bool   // do not repeat a partly completed generation shift
+	idle           chan struct{} // closed when the current compression is done
 }
 
 func generationName(path string, n int, gz bool) string {
@@ -70,8 +71,9 @@ func OpenFileLogger(path string, cfg LogConfig) (*FileLogger, error) {
 
 func (l *FileLogger) WriteLine(line string) error {
 	// Compress guard: never rotate while a compression is still running.
-	if l.size >= l.cfg.MaxSize && !l.compressing.Load() {
+	if l.size >= l.cfg.MaxSize && !l.compressing.Load() && !l.rotationFailed.Load() {
 		if err := l.rotate(); err != nil {
+			l.rotationFailed.Store(true)
 			return err
 		}
 	}
@@ -113,6 +115,12 @@ func (l *FileLogger) rotate() error {
 		err = os.Rename(l.path, generationName(l.path, 1, false))
 	}
 	if err != nil {
+		// The old descriptor is closed before a rename (required on some
+		// platforms). Recover a usable live writer so a failed rotation does
+		// not turn every subsequent log line into a stderr fallback.
+		if file, size, reopenErr := openAppend(l.path); reopenErr == nil {
+			l.file, l.size = file, size
+		}
 		return err
 	}
 	if l.file, l.size, err = openAppend(l.path); err != nil {
