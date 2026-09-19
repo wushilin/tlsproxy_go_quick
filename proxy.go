@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -426,7 +427,7 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 	}
 	var tlsUp *tls.Conn
 	var protos []string
-	how := "tls terminated, plaintext upstream"
+	how := "tls terminated, plaintext"
 	if rule.UpstreamTLS {
 		tlsUp = tls.Client(up, &tls.Config{
 			ServerName:         d.Host,
@@ -439,17 +440,23 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 			return nil, nil, "", fmt.Errorf("upstream TLS handshake failed: %v", err)
 		}
 		tlsUp.SetDeadline(time.Time{})
-		how = "tls terminated, tls upstream"
+		how = "tls terminated, tls"
+		if !rule.UpstreamTLSVerify {
+			how += " (certificate not verified)"
+		}
 		if p := tlsUp.ConnectionState().NegotiatedProtocol; p != "" {
 			protos = []string{p}
-			how += " " + p
+			how += " alpn=" + p
 		}
 	} else if info.offers("http/1.1") {
 		protos = []string{"http/1.1"} // a plaintext upstream can't do h2 over TLS ALPN
 	}
+	var served *tls.Certificate
 	tlsClient := tls.Server(&prefixConn{Conn: client, prefix: hello}, &tls.Config{
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return s.certs.CertificateFor(rule, info.SNI)
+			c, err := s.certs.CertificateFor(rule, info.SNI)
+			served = c
+			return c, err
 		},
 		NextProtos: protos,
 		MinVersion: tls.VersionTLS12,
@@ -459,7 +466,26 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 		return nil, nil, "", fmt.Errorf("client TLS handshake failed: %v", err)
 	}
 	tlsClient.SetDeadline(time.Time{})
+	st := tlsClient.ConnectionState()
+	alpn := st.NegotiatedProtocol
+	if alpn == "" {
+		alpn = "none"
+	}
+	how = fmt.Sprintf("TLS terminated here: client %s alpn=%s, %s; upstream %s",
+		tls.VersionName(st.Version), alpn, describeCert(rule, served), strings.TrimPrefix(how, "tls terminated, "))
 	return tlsClient, tlsUp, how, nil
+}
+
+// describeCert says which certificate a terminated connection was given.
+func describeCert(rule *Rule, c *tls.Certificate) string {
+	if c == nil || c.Leaf == nil {
+		return "cert=?"
+	}
+	source := "cert=" + rule.Cert
+	if len(c.Leaf.Subject.Organization) > 0 && c.Leaf.Subject.Organization[0] == "tlsproxy placeholder" {
+		return source + " (self-signed PLACEHOLDER, no real certificate yet)"
+	}
+	return fmt.Sprintf("%s (issuer %q, expires %s)", source, c.Leaf.Issuer.CommonName, c.Leaf.NotAfter.UTC().Format("2006-01-02"))
 }
 
 func (c *ConnState) touch() { c.lastActivityUnixNano.Store(time.Now().UnixNano()) }

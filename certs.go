@@ -46,6 +46,22 @@ const (
 	certJobTimeout    = 5 * time.Minute
 )
 
+// Each job is tried this many times, this far apart, to ride out temporary
+// failures (a dropped connection, an overloaded ACME API). Only then does the
+// name wait for certRetryInterval. Overridable in tests.
+var (
+	certAttempts       = 3
+	certAttemptBackoff = 5 * time.Second
+)
+
+// permanentError marks failures that an immediate retry cannot fix, or that
+// are expensive to repeat: a DNS pre-check mismatch, and a validation the CA
+// itself rejected (Let's Encrypt allows only 5 failed validations per name
+// per hour, so hammering it would lock the name out).
+type permanentError struct{ error }
+
+func (e permanentError) Unwrap() error { return e.error }
+
 type fileCert struct {
 	cert    *tls.Certificate
 	modTime time.Time
@@ -59,10 +75,13 @@ type CertManager struct {
 	challenges   map[string]*tls.Certificate // pending TLS-ALPN-01 answers, by domain
 	placeholders map[string]*tls.Certificate
 	nextTry      map[string]time.Time
+	lastError    map[string]string // why a name is waiting for its next attempt
+	announced    map[string]string // last status logged per name, to log changes only
 	wake         chan struct{}
 	started      bool
 
 	// Overridable in tests.
+	issueFunc     func(ctx context.Context, cfg *Config, domain string) error
 	retryInterval time.Duration
 	checkInterval time.Duration
 }
@@ -74,6 +93,8 @@ func NewCertManager() *CertManager {
 		challenges:    map[string]*tls.Certificate{},
 		placeholders:  map[string]*tls.Certificate{},
 		nextTry:       map[string]time.Time{},
+		lastError:     map[string]string{},
+		announced:     map[string]string{},
 		wake:          make(chan struct{}, 1),
 		retryInterval: certRetryInterval,
 		checkInterval: certCheckInterval,
@@ -103,6 +124,7 @@ func (m *CertManager) Apply(cfg *Config) error {
 	for _, d := range cfg.AutoDomains() {
 		m.loadAutoFromDisk(cfg, d)
 	}
+	m.announce(cfg, time.Now())
 	select {
 	case m.wake <- struct{}{}:
 	default:
@@ -270,37 +292,128 @@ func (m *CertManager) pendingJobs(now time.Time) []certJob {
 	return jobs
 }
 
+// status describes one automatic certificate for the log.
+func certStatus(c *tls.Certificate, thresholdDays int, now time.Time) string {
+	if c == nil || c.Leaf == nil {
+		return "no certificate yet, will be issued"
+	}
+	leaf := c.Leaf
+	days := int(leaf.NotAfter.Sub(now).Hours() / 24)
+	day := func(t time.Time) string { return t.UTC().Format("2006-01-02") }
+	switch due := renewAt(leaf, thresholdDays); {
+	case now.After(leaf.NotAfter):
+		return fmt.Sprintf("EXPIRED on %s, will be re-issued", day(leaf.NotAfter))
+	case now.After(due):
+		return fmt.Sprintf("expiring: valid until %s (%d days left), renewal is due", day(leaf.NotAfter), days)
+	default:
+		return fmt.Sprintf("valid until %s (%d days left), issuer %q, renews from %s", day(leaf.NotAfter), days, leaf.Issuer.CommonName, day(due))
+	}
+}
+
+// announce logs each name's status when it is new or has changed (so a name
+// added by a reload, or one that has entered its renewal window, shows up).
+func (m *CertManager) announce(cfg *Config, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := map[string]bool{}
+	for _, d := range cfg.AutoDomains() {
+		current[d] = true
+		status := certStatus(m.auto[d], cfg.ExpiryThresholdDays, now)
+		key := strings.SplitN(status, "(", 2)[0] // ignore the day counter
+		if m.announced[d] == key {
+			continue
+		}
+		if _, known := m.announced[d]; !known {
+			logf("cert: %s: managed name, %s", d, status)
+		} else {
+			logf("cert: %s: %s", d, status)
+		}
+		m.announced[d] = key
+	}
+	for d := range m.announced {
+		if !current[d] {
+			logf("cert: %s: no longer configured; its certificate stays in %s", d, autoDir(cfg, d))
+			delete(m.announced, d)
+		}
+	}
+}
+
 func (m *CertManager) worker() {
 	for {
 		m.refreshFileCerts()
+		m.mu.RLock()
+		cfg := m.cfg
+		m.mu.RUnlock()
+		if cfg != nil {
+			m.announce(cfg, time.Now())
+		}
 		for _, job := range m.pendingJobs(time.Now()) {
-			m.mu.RLock()
-			cfg := m.cfg
-			m.mu.RUnlock()
-			kind := "renewing"
-			if job.urgent {
-				kind = "issuing"
-			}
-			logf("cert: %s %s", kind, job.domain)
-			ctx, cancel := context.WithTimeout(context.Background(), certJobTimeout)
-			err := m.issue(ctx, cfg, job.domain)
-			cancel()
-			m.mu.Lock()
-			if err != nil {
-				m.nextTry[job.domain] = time.Now().Add(m.retryInterval)
-			} else {
-				delete(m.nextTry, job.domain)
-			}
-			m.mu.Unlock()
-			if err != nil {
-				errorf("cert: %s failed: %v; next attempt in %s", job.domain, err, humanDuration(m.retryInterval))
-			}
+			m.runJob(cfg, job)
 		}
 		select {
 		case <-m.wake:
 		case <-time.After(m.checkInterval):
 		}
 	}
+}
+
+// runJob issues or renews one name: up to certAttempts tries a few seconds
+// apart, then the name waits for retryInterval.
+func (m *CertManager) runJob(cfg *Config, job certJob) {
+	m.mu.RLock()
+	previous := m.lastError[job.domain]
+	current := m.auto[job.domain]
+	m.mu.RUnlock()
+	what := "issuing a new certificate"
+	if !job.urgent {
+		what = "renewing"
+	} else if current != nil {
+		what = "re-issuing the expired certificate"
+	}
+	if previous != "" {
+		logf("cert: %s: %s, scheduled retry (the previous attempt failed: %s)", job.domain, what, previous)
+	} else {
+		logf("cert: %s: %s (%s)", job.domain, what, certStatus(current, cfg.ExpiryThresholdDays, time.Now()))
+	}
+	var err error
+	for attempt := 1; attempt <= certAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), certJobTimeout)
+		issue := m.issue
+		if m.issueFunc != nil {
+			issue = m.issueFunc
+		}
+		err = issue(ctx, cfg, job.domain)
+		cancel()
+		if err == nil {
+			break
+		}
+		var permanent permanentError
+		if errors.As(err, &permanent) {
+			errorf("cert: %s: attempt %d/%d failed: %v (not retried right away: repeating this would not help)", job.domain, attempt, certAttempts, err)
+			break
+		}
+		if attempt < certAttempts {
+			errorf("cert: %s: attempt %d/%d failed: %v; trying again in %s", job.domain, attempt, certAttempts, err, humanDuration(certAttemptBackoff))
+			time.Sleep(certAttemptBackoff)
+		} else {
+			errorf("cert: %s: attempt %d/%d failed: %v", job.domain, attempt, certAttempts, err)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.nextTry, job.domain)
+		delete(m.lastError, job.domain)
+		return
+	}
+	next := time.Now().Add(m.retryInterval)
+	m.nextTry[job.domain], m.lastError[job.domain] = next, err.Error()
+	serving := "clients get a self-signed placeholder meanwhile"
+	if current != nil && time.Now().Before(current.Leaf.NotAfter) {
+		serving = fmt.Sprintf("the current certificate stays in use until %s", current.Leaf.NotAfter.UTC().Format("2006-01-02"))
+	}
+	errorf("cert: %s: giving up for now; next attempt at %s (in %s); %s", job.domain,
+		next.UTC().Format("2006-01-02T15:04Z"), humanDuration(m.retryInterval), serving)
 }
 
 // refreshFileCerts re-reads cert = <dir> certificates whose files changed.
@@ -352,12 +465,13 @@ func checkDNS(ctx context.Context, cfg *Config, domain string) error {
 			got = append(got, ip)
 			for _, want := range cfg.PublicIPs {
 				if ip == want {
+					logf("cert: %s: DNS pre-check ok (%s via resolver %s)", domain, ip, server)
 					return nil
 				}
 			}
 		}
-		return fmt.Errorf("DNS pre-check: %s resolves to %s, none of which is in public_ip_address (%s); not asking the CA",
-			domain, strings.Join(got, ", "), strings.Join(cfg.PublicIPs, ", "))
+		return permanentError{fmt.Errorf("DNS pre-check: %s resolves to %s, none of which is in public_ip_address (%s); not asking the CA",
+			domain, strings.Join(got, ", "), strings.Join(cfg.PublicIPs, ", "))}
 	}
 	return fmt.Errorf("DNS pre-check: cannot resolve %s: %w", domain, lastErr)
 }
@@ -453,7 +567,10 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 	if cfg.AcmeEmail != "" {
 		acct.Contact = []string{"mailto:" + cfg.AcmeEmail}
 	}
-	if _, err := client.Register(ctx, acct, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
+	switch _, err := client.Register(ctx, acct, acme.AcceptTOS); {
+	case err == nil:
+		logf("cert: registered a new ACME account at %s (key in %s)", cfg.AcmeDirectory, filepath.Join(cfg.CertPath, "_account"))
+	case !errors.Is(err, acme.ErrAccountAlreadyExists):
 		return fmt.Errorf("ACME account: %w", err)
 	}
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domain))
@@ -489,12 +606,16 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 			delete(m.challenges, domain)
 			m.mu.Unlock()
 		}()
+		logf("cert: %s: order created, TLS-ALPN-01 answer ready; asking the CA to validate on port 443", domain)
 		if _, err := client.Accept(ctx, chal); err != nil {
 			return fmt.Errorf("ACME accept: %w", err)
 		}
 		if _, err := client.WaitAuthorization(ctx, authzURL); err != nil {
-			return fmt.Errorf("TLS-ALPN-01 validation: %w", err)
+			// The CA tried and said no. Let's Encrypt allows 5 of these per
+			// name per hour, so don't repeat it within seconds.
+			return permanentError{fmt.Errorf("TLS-ALPN-01 validation rejected by the CA: %w", err)}
 		}
+		logf("cert: %s: validated by the CA", domain)
 	}
 	// Keep the finalize URL from the original order: the polled copy that
 	// WaitOrder returns does not always carry it.
@@ -540,9 +661,12 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 	m.mu.Lock()
 	m.auto[domain] = fc.cert
 	delete(m.placeholders, domain)
+	m.announced[domain] = "issued" // the next pass logs the new validity
 	m.mu.Unlock()
-	logf("cert: %s issued, expires %s, renews from %s", domain,
-		fc.cert.Leaf.NotAfter.UTC().Format("2006-01-02"), renewAt(fc.cert.Leaf, cfg.ExpiryThresholdDays).UTC().Format("2006-01-02"))
+	leaf := fc.cert.Leaf
+	logf("cert: %s: ISSUED by %q, serial %x, valid %s to %s, renews from %s, saved in %s", domain, leaf.Issuer.CommonName,
+		leaf.SerialNumber, leaf.NotBefore.UTC().Format("2006-01-02"), leaf.NotAfter.UTC().Format("2006-01-02"),
+		renewAt(leaf, cfg.ExpiryThresholdDays).UTC().Format("2006-01-02"), dir)
 	return nil
 }
 

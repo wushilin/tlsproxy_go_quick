@@ -155,6 +155,19 @@ How it works:
   with no or an expired certificate first, then renewals by due date. A
   failure is retried after 6 hours. Certificates found in `cert_path` are
   reused after a restart.
+- **Three quick tries, then six hours.** Each job is attempted up to 3 times,
+  5 seconds apart, to ride out temporary failures. Two kinds of failure are
+  not repeated right away because it would not help or would cost you: a DNS
+  pre-check mismatch, and a validation the CA itself rejected (Let's Encrypt
+  allows only 5 failed validations per name per hour).
+- **Every step is logged**: a name's status when first seen or changed (`no
+  certificate yet`, `valid until ... (N days left)`, `expiring`, `EXPIRED`),
+  each attempt and why it failed, when the next attempt is and what clients
+  get meanwhile, the scheduled retry with the previous error, account
+  registration, the CA's validation, and the issued certificate's issuer,
+  serial, validity and renewal date. Each terminated connection logs
+  `TLS terminated here: client TLS 1.3 alpn=h2, cert=auto (issuer ..., expires
+  ...); upstream tls alpn=h2`, or says when the placeholder was served.
 - **DNS pre-check** before every order, so a name that doesn't point here
   never costs you the CA's failed-validation rate limit.
 - **Placeholder.** Until a certificate exists (or for a name matched by the

@@ -440,3 +440,87 @@ func TestDNSPreCheckUsesTheConfiguredResolvers(t *testing.T) {
 		t.Fatalf("no public_ip_address = check skipped: %v", err)
 	}
 }
+
+func TestIssuanceRetriesAndLogging(t *testing.T) {
+	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=.*\\.retry\\.test\ncert=auto\n"+
+		"cert_domains=flaky.retry.test,wrongdns.retry.test,down.retry.test\ntarget_host=x.lan\n")
+	m := NewCertManager()
+	m.cfg = cfg
+	calls := map[string]int{}
+	m.issueFunc = func(_ context.Context, _ *Config, domain string) error {
+		calls[domain]++
+		switch {
+		case domain == "flaky.retry.test" && calls[domain] < 3:
+			return fmt.Errorf("connection reset by peer")
+		case domain == "wrongdns.retry.test":
+			return permanentError{fmt.Errorf("DNS pre-check: resolves elsewhere")}
+		case domain == "down.retry.test":
+			return fmt.Errorf("ACME API unreachable")
+		}
+		return nil
+	}
+	mark := len(testLog.String())
+	for _, job := range m.pendingJobs(time.Now()) {
+		m.runJob(cfg, job)
+	}
+	log := testLog.String()[mark:]
+	// A temporary failure is ridden out within the same job; a pointless one is not repeated.
+	if calls["flaky.retry.test"] != 3 || calls["wrongdns.retry.test"] != 1 || calls["down.retry.test"] != 3 {
+		t.Fatalf("attempts: %v", calls)
+	}
+	for _, want := range []string{
+		"flaky.retry.test: issuing a new certificate (no certificate yet",
+		"flaky.retry.test: attempt 1/3 failed: connection reset by peer; trying again in 50ms",
+		"flaky.retry.test: attempt 2/3 failed",
+		"wrongdns.retry.test: attempt 1/3 failed: DNS pre-check: resolves elsewhere (not retried right away",
+		"down.retry.test: attempt 3/3 failed: ACME API unreachable",
+		"down.retry.test: giving up for now; next attempt at ",
+		"(in 6h00m00s); clients get a self-signed placeholder meanwhile",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log lacks %q\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "flaky.retry.test: giving up") {
+		t.Error("flaky name succeeded on the third attempt and must not back off")
+	}
+	// Until the 6-hour mark the failed names are left alone (the fake issuer
+	// installs nothing, so the name that succeeded still counts as missing)...
+	names := func(jobs []certJob) string {
+		var out []string
+		for _, j := range jobs {
+			out = append(out, j.domain)
+		}
+		return strings.Join(out, " ")
+	}
+	if got := names(m.pendingJobs(time.Now().Add(5 * time.Hour))); got != "flaky.retry.test" {
+		t.Fatalf("retried too early: %s", got)
+	}
+	// ...then they are retried, and the log says why.
+	mark = len(testLog.String())
+	later := m.pendingJobs(time.Now().Add(6*time.Hour + time.Minute))
+	if got := names(later); got != "flaky.retry.test wrongdns.retry.test down.retry.test" {
+		t.Fatal(got)
+	}
+	m.runJob(cfg, later[2])
+	if log := testLog.String()[mark:]; !strings.Contains(log, "down.retry.test: issuing a new certificate, scheduled retry (the previous attempt failed: ACME API unreachable)") {
+		t.Errorf("retry log:\n%s", log)
+	}
+
+	// Status lines: new name, healthy, expiring, expired.
+	day := 24 * time.Hour
+	leaf := func(age time.Duration) *tls.Certificate {
+		nb := time.Now().Add(-age)
+		return &tls.Certificate{Leaf: &x509.Certificate{NotBefore: nb, NotAfter: nb.Add(90 * day), Issuer: pkix.Name{CommonName: "R11"}}}
+	}
+	for want, c := range map[string]*tls.Certificate{
+		"no certificate yet, will be issued":        nil,
+		`(79 days left), issuer "R11", renews from`: leaf(10 * day),
+		"expiring: valid until":                     leaf(80 * day),
+		"EXPIRED on":                                leaf(91 * day),
+	} {
+		if got := certStatus(c, 15, time.Now()); !strings.Contains(got, want) {
+			t.Errorf("status %q lacks %q", got, want)
+		}
+	}
+}
