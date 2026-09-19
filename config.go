@@ -36,6 +36,7 @@ type Config struct {
 	ReloadInterval    time.Duration // 0 = never
 	StatsInterval     time.Duration // 0 = never
 	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
+	Log               LogConfig     // the [logging] section
 	Rules             []Rule
 	// Settings from the Rust version that no longer apply and were ignored.
 	Ignored []string
@@ -171,6 +172,7 @@ func ParseConfig(text string) (*Config, error) {
 		DenyCacheSize:    4096,
 		ReloadInterval:   5 * time.Second,
 		StatsInterval:    60 * time.Second,
+		Log:              defaultLogConfig(),
 	}
 	poolMaxIdle := -1
 	var raws []rawRule
@@ -201,7 +203,7 @@ func ParseConfig(text string) (*Config, error) {
 				return nil, fail("bad section header")
 			}
 			section = strings.TrimSpace(line[1 : len(line)-1])
-			if section != "global" {
+			if section != "global" && section != "logging" {
 				return nil, fail("unknown section [%s]", section)
 			}
 			continue
@@ -283,6 +285,26 @@ func ParseConfig(text string) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
+		case "logging":
+			switch key {
+			case "stdout":
+				cfg.Log.Stdout = value
+			case "stderr":
+				cfg.Log.Stderr = value
+			case "max_size":
+				if cfg.Log.MaxSize, err = parseSize(value); err != nil {
+					return nil, fail("%v", err)
+				}
+			case "max_keep":
+				err = count(&cfg.Log.MaxKeep)
+			case "compress_after":
+				err = count(&cfg.Log.CompressAfter)
+			default:
+				return nil, fail("unknown key %q in [logging]", key)
+			}
+			if err != nil {
+				return nil, err
+			}
 		case "host":
 			r := &raws[len(raws)-1]
 			v := value
@@ -359,6 +381,29 @@ func ParseConfig(text string) (*Config, error) {
 		cfg.Rules = append(cfg.Rules, rule)
 	}
 	return cfg, nil
+}
+
+// parseSize reads a byte count: plain, or with a K/M/G suffix (powers of
+// 1024), e.g. "15MiB", "10M", "64k".
+func parseSize(v string) (int64, error) {
+	t := strings.ToUpper(strings.TrimSpace(v))
+	t = strings.TrimSuffix(strings.TrimSuffix(t, "IB"), "B")
+	unit := int64(1)
+	if t != "" {
+		switch t[len(t)-1] {
+		case 'K':
+			unit, t = 1<<10, t[:len(t)-1]
+		case 'M':
+			unit, t = 1<<20, t[:len(t)-1]
+		case 'G':
+			unit, t = 1<<30, t[:len(t)-1]
+		}
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+	if err != nil || n <= 0 || n > (1<<62)/unit {
+		return 0, fmt.Errorf("invalid size %q (use a number with optional K, M or G)", v)
+	}
+	return n * unit, nil
 }
 
 func parsePort(v string) (int, error) {

@@ -86,6 +86,35 @@ with its default, and a test keeps that file in step with the code:
 are accepted and ignored (with a log line), so the same file works for both.
 More examples, each with its expected routing, are in [`samples/`](samples).
 
+## Logging to files
+
+By default activity is written to the process's stdout and problems to its
+stderr. Add a `[logging]` section to write to files instead, with rotation,
+gzip compression and pruning built in (no `newsyslog`/`logrotate` needed):
+
+```toml
+[logging]
+stdout = /var/log/tlsproxy/stdout.log   # activity: accepted / route / connected / closed, stats, reloads
+stderr = /var/log/tlsproxy/stderr.log   # problems: accept errors, failed reloads, ...
+max_size = 15MiB        # rotate once a file reaches this (K / M / G); default 15MiB
+max_keep = 10           # generations kept: file.1 (newest) .. file.10; default 10
+compress_after = 3      # file.1-.3 stay plain, file.4.gz and older are gzip; default 3
+```
+
+- With a file set, nothing of that stream reaches the terminal. Either key may
+  be omitted, and both may name the same file. Relative paths are relative to
+  the working directory.
+- Rotation is numbered: `stdout.log` → `stdout.log.1` → `.2` → ... Generations
+  above `compress_after` are gzip files (`stdout.log.4.gz`); anything beyond
+  `max_keep` is deleted. `compress_after >= max_keep` disables compression and
+  `max_keep = 0` just starts the file over.
+- Compression is done **in-process**, in the background, under a **compress
+  guard**: until it finishes the log does not rotate again, so the numbering
+  can never shift under the compressor. The live file simply grows past
+  `max_size` in the meantime; nothing blocks and nothing is lost.
+- The settings follow hot reload. If a new log file can't be opened, the
+  previous destinations stay in use.
+
 ## Logs and state
 
 ```

@@ -8,17 +8,70 @@ import (
 	"time"
 )
 
+// Two streams, like a daemon's stdout and stderr: normal activity (logf) and
+// problems (errorf). Each goes to the process's own stdout/stderr or, when
+// [logging] names a file for it, to a rotating file (see rotate.go).
 var (
-	logMu  sync.Mutex
-	logOut io.Writer = os.Stderr
+	logMu   sync.Mutex
+	logOut  io.Writer = os.Stdout // where logf goes without a file (tests swap it)
+	logErr  io.Writer = os.Stderr
+	sinkCfg *LogConfig
+	sinkOut *FileLogger
+	sinkErr *FileLogger
 )
 
-// logf writes one timestamped (UTC, milliseconds) line to stderr.
-func logf(format string, args ...any) {
-	ts := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+// ConfigureLogging applies the [logging] settings (at startup and on every
+// config reload). On error the previous destinations stay in use.
+func ConfigureLogging(cfg LogConfig) error {
 	logMu.Lock()
-	fmt.Fprintf(logOut, ts+" "+format+"\n", args...)
-	logMu.Unlock()
+	defer logMu.Unlock()
+	if sinkCfg != nil && *sinkCfg == cfg {
+		return nil
+	}
+	var out, errl *FileLogger
+	var err error
+	if cfg.Stdout != "" {
+		if out, err = OpenFileLogger(cfg.Stdout, cfg); err != nil {
+			return fmt.Errorf("cannot open log file %s: %w", cfg.Stdout, err)
+		}
+	}
+	switch {
+	case cfg.Stderr == "":
+	case cfg.Stderr == cfg.Stdout:
+		errl = out // both streams share one file
+	default:
+		if errl, err = OpenFileLogger(cfg.Stderr, cfg); err != nil {
+			return fmt.Errorf("cannot open log file %s: %w", cfg.Stderr, err)
+		}
+	}
+	sinkCfg, sinkOut, sinkErr = &cfg, out, errl
+	return nil
+}
+
+func emit(file *FileLogger, fallback io.Writer, format string, args []any) {
+	line := time.Now().UTC().Format("2006-01-02T15:04:05.000Z") + " " + fmt.Sprintf(format, args...) + "\n"
+	if file != nil {
+		if err := file.WriteLine(line); err == nil {
+			return
+		} else {
+			fmt.Fprintf(os.Stderr, "log: cannot write %s: %v\n", file.path, err)
+		}
+	}
+	io.WriteString(fallback, line)
+}
+
+// logf writes one timestamped line of normal activity.
+func logf(format string, args ...any) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	emit(sinkOut, logOut, format, args)
+}
+
+// errorf writes one timestamped line about a problem.
+func errorf(format string, args ...any) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	emit(sinkErr, logErr, format, args)
 }
 
 // humanBytes formats a byte count like "6.54 KiB".

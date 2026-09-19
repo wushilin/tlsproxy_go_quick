@@ -62,7 +62,7 @@ func main() {
 	}
 
 	if err := Run(cfg, path); err != nil {
-		logf("fatal: %v", err)
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
 }

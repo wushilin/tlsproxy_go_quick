@@ -60,6 +60,10 @@ func Run(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
+	// From here on the streams go to their log files, if configured.
+	if err := ConfigureLogging(cfg.Log); err != nil {
+		return err
+	}
 	return NewServer(cfg).Serve(l, path)
 }
 
@@ -82,7 +86,7 @@ func (s *Server) Serve(l net.Listener, path string) error {
 			if errors.Is(err, net.ErrClosed) {
 				return err
 			}
-			logf("accept error: %v", err) // typically EMFILE; back off
+			errorf("accept error: %v", err) // typically EMFILE; back off
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
@@ -134,7 +138,7 @@ func (s *Server) watchConfig(path string) {
 		text, err := os.ReadFile(path)
 		if err != nil {
 			if haveLast {
-				logf("config reload: cannot read %s: %v; keeping current config", path, err)
+				errorf("config reload: cannot read %s: %v; keeping current config", path, err)
 				haveLast = false
 			}
 			continue
@@ -145,13 +149,16 @@ func (s *Server) watchConfig(path string) {
 		last, haveLast = text, true
 		cfg, err := ParseConfig(string(text))
 		if err != nil {
-			logf("config reload: %s is invalid, keeping current config: %v", path, err)
+			errorf("config reload: %s is invalid, keeping current config: %v", path, err)
 			continue
 		}
 		old := s.runtime.Load()
 		if cfg.Bind != old.cfg.Bind || cfg.Port != old.cfg.Port {
-			logf("config reload: bind/port change to %s:%d needs a restart; still listening on %s:%d",
+			errorf("config reload: bind/port change to %s:%d needs a restart; still listening on %s:%d",
 				cfg.Bind, cfg.Port, old.cfg.Bind, old.cfg.Port)
+		}
+		if err := ConfigureLogging(cfg.Log); err != nil {
+			errorf("config reload: %v; logging is unchanged", err)
 		}
 		rt := newRuntime(cfg, old)
 		s.runtime.Store(rt)
