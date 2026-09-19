@@ -131,6 +131,7 @@ target_host = 192.168.1.40
 | `cert_domains` | from a literal pattern | exact names to issue; required when `pattern` is a regex (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
 | `upstream_tls` | true | speak TLS to the target; `false` = plaintext |
 | `upstream_tls_verify` | true | verify the target's certificate against the system roots |
+| `upstream_sni` | the client's SNI | name sent to the target as SNI, and the name its certificate is verified against. The default passes the client's name through, so a target that routes or selects certificates by SNI works even when `target_host` is an IP address |
 
 | `[global]` | default | meaning |
 |---|---|---|

@@ -429,8 +429,19 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 	var protos []string
 	how := "tls terminated, plaintext"
 	if rule.UpstreamTLS {
+		// Like any reverse proxy, present the name the client asked for, so an
+		// upstream that itself routes or picks certificates by SNI works (and
+		// its certificate is verified against that name). An IP address is
+		// never sent as SNI, so the target host alone would not do.
+		serverName := rule.UpstreamSNI
+		if serverName == "" {
+			serverName = info.SNI
+		}
+		if serverName == "" {
+			serverName = d.Host
+		}
 		tlsUp = tls.Client(up, &tls.Config{
-			ServerName:         d.Host,
+			ServerName:         serverName,
 			InsecureSkipVerify: !rule.UpstreamTLSVerify,
 			NextProtos:         offer,
 			MinVersion:         tls.VersionTLS12,
@@ -440,7 +451,7 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 			return nil, nil, "", fmt.Errorf("upstream TLS handshake failed: %v", err)
 		}
 		tlsUp.SetDeadline(time.Time{})
-		how = "tls terminated, tls"
+		how = "tls terminated, tls sni=" + serverName
 		if !rule.UpstreamTLSVerify {
 			how += " (certificate not verified)"
 		}

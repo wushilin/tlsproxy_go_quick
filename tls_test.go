@@ -524,3 +524,48 @@ func TestIssuanceRetriesAndLogging(t *testing.T) {
 		}
 	}
 }
+
+func TestUpstreamSNIDefaultsToTheClientsName(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	certPEM, keyPEM := ca.issue(t, time.Hour, "app.sni.test", "override.internal")
+	cert, _ := tls.X509KeyPair(certPEM, keyPEM)
+	// An upstream that, like an SNI router, refuses connections without SNI
+	// and reports the name it was asked for.
+	port := backend(t, func(c *net.TCPConn) {
+		var asked string
+		tc := tls.Server(c, &tls.Config{GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if asked = h.ServerName; asked == "" {
+				return nil, fmt.Errorf("no SNI")
+			}
+			return &cert, nil
+		}})
+		if tc.Handshake() == nil {
+			fmt.Fprintf(tc, "sni=%s", asked)
+			tc.CloseWrite()
+		}
+	})
+	dir := ca.certDir(t, "app.sni.test", "other.sni.test")
+	p := startProxy(t, "", fmt.Sprintf(
+		"[[host]]\npattern=app\\.sni\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\npattern=other\\.sni\\.test\ncert=%s\nupstream_sni=Override.Internal\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+		dir, port, dir, port))
+	for name, want := range map[string]string{"app.sni.test": "sni=app.sni.test", "other.sni.test": "sni=override.internal"} {
+		tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: name})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := string(readToEnd(t, tc)); got != want {
+			t.Fatalf("%s: upstream saw %q, want %q", name, got, want)
+		}
+	}
+	for _, bad := range []string{
+		"[global]\nport=1\n[[host]]\npattern=.*\ncert=/tmp\nupstream_sni=not a name\ntarget_host=x.lan\n",
+		"[global]\nport=1\n[[host]]\npattern=.*\ncert=/tmp\nupstream_tls=false\nupstream_sni=a.b.com\ntarget_host=x.lan\n",
+		"[global]\nport=1\n[[host]]\npattern=.*\nupstream_sni=a.b.com\ntarget_host=x.lan\n",
+	} {
+		if _, err := ParseConfig(bad); err == nil {
+			t.Errorf("should be rejected: %q", bad)
+		}
+	}
+}

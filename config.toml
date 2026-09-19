@@ -86,6 +86,9 @@ port = 443                      # (required) listen port
 # cert_domains           names to issue, e.g. a.example.com, b.example.com (each must match pattern)
 # upstream_tls           (default: true) connect to the target with TLS; set false for a plaintext target
 # upstream_tls_verify    (default: true) verify the target's certificate against the system roots
+# upstream_sni           the name sent to the target as SNI and checked in its certificate.
+#                        Default: the name the client asked for, so a target that itself routes
+#                        by SNI (another proxy) works even when target_host is an IP address
 
 [[host]]
 pattern = (.*)\.wushilin\.net

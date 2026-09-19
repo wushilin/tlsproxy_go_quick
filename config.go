@@ -71,6 +71,7 @@ type Rule struct {
 	CertDomains       []string // names to issue for when Cert is "auto"
 	UpstreamTLS       bool     // connect to the target with TLS (default true)
 	UpstreamTLSVerify bool     // verify the target's certificate (default true)
+	UpstreamSNI       string   // SNI sent to (and verified against) the target; "" = the client's SNI
 }
 
 // Terminates reports whether the proxy terminates TLS for this rule.
@@ -181,9 +182,9 @@ func expand(template, input string, m []int) (string, error) {
 const LetsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
 type rawRule struct {
-	cert, certDomains, upstreamTLS, upstreamVerify *string
-	line                                           int
-	pattern, action, targetHost, tport             *string
+	cert, certDomains, upstreamTLS, upstreamVerify, upstreamSNI *string
+	line                                                        int
+	pattern, action, targetHost, tport                          *string
 }
 
 func ParseConfig(text string) (*Config, error) {
@@ -386,6 +387,8 @@ func ParseConfig(text string) (*Config, error) {
 				r.upstreamTLS = &v
 			case "upstream_tls_verify":
 				r.upstreamVerify = &v
+			case "upstream_sni":
+				r.upstreamSNI = &v
 			default:
 				return nil, fail("unknown key %q in [[host]]", key)
 			}
@@ -492,7 +495,7 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 		for _, kv := range []struct {
 			name string
 			v    *string
-		}{{"cert_domains", r.certDomains}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify}} {
+		}{{"cert_domains", r.certDomains}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify}, {"upstream_sni", r.upstreamSNI}} {
 			if kv.v != nil {
 				return fmt.Errorf("%s only applies when the rule terminates TLS (set cert = auto or a directory)", kv.name)
 			}
@@ -513,6 +516,14 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 	if r.upstreamVerify != nil {
 		if rule.UpstreamTLSVerify, err = parseBool(*r.upstreamVerify); err != nil {
 			return fmt.Errorf("upstream_tls_verify: %v", err)
+		}
+	}
+	if r.upstreamSNI != nil {
+		if rule.UpstreamSNI = strings.ToLower(*r.upstreamSNI); !validDomain(rule.UpstreamSNI) {
+			return fmt.Errorf("upstream_sni: %q is not a valid host name", *r.upstreamSNI)
+		}
+		if !rule.UpstreamTLS {
+			return fmt.Errorf("upstream_sni only applies with upstream_tls = true")
 		}
 	}
 	if !strings.EqualFold(rule.Cert, "auto") {
