@@ -89,7 +89,33 @@ with its default, and a test keeps that file in step with the code:
 
 `io_model` and `worker_threads` from the Rust version
 are accepted and ignored (with a log line), so the same file works for both.
-More examples, each with its expected routing, are in [`samples/`](samples).
+All options, by section, with a complete example in
+[`samples/12-everything.toml`](samples/12-everything.toml) (a test fails if an
+option is missing from it, from `config.toml` or from this README):
+
+| section | options |
+|---|---|
+| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `upstream_tls` `upstream_tls_verify` `upstream_sni` |
+| `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
+| `[console]` | `listen` `port` `password` `password_hash` `hostnames` |
+
+Samples, each with its expected routing checked by `go test`:
+
+| file | shows |
+|---|---|
+| [`01-basic`](samples/01-basic.toml) | map `*.wushilin.net` to internal names with a capture group |
+| [`02-home-lab`](samples/02-home-lab.toml) | several internal services behind one public IP; a deny ahead of a broader allow |
+| [`03-egress-allowlist`](samples/03-egress-allowlist.toml) | outbound allowlist, connecting to the real host with `$0` |
+| [`04-blocklist`](samples/04-blocklist.toml) | pass everything except blocked names |
+| [`05-default-backend`](samples/05-default-backend.toml) | specific routes, then a catch-all backend |
+| [`06-multi-capture-rewrite`](samples/06-multi-capture-rewrite.toml) | several capture groups, `${1}` form |
+| [`07-ipv6-and-tuning`](samples/07-ipv6-and-tuning.toml) | IPv6 listener, timeouts, limits, buffers, quoted values |
+| [`08-no-sni`](samples/08-no-sni.toml) | `pattern = NONE` for clients without SNI |
+| [`09-tls-termination`](samples/09-tls-termination.toml) | `cert = auto`, `cert_domains`, plaintext and TLS upstreams, pass-through side by side |
+| [`10-logging`](samples/10-logging.toml) | rotating, compressed log files |
+| [`11-web-console`](samples/11-web-console.toml) | the console on loopback, published through a terminating rule |
+| [`12-everything`](samples/12-everything.toml) | every option, annotated |
 
 ## TLS termination and automatic certificates
 
@@ -215,6 +241,78 @@ compress_after = 3      # file.1-.3 stay plain, file.4.gz and older are gzip; de
   `max_size` in the meantime; nothing blocks and nothing is lost.
 - The settings follow hot reload. If a new log file can't be opened, the
   previous destinations stay in use.
+
+## Web console
+
+An optional console on its own port: a live dashboard, open connections,
+certificates, the recent log and a config editor.
+
+```toml
+[console]
+listen = 127.0.0.1                 # default
+port = 9443                        # required
+password = change-me               # replaced by password_hash on start (see below)
+hostnames = console.example.com    # names it may be addressed by, besides IPs and localhost
+
+# Publish it through the proxy itself, with a real certificate:
+[[host]]
+pattern = console\.example\.com
+cert = auto
+upstream_tls = false
+target_host = 127.0.0.1
+target_port = 9443
+```
+
+| `[console]` | default | meaning |
+|---|---|---|
+| `listen` | 127.0.0.1 | bind address. The console is **plain HTTP by design**; anything but loopback logs a warning, because the password would cross the network unencrypted. Keep it on loopback and publish it through a terminating rule as above |
+| `port` | (required) | listen port |
+| `password` | | plain text, for convenience. At start-up and on every reload the proxy replaces this line with `password_hash` and logs it, so the secret is on disk only briefly. To change the password, put a `password =` line back |
+| `password_hash` | | `pbkdf2-sha256$<iterations>$<salt>$<hash>` (PBKDF2-HMAC-SHA256, 600,000 iterations). Generate one with `tlsproxy --hash-password`. One of the two is required |
+| `hostnames` | (none) | `;` or `,` separated names the console answers to, besides IP addresses and `localhost`. Any other `Host` is refused: that defeats DNS rebinding |
+
+`listen` and `port` need a restart; `password` and `hostnames` follow hot
+reload (a changed password signs everyone out).
+
+**Pages**
+
+- **Dashboard** (refreshes every second): live connections, connections to
+  date (relayed, denied, failed, rejected), total bytes received and sent,
+  byte and connection rates over the last 5 seconds, route-cache figures, and
+  per host (SNI): live and total connections, how many were TLS-terminated,
+  bytes each way.
+- **Connections**: every open connection with client, host, target,
+  terminated or passed through, bytes, age, idle time and the state of each
+  direction.
+- **Certificates**: every certificate in use, both those the proxy manages
+  (`cert = auto`) and those you manage (`cert = <dir>`): status (`ok`,
+  `expiring`, `expired`, `missing`, `failing`), issuer, validity, days left,
+  renewal date, the rules using it, the last error and next attempt, and a
+  "retry now" button that skips the 6-hour wait.
+- **Log**: the most recent 2,000 lines of both streams, filterable (for
+  example by `[#42]` or a host name), wherever the log is configured to go.
+- **Config**: a text editor for the config file, with line numbers.
+  - *Validate* and *Test routing* work on the text in the editor, saved or not.
+  - *Save & apply* validates first (an invalid config is never written, and a
+    `cert = <dir>` that can't be loaded counts as invalid), keeps the previous
+    file as `config.toml.<timestamp>.bak` (the last 10, loadable from the
+    editor), and applies the change at once.
+  - **Saves are race free.** Every read-check-write of the file happens under
+    one lock in the proxy, and a save must present the modification time and
+    content hash the editor loaded. If the file was changed by anything else in
+    between (vim, another session, the proxy hashing a password), that save
+    fails and nothing is written.
+  - The `[console]` section is hidden from the editor and kept as it is; text
+    containing its own `[console]` is rejected. Errors use the editor's line
+    numbers.
+
+**Security**: a password is always required, even on loopback (a web page in
+your browser could otherwise reach it). Sign-ins are rate limited globally
+(5 failures, then 30 s doubling up to 15 min); sessions are random, in memory,
+`HttpOnly`, `SameSite=Strict`, 12 hours; every POST needs the session's CSRF
+token and a JSON content type; responses forbid framing. Whoever can save a
+config controls the proxy (targets, certificate paths, log file locations), so
+treat the console password like root access to the gateway.
 
 ## Logs and state
 

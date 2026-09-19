@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -512,5 +513,38 @@ func TestFormats(t *testing.T) {
 	logMu.Unlock()
 	if s := buf.String(); len(s) != 24+1+8 || !strings.HasSuffix(s, "Z hello 7\n") {
 		t.Fatalf("%q", s)
+	}
+}
+
+// Every option the parser accepts must appear in the complete-reference sample,
+// in the commented config.toml and in the README, so documentation can't drift.
+func TestEveryOptionIsDocumented(t *testing.T) {
+	src, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notOptions := map[string]bool{"global": true, "logging": true, "console": true, "host": true, // sections
+		"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true} // values
+	keys := map[string]bool{}
+	for _, m := range regexp.MustCompile(`case ("[a-z_0-9]+"(?:, "[a-z_0-9]+")*):`).FindAllStringSubmatch(string(src), -1) {
+		for _, k := range strings.Split(m[1], ", ") {
+			if k = strings.Trim(k, `"`); !notOptions[k] {
+				keys[k] = true
+			}
+		}
+	}
+	if len(keys) < 40 {
+		t.Fatalf("only %d options found in config.go; did the parser change shape?", len(keys))
+	}
+	for _, doc := range []string{"samples/12-everything.toml", "config.toml", "README.md"} {
+		text, err := os.ReadFile(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k := range keys {
+			if !regexp.MustCompile(`(^|[^a-z_])` + k + `([^a-z_]|$)`).Match(text) {
+				t.Errorf("%s does not mention the option %q", doc, k)
+			}
+		}
 	}
 }

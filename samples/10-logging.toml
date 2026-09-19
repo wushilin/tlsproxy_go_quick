@@ -1,0 +1,39 @@
+# Logging to rotating files instead of the terminal.
+#
+# Two streams: "stdout" carries normal activity (accepted / route / connected /
+# closed, stats, certificate events, reloads), "stderr" carries problems (accept
+# errors, failed reloads, failed certificate attempts, failed console sign-ins).
+# Each key is optional; a stream without a file goes to the process's own
+# stdout / stderr. Both may name the same file.
+#
+#> www.example.com   => 10.0.0.10:443
+#> other.org         => DENY
+
+[global]
+bind = 0.0.0.0
+port = 443
+stats_interval = 300               # one summary line every 5 minutes (0 = never)
+
+[logging]
+stdout = /var/log/tlsproxy/stdout.log
+stderr = /var/log/tlsproxy/stderr.log
+max_size = 15MiB                   # rotate once a file reaches this; K / M / G suffixes, or plain bytes
+max_keep = 10                      # keep stdout.log.1 (newest) .. stdout.log.10, delete older
+compress_after = 3                 # .1-.3 stay plain text, .4.gz and older are gzip
+                                   #   compress_after >= max_keep : never compress
+                                   #   compress_after = 0         : compress every rotated file
+                                   #   max_keep = 0               : keep nothing, just start the file over
+
+# Rotation is numbered (file -> file.1 -> file.2 ...). Compression runs
+# in-process in the background under a guard: until it finishes the log does
+# not rotate again, the live file simply grows past max_size for a moment.
+# Settings follow hot reload; if a new file can't be opened, the old
+# destinations stay in use.
+
+[[host]]
+pattern = www\.example\.com
+target_host = 10.0.0.10
+
+[[host]]
+pattern = .*
+action = deny

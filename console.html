@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tlsproxy console</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1c2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #2f6fed; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --code: #f1f3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #10141b; --panel: #171c25; --text: #e6e9ef; --muted: #8a94a6; --line: #262d3a;
+            --accent: #6b9bff; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --code: #0d1117; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button { background: none; border: 0; color: var(--muted); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.on { background: var(--bg); color: var(--text); font-weight: 600; }
+  .spacer { flex: 1; }
+  main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .card .k { color: var(--muted); font-size: 12px; }
+  .card .v { font-size: 22px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .card .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 18px; }
+  .panel h2 { font-size: 13px; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: 0; }
+  td.n, th.n { text-align: right; }
+  td.wrap { white-space: normal; min-width: 260px; }
+  .muted { color: var(--muted); }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid currentColor; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  button.btn, select.btn, input, textarea { font: inherit; color: inherit; }
+  button.btn, select.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.btn:disabled { opacity: .5; cursor: default; }
+  input[type=text], input[type=password] { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
+  .editor { display: flex; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code); height: 62vh; }
+  .gutter { padding: 10px 8px 10px 12px; text-align: right; color: var(--muted); user-select: none; overflow: hidden; white-space: pre; border-right: 1px solid var(--line); }
+  .editor textarea { flex: 1; border: 0; outline: 0; resize: none; background: transparent; padding: 10px 12px; font: inherit; white-space: pre; overflow: auto; tab-size: 4; }
+  .bar { display: flex; gap: 8px; padding: 10px 14px; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--line); }
+  .msg { padding: 8px 14px; border-top: 1px solid var(--line); white-space: pre-wrap; }
+  pre.log { margin: 0; padding: 10px 14px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 70vh; overflow: auto; background: var(--code); }
+  #login { max-width: 340px; margin: 14vh auto; }
+  #login .panel { padding: 22px; }
+  #login input { width: 100%; margin: 10px 0; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="login" class="hidden">
+  <div class="panel">
+    <h1 style="font-size:16px;margin:0 0 4px">tlsproxy console</h1>
+    <div class="muted">Sign in with the console password.</div>
+    <form id="loginForm">
+      <input type="password" id="password" placeholder="Password" autocomplete="current-password" autofocus>
+      <button class="btn primary" style="width:100%">Sign in</button>
+    </form>
+    <div id="loginMsg" class="bad" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <h1>tlsproxy</h1>
+    <nav id="nav">
+      <button data-tab="dashboard" class="on">Dashboard</button>
+      <button data-tab="connections">Connections</button>
+      <button data-tab="certs">Certificates</button>
+      <button data-tab="config">Config</button>
+      <button data-tab="log">Log</button>
+    </nav>
+    <span class="spacer"></span>
+    <span class="muted" id="headline"></span>
+    <button class="btn" id="logout">Sign out</button>
+  </header>
+
+  <main>
+    <section id="tab-dashboard">
+      <div class="cards" id="cards"></div>
+      <div class="panel">
+        <h2>Hosts <span class="muted" id="hostCount"></span></h2>
+        <div class="scroll"><table>
+          <thead><tr><th>Host (SNI)</th><th class="n">Live</th><th class="n">Total</th><th class="n">TLS terminated</th><th class="n">Received</th><th class="n">Sent</th></tr></thead>
+          <tbody id="hosts"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section id="tab-connections" class="hidden">
+      <div class="panel">
+        <h2>Open connections <span class="muted" id="connCount"></span></h2>
+        <div class="scroll"><table>
+          <thead><tr><th>#</th><th>Client</th><th>Host (SNI)</th><th>Target</th><th>TLS</th><th class="n">Up</th><th class="n">Down</th><th class="n">Age</th><th class="n">Idle</th><th>Client→server</th><th>Server→client</th></tr></thead>
+          <tbody id="conns"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section id="tab-certs" class="hidden">
+      <div class="panel">
+        <h2>Certificates <span class="muted" id="certMeta"></span></h2>
+        <div class="scroll"><table>
+          <thead><tr><th>Name</th><th>Managed by</th><th>Status</th><th>Issuer</th><th>Valid until</th><th class="n">Days left</th><th>Renews from</th><th>Rules</th><th>Details</th><th></th></tr></thead>
+          <tbody id="certs"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section id="tab-config" class="hidden">
+      <div class="panel">
+        <h2>config.toml <span class="muted" id="cfgPath"></span><span class="spacer"></span><span class="warn" id="cfgDirty"></span></h2>
+        <div class="editor"><div class="gutter" id="gutter">1</div><textarea id="cfg" spellcheck="false" wrap="off"></textarea></div>
+        <div class="bar">
+          <button class="btn primary" id="save">Save &amp; apply</button>
+          <button class="btn" id="validate">Validate</button>
+          <button class="btn" id="reload">Discard &amp; reload from disk</button>
+          <span class="spacer"></span>
+          <select id="backups" class="btn"><option value="">Load a backup…</option></select>
+        </div>
+        <div class="bar">
+          <input type="text" id="snis" placeholder="Test routing: host names separated by spaces, &lt;none&gt; for no SNI" style="flex:1;min-width:260px">
+          <button class="btn" id="test">Test against the text above</button>
+        </div>
+        <div class="msg hidden" id="cfgMsg"></div>
+      </div>
+      <div class="muted">The <code>[console]</code> section is hidden and cannot be changed here. Saving validates first, refuses if the file was changed by anyone else since you opened it, keeps the previous file as a backup (last 10) and applies at once. Changes to <code>bind</code> or <code>port</code> need a restart.</div>
+    </section>
+
+    <section id="tab-log" class="hidden">
+      <div class="panel">
+        <h2>Recent log
+          <input type="text" id="logFilter" placeholder="Filter, e.g. [#42] or a host name" style="min-width:280px">
+          <label class="muted"><input type="checkbox" id="logFollow" checked> follow</label>
+        </h2>
+        <pre class="log" id="logLines"></pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let csrf = "", tab = "dashboard", cfgHash = "", cfgMtime = "", cfgLoaded = "", timer = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function bytes(n) {
+  if (n < 1024) return Math.round(n) + " B";
+  const u = ["KiB", "MiB", "GiB", "TiB", "PiB"]; let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(n < 10 ? 2 : 1) + " " + u[i];
+}
+function dur(s) {
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m";
+  return Math.floor(s / 86400) + "d " + Math.floor(s % 86400 / 3600) + "h";
+}
+const num = n => Number(n).toLocaleString();
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  if (r.status === 401 && path !== "/api/login") { showLogin(); throw new Error("signed out"); }
+  return { status: r.status, data: await r.json().catch(() => ({})) };
+}
+
+function showLogin() { clearInterval(timer); $("app").classList.add("hidden"); $("login").classList.remove("hidden"); $("password").focus(); }
+function showApp() { $("login").classList.add("hidden"); $("app").classList.remove("hidden"); select(tab, true); }
+
+$("loginForm").onsubmit = async e => {
+  e.preventDefault();
+  const r = await api("/api/login", { password: $("password").value });
+  $("password").value = "";
+  if (r.data.ok) { csrf = r.data.csrf; $("loginMsg").textContent = ""; showApp(); }
+  else $("loginMsg").textContent = r.data.error || "Sign-in failed";
+};
+$("logout").onclick = async () => { await api("/api/logout", {}); csrf = ""; showLogin(); };
+
+$("nav").onclick = e => { if (e.target.dataset.tab) select(e.target.dataset.tab); };
+function select(name, force) {
+  if (!force && tab === "config" && name !== "config" && dirty() &&
+      !confirm("Leave the editor? Your unsaved text stays in this page until you reload it.")) return;
+  tab = name;
+  for (const b of $("nav").children) b.classList.toggle("on", b.dataset.tab === name);
+  for (const s of document.querySelectorAll("main > section")) s.classList.toggle("hidden", s.id !== "tab-" + name);
+  clearInterval(timer);
+  const every = { dashboard: 1000, connections: 2000, certs: 10000, log: 2000 }[name];
+  const load = { dashboard: loadStatus, connections: loadConns, certs: loadCerts, log: loadLog, config: loadConfigOnce }[name];
+  load().catch(() => {});
+  if (every) timer = setInterval(() => load().catch(() => {}), every);
+}
+
+// ---- dashboard
+async function loadStatus() {
+  const s = (await api("/api/status")).data;
+  $("headline").textContent = `${s.listen} · up ${dur(s.uptimeSeconds)}`;
+  const card = (k, v, sub) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub || ""}</div></div>`;
+  $("cards").innerHTML =
+    card("Live connections", num(s.active), `limit ${num(s.maxConnections)} · ${num(s.goroutines)} goroutines`) +
+    card("Connections to date", num(s.accepted), `${num(s.completed)} relayed · ${num(s.denied)} denied · ${num(s.failed)} failed · ${num(s.rejected)} rejected`) +
+    card("Received from clients", bytes(s.bytesUp), "total to date") +
+    card("Sent to clients", bytes(s.bytesDown), "total to date") +
+    card(`In, last ${s.rateWindowSeconds}s`, bytes(s.rateUp) + "/s", "client → upstream") +
+    card(`Out, last ${s.rateWindowSeconds}s`, bytes(s.rateDown) + "/s", "upstream → client") +
+    card(`New connections, last ${s.rateWindowSeconds}s`, s.rateConnections.toFixed(1) + "/s", `${num(s.rules)} rules`) +
+    card("Route cache", `${num(s.cacheAllow)} / ${num(s.cacheDeny)}`, `allow / deny · ${num(s.cacheHits)} hits, ${num(s.cacheMisses)} misses`);
+  $("hostCount").textContent = `(${s.hosts.length})`;
+  $("hosts").innerHTML = s.hosts.map(h => `<tr><td>${esc(h.Host)}</td><td class="n">${h.Active ? "<b>" + num(h.Active) + "</b>" : 0}</td>
+    <td class="n">${num(h.Total)}</td><td class="n">${num(h.Terminated)}</td><td class="n">${bytes(h.BytesUp)}</td><td class="n">${bytes(h.BytesDown)}</td></tr>`).join("")
+    || `<tr><td colspan="6" class="muted">No connections yet.</td></tr>`;
+}
+
+// ---- connections
+async function loadConns() {
+  const d = (await api("/api/connections")).data;
+  $("connCount").textContent = `(${d.total})`;
+  const st = v => v === "open" ? `<span class="ok">open</span>` : `<span class="warn">${esc(v)}</span>`;
+  $("conns").innerHTML = d.connections.map(c => `<tr><td>${c.id}</td><td>${esc(c.src)}</td><td>${esc(c.sni || "<none>")}</td>
+    <td>${esc(c.dst)}</td>
+    <td title="${esc(c.mode)}">${c.terminated ? `<span class="tag ok">terminated</span>` : `<span class="tag muted">pass-through</span>`}</td>
+    <td class="n">${bytes(c.bytesUp)}</td><td class="n">${bytes(c.bytesDown)}</td><td class="n">${dur(c.ageSeconds)}</td><td class="n">${dur(c.idleSeconds)}</td>
+    <td>${st(c.cToS)}</td><td>${st(c.sToC)}</td></tr>`).join("") || `<tr><td colspan="11" class="muted">No open connections.</td></tr>`;
+}
+
+// ---- certificates
+async function loadCerts() {
+  const d = (await api("/api/certs")).data;
+  $("certMeta").textContent = `automatic ones live in ${d.certPath} · ${d.acmeDirectory}`;
+  const cls = { ok: "ok", expiring: "warn", expired: "bad", missing: "warn", failing: "bad" };
+  $("certs").innerHTML = (d.certs || []).map(c => `<tr>
+    <td>${esc(c.Name)}</td>
+    <td>${c.Source === "auto" ? "proxy (ACME, automatic)" : "you (directory)"}</td>
+    <td><span class="tag ${cls[c.Status] || ""}">${esc(c.Status)}</span></td>
+    <td>${esc(c.Issuer || "—")}</td><td>${esc(c.NotAfter || "—")}</td>
+    <td class="n ${c.DaysLeft < 8 && c.NotAfter ? "bad" : ""}">${c.NotAfter ? c.DaysLeft : "—"}</td>
+    <td>${esc(c.RenewFrom || "—")}</td><td>${(c.RuleLines || []).map(l => "line " + l).join(", ")}</td>
+    <td class="wrap">${c.LastError ? `<span class="bad">Last attempt failed: ${esc(c.LastError)}</span><br><span class="muted">next attempt ${esc(c.NextAttempt)}</span>`
+       : `<span class="muted">${esc(c.Detail)}</span>`}<br><span class="muted">${esc(c.Dir)}</span></td>
+    <td>${c.Source === "auto" && c.LastError ? `<button class="btn" data-retry="${esc(c.Name)}">Retry now</button>` : ""}</td></tr>`).join("")
+    || `<tr><td colspan="10" class="muted">No rule terminates TLS, so there are no certificates.</td></tr>`;
+}
+$("certs").onclick = async e => {
+  const name = e.target.dataset.retry;
+  if (!name) return;
+  e.target.disabled = true;
+  await api("/api/certs/retry", { domain: name });
+  setTimeout(() => loadCerts().catch(() => {}), 1500);
+};
+
+// ---- log
+async function loadLog() {
+  const d = (await api("/api/log?n=800&filter=" + encodeURIComponent($("logFilter").value))).data;
+  const el = $("logLines");
+  el.textContent = (d.lines || []).join("\n");
+  if ($("logFollow").checked) el.scrollTop = el.scrollHeight;
+}
+$("logFilter").oninput = () => loadLog().catch(() => {});
+
+// ---- config editor
+const dirty = () => $("cfg").value !== cfgLoaded;
+function gutter() {
+  const n = $("cfg").value.split("\n").length;
+  let s = ""; for (let i = 1; i <= n; i++) s += i + "\n";
+  $("gutter").textContent = s;
+  $("gutter").scrollTop = $("cfg").scrollTop;
+  $("cfgDirty").textContent = dirty() ? "unsaved changes" : "";
+}
+$("cfg").oninput = gutter;
+$("cfg").onscroll = () => { $("gutter").scrollTop = $("cfg").scrollTop; };
+$("cfg").onkeydown = e => {
+  if (e.key === "Tab") { e.preventDefault(); document.execCommand("insertText", false, "    "); }
+  if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); $("save").click(); }
+};
+function message(kind, text) {
+  const m = $("cfgMsg"); m.className = "msg " + kind; m.textContent = text;
+  const at = /\bline (\d+)/.exec(text);       // jump to the offending line
+  if (kind === "bad" && at) {
+    const lines = $("cfg").value.split("\n"), n = Math.min(+at[1], lines.length);
+    const start = lines.slice(0, n - 1).join("\n").length + (n > 1 ? 1 : 0);
+    $("cfg").focus(); $("cfg").setSelectionRange(start, start + lines[n - 1].length);
+    $("cfg").scrollTop = Math.max(0, (n - 8) * 19.5);
+  }
+}
+async function listBackups() {
+  const b = (await api("/api/config/backups")).data.backups || [];
+  $("backups").innerHTML = `<option value="">Load a backup… (${b.length})</option>` + b.map(n => `<option>${esc(n)}</option>`).join("");
+}
+let cfgOnce = false;
+async function loadConfigOnce() { if (!cfgOnce) { cfgOnce = true; await loadConfig(); } }
+async function loadConfig() {
+  const d = (await api("/api/config")).data;
+  if (!d.ok) return message("bad", d.error);
+  cfgHash = d.hash; cfgMtime = d.mtime; cfgLoaded = d.text; $("cfg").value = d.text; $("cfgPath").textContent = d.path;
+  gutter(); $("cfgMsg").classList.add("hidden");
+  await listBackups();
+}
+$("reload").onclick = () => { if (!dirty() || confirm("Discard your changes?")) loadConfig(); };
+$("backups").onchange = async e => {
+  const name = e.target.value; e.target.value = "";
+  if (!name) return;
+  const d = (await api("/api/config/backup?name=" + encodeURIComponent(name))).data;
+  if (d.ok) { $("cfg").value = d.text; gutter(); message("warn", `Loaded ${name} into the editor. Nothing changes until you press Save & apply.`); }
+};
+$("validate").onclick = async () => {
+  const d = (await api("/api/config/validate", { text: $("cfg").value })).data;
+  if (!d.ok) return message("bad", d.error);
+  message(d.warnings && d.warnings.length ? "warn" : "ok", "Valid: " + d.summary +
+    (d.autoDomains && d.autoDomains.length ? "\nAutomatic certificates: " + d.autoDomains.join(", ") : "") +
+    (d.warnings || []).map(w => "\nWarning: " + w).join(""));
+};
+$("test").onclick = async () => {
+  const snis = $("snis").value.split(/[\s,]+/).filter(Boolean);
+  if (!snis.length) return message("warn", "Type one or more host names first.");
+  const d = (await api("/api/config/test", { text: $("cfg").value, snis })).data;
+  if (!d.ok) return message("bad", d.error);
+  message("ok", d.results.map(r => r.error ? `${r.sni}  ->  ERROR ${r.error}`
+    : r.allow ? `${r.sni}  ->  ${r.target}${r.terminated ? "  (TLS terminated here)" : "  (passed through)"}`
+    : `${r.sni}  ->  DENY${r.ruleLine ? "" : "  (no rule matched)"}`).join("\n"));
+};
+$("save").onclick = async () => {
+  const d = (await api("/api/config/save", { text: $("cfg").value, baseHash: cfgHash, baseMtime: cfgMtime })).data;
+  if (!d.ok) return message("bad", d.error);
+  cfgHash = d.hash; cfgMtime = d.mtime; cfgLoaded = $("cfg").value; gutter();
+  if (d.unchanged) return message("ok", "Nothing to save: the text matches the file.");
+  message(d.restartNeeded || (d.warnings || []).length ? "warn" : "ok", `Saved and applied. Previous version kept as ${d.backup}.` +
+    (d.restartNeeded ? "\nbind/port changed: that part needs a restart." : "") + (d.warnings || []).map(w => "\nWarning: " + w).join(""));
+  await listBackups();
+};
+window.onbeforeunload = () => dirty() ? "Unsaved config changes" : undefined;
+
+// ---- start
+api("/api/session").then(r => { if (r.data.ok) { csrf = r.data.csrf; showApp(); } else showLogin(); }).catch(() => {});
+</script>
+</body>
+</html>

@@ -34,6 +34,9 @@ type ConnState struct {
 	closed         bool
 	halfCloseTimer *time.Timer
 
+	Mode string     // "" = passed through, otherwise how TLS was terminated
+	host *HostStats // per-host counters this connection feeds
+
 	CToS, SToC           atomic.Int32 // dirOpen / dirHalfClosed
 	BytesUp, BytesDown   atomic.Int64
 	lastActivityUnixNano atomic.Int64
@@ -57,9 +60,77 @@ type Stats struct {
 
 	mu    sync.Mutex
 	conns map[uint64]*ConnState
+	hosts map[string]*HostStats
+
+	Started time.Time
+	rateMu  sync.Mutex
+	samples [rateWindow + 1]rateSample // one per second, ring
+	sampleN int
 }
 
-func NewStats() *Stats { return &Stats{conns: make(map[uint64]*ConnState)} }
+// HostStats are the counters for one requested host name (SNI).
+type HostStats struct {
+	Active, Total      atomic.Int64
+	BytesUp, BytesDown atomic.Int64
+	Terminated         atomic.Int64 // connections whose TLS was terminated here
+}
+
+const (
+	rateWindow   = 5    // seconds
+	maxHostStats = 2000 // names come from clients; beyond this they share "(other)"
+)
+
+type rateSample struct {
+	at                 time.Time
+	up, down, accepted int64
+}
+
+// host returns the counters for an allowed name.
+func (s *Stats) host(name string) *HostStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h := s.hosts[name]; h != nil {
+		return h
+	}
+	if len(s.hosts) >= maxHostStats {
+		name = "(other)"
+		if h := s.hosts[name]; h != nil {
+			return h
+		}
+	}
+	h := &HostStats{}
+	s.hosts[name] = h
+	return h
+}
+
+// sample records the totals once a second for the rate display.
+func (s *Stats) sample() {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	s.samples[s.sampleN%len(s.samples)] = rateSample{time.Now(), s.BytesUp.Load(), s.BytesDown.Load(), s.Accepted.Load()}
+	s.sampleN++
+}
+
+// Rates returns bytes/s up, bytes/s down and connections/s over the last
+// rateWindow seconds.
+func (s *Stats) Rates() (up, down, conns float64) {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	if s.sampleN < 2 {
+		return 0, 0, 0
+	}
+	newest := s.samples[(s.sampleN-1)%len(s.samples)]
+	oldest := s.samples[max(0, s.sampleN-len(s.samples))%len(s.samples)]
+	secs := newest.at.Sub(oldest.at).Seconds()
+	if secs <= 0 {
+		return 0, 0, 0
+	}
+	return float64(newest.up-oldest.up) / secs, float64(newest.down-oldest.down) / secs, float64(newest.accepted-oldest.accepted) / secs
+}
+
+func NewStats() *Stats {
+	return &Stats{conns: make(map[uint64]*ConnState), hosts: make(map[string]*HostStats), Started: time.Now()}
+}
 
 func (s *Stats) register(c *ConnState) {
 	s.mu.Lock()

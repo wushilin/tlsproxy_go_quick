@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -13,7 +14,22 @@ func main() {
 	args := os.Args[1:]
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
-			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--test <sni>...]\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--test <sni>...]\n       %s --hash-password    (reads a password from stdin, prints a [console] password_hash line)\n", os.Args[0], os.Args[0])
+			return
+		}
+		if a == "--hash-password" {
+			fmt.Fprint(os.Stderr, "Password (will be visible): ")
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if line = strings.TrimRight(line, "\r\n"); line == "" {
+				fmt.Fprintf(os.Stderr, "no password given (%v)\n", err)
+				os.Exit(2)
+			}
+			hash, err := hashPassword(line)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Printf("password_hash = \"%s\"\n", hash)
 			return
 		}
 	}

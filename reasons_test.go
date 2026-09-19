@@ -39,6 +39,7 @@ func TestMain(m *testing.M) {
 	logMu.Lock()
 	logOut, logErr = testLog, testLog          // activity and problems alike
 	certAttemptBackoff = 50 * time.Millisecond // don't wait 5 s between ACME attempts in tests
+	pbkdf2Iterations = 1000                    // fast password hashing in tests
 	logMu.Unlock()
 	os.Exit(m.Run())
 }

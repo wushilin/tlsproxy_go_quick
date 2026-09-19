@@ -1,0 +1,55 @@
+# The web console: dashboard, open connections, certificates, recent log and a
+# config editor, on its own port.
+#
+# The console speaks plain HTTP on purpose. Keep it on loopback and publish it
+# through a terminating rule of this same proxy, so the password only ever
+# travels inside TLS with a real certificate.
+#
+#> console.example.com   => 127.0.0.1:9443
+#> www.example.com       => 10.0.0.10:443
+#> other.org             => DENY
+
+[global]
+bind = 0.0.0.0
+port = 443
+cert_path = /var/db/tlsproxy/certs
+acme_agree_tos = true
+public_ip_address = 203.0.113.7
+
+[console]
+listen = 127.0.0.1                 # default. Anything else logs a warning: plain HTTP on the network
+port = 9443                        # required
+password = change-me-then-restart  # typed as plain text; at start-up (and on reload) the proxy replaces
+                                   #   this line with  password_hash = "pbkdf2-sha256$..."  and logs it.
+                                   #   To change the password later, put a  password =  line back.
+                                   #   Or generate the hash yourself:  tlsproxy --hash-password
+hostnames = console.example.com    # names the console may be addressed by, besides IP addresses and
+                                   #   "localhost". Requests for any other name are refused
+                                   #   (protection against DNS rebinding). ; or , separated
+
+# A password is always required. Sign-ins are rate limited (5 failures, then
+# 30 s doubling up to 15 min), sessions last 12 hours, every change needs the
+# session's CSRF token. The [console] section itself is hidden from the editor
+# and cannot be changed there; listen and port need a restart, password and
+# hostnames follow hot reload.
+#
+# Saving from the editor: the text is validated first (an invalid config is
+# never written), the save is refused if the file changed since the editor
+# loaded it (modification time and content are both checked, under a lock),
+# the previous file is kept as config.toml.<timestamp>.bak (last 10), and the
+# new config is applied at once.
+
+[[host]]
+pattern = console\.example\.com
+cert = auto
+upstream_tls = false               # the console is plain HTTP
+target_host = 127.0.0.1
+target_port = 9443
+
+[[host]]
+pattern = www\.example\.com
+target_host = 10.0.0.10
+
+[[host]]
+pattern = .*
+action = deny

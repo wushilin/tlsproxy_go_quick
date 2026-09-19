@@ -51,11 +51,15 @@ type Server struct {
 	stats   *Stats
 	certs   *CertManager
 	nextID  atomic.Uint64
+
+	configPath string        // "" when the config did not come from a file
+	reloadNow  chan struct{} // poked by the console after a save
+	console    *Console
 }
 
 // NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager()}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan struct{}, 1)}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}
@@ -95,10 +99,22 @@ func (s *Server) Serve(l net.Listener, path string) error {
 	for _, k := range rt.cfg.Ignored {
 		logf("config: %q is not used by this version and was ignored", k)
 	}
+	s.configPath = path
 	if path != "" {
+		s.securePassword(path, rt.cfg) // before anything reads the file again
 		go s.watchConfig(path)
 	}
 	go s.reportStats()
+	go func() {
+		for range time.Tick(time.Second) {
+			s.stats.sample()
+		}
+	}()
+	if rt.cfg.Console != nil {
+		if err := s.startConsole(rt.cfg.Console); err != nil {
+			return fmt.Errorf("[console]: %w", err)
+		}
+	}
 	watchSignals(s)
 	for {
 		sock, err := l.Accept()
@@ -149,12 +165,16 @@ func (s *Server) watchConfig(path string) {
 	last, _ := os.ReadFile(path)
 	haveLast := last != nil
 	for {
-		interval := s.runtime.Load().cfg.ReloadInterval
-		if interval == 0 {
-			logf("config reload disabled (reload_interval=0)")
-			return
+		// Wake up every reload_interval, or at once when the console saved.
+		// With reload_interval = 0 only the console triggers reloads.
+		var tick <-chan time.Time
+		if interval := s.runtime.Load().cfg.ReloadInterval; interval > 0 {
+			tick = time.After(interval)
 		}
-		time.Sleep(interval)
+		select {
+		case <-tick:
+		case <-s.reloadNow:
+		}
 		text, err := os.ReadFile(path)
 		if err != nil {
 			if haveLast {
@@ -180,6 +200,12 @@ func (s *Server) watchConfig(path string) {
 		if err := s.certs.Apply(cfg); err != nil {
 			errorf("config reload: %s rejected, keeping current config: %v", path, err)
 			continue
+		}
+		if s.securePassword(path, cfg) {
+			last, _ = os.ReadFile(path) // our own rewrite is not a change to reload
+		}
+		if s.console != nil {
+			s.console.update(cfg.Console)
 		}
 		for _, w := range cfg.Warnings {
 			errorf("config: %s", w)
@@ -320,7 +346,11 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 	logf("[#%d] route sni=%s -> %s (ALLOW, rule line %d%s)", id, sniDisp, destDisp, d.RuleLine, cached)
 	c.mu.Lock()
 	c.SNI, c.Dst = sni, destDisp
+	c.host = s.stats.host(sniDisp)
 	c.mu.Unlock()
+	c.host.Active.Add(1)
+	c.host.Total.Add(1)
+	defer c.host.Active.Add(-1)
 
 	t0 := time.Now()
 	dialer := net.Dialer{Timeout: cfg.ConnectTimeout}
@@ -367,6 +397,10 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 			return
 		}
 		clientSide, mode = tlsClient, how
+		c.host.Terminated.Add(1)
+		c.mu.Lock()
+		c.Mode = how
+		c.mu.Unlock()
 		if tlsServer != nil {
 			serverSide = tlsServer
 		}
@@ -388,6 +422,7 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 			return
 		}
 		c.BytesUp.Add(int64(len(hello)))
+		c.host.BytesUp.Add(int64(len(hello)))
 		s.stats.BytesUp.Add(int64(len(hello)))
 	}
 	c.touch()
@@ -554,10 +589,10 @@ func (r *relay) dirState(d direction) *atomic.Int32 {
 // buf[:n] from the latest read is used.
 func (r *relay) pump(d direction) {
 	from, to := r.client, r.server
-	bytes, total := &r.c.BytesUp, &r.stats.BytesUp
+	bytes, total, perHost := &r.c.BytesUp, &r.stats.BytesUp, &r.c.host.BytesUp
 	if d == sToC {
 		from, to = r.server, r.client
-		bytes, total = &r.c.BytesDown, &r.stats.BytesDown
+		bytes, total, perHost = &r.c.BytesDown, &r.stats.BytesDown, &r.c.host.BytesDown
 	}
 	buf := r.pool.Get()
 	defer r.pool.Put(buf)
@@ -585,6 +620,7 @@ func (r *relay) pump(d direction) {
 				return
 			}
 			bytes.Add(int64(n))
+			perHost.Add(int64(n))
 			total.Add(int64(n))
 			r.c.touch()
 			// Optional coalescing: after a short read the socket is drained;
@@ -694,4 +730,56 @@ func (r *relay) finish() {
 	}
 	r.c.closed = true
 	r.c.mu.Unlock()
+}
+
+// securePassword replaces a plaintext [console] password in the config file
+// with its hash, so the secret sits on disk only until the proxy first sees
+// it. Only that one line is rewritten. It reports whether the file changed.
+func (s *Server) securePassword(path string, cfg *Config) bool {
+	c := cfg.Console
+	if c == nil || c.Password == "" {
+		return false
+	}
+	hash, err := hashPassword(c.Password)
+	if err != nil {
+		errorf("console: cannot hash the password: %v", err)
+		return false
+	}
+	c.PasswordHash, c.Password = hash, ""
+	configFileMu.Lock() // no console save may slip between this read and write
+	defer configFileMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		errorf("console: cannot read %s to remove the plaintext password: %v", path, err)
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	section, done := "", false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			section = strings.Trim(trimmed, "[] \t")
+			continue
+		}
+		key, _, ok := strings.Cut(trimmed, "=")
+		if !ok || section != "console" {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "password":
+			lines[i] = "password_hash = \"" + hash + "\""
+			done = true
+		case "password_hash":
+			lines[i] = "" // superseded by the new password
+		}
+	}
+	if !done {
+		return false
+	}
+	if err := writeFileAtomic(path, []byte(strings.Join(lines, "\n"))); err != nil {
+		errorf("console: cannot rewrite %s, THE PLAINTEXT PASSWORD IS STILL IN THE FILE: %v", path, err)
+		return false
+	}
+	logf("console: replaced the plaintext password in %s with its hash", path)
+	return true
 }

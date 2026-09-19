@@ -1,0 +1,117 @@
+# Every supported option in one file, each with a non-default value where that
+# makes sense. `go test` checks that no option is missing here, so this file
+# is a complete reference. See config.toml for the defaults.
+#
+#> <none>                 => 10.0.0.99:8443
+#> nas.example.com        => 192.168.1.10:5001
+#> www.example.com        => 192.168.1.30:8080
+#> shop.example.com       => 192.168.1.30:8080
+#> intranet.example.com   => 192.168.1.40:443
+#> api.example.com        => backend-api.lan:443
+#> blocked.example.com    => DENY
+#> legacy.example.com     => 192.168.1.50:443
+#> other.org              => DENY
+
+[global]
+bind = "::"                        # listen address; "::" = all IPv6 (and usually IPv4) addresses
+port = 443                         # required
+
+handshake_timeout = 5              # seconds to receive the whole ClientHello
+connect_timeout = 3                # seconds to resolve and connect to the target
+idle_timeout = 300                 # close after this long without traffic either way; 0 = never
+half_close_timeout = 10            # after one side closes, the other gets this long; 0 = unlimited
+
+max_connections = 4096             # more are rejected; goroutines <= 2 x this
+buffer_size = 32768                # bytes per pooled buffer (512..1048576); two per open connection
+buffer_pool_max_idle = 2048        # free buffers kept for reuse; default 3 x max_connections
+short_read_delay_us = 0            # microseconds to pause after a short read; 0 = off (little gain in Go)
+
+allow_cache_size = 8192            # LRU of allowed SNI -> target decisions; 0 = off
+deny_cache_size = 1024             # separate LRU of denied SNIs; 0 = off
+
+reload_interval = 10               # re-read this file every N seconds; minimum 5, 0 = only via the console
+stats_interval = 300               # log a summary line every N seconds; 0 = never
+
+# Certificates, for rules with cert = ...
+cert_path = /var/db/tlsproxy/certs       # <cert_path>/<name>/cert.pem + key.pem, account key in _account/
+expiry_threshold_days = 20               # renew this long before expiry (or at 1/3 of the lifetime left)
+acme_agree_tos = true                    # required for cert = auto
+acme_email = admin@example.com           # optional account contact
+acme_directory = https://acme-staging-v02.api.letsencrypt.org/directory   # default: Let's Encrypt production
+acme_ca_file = /usr/local/etc/ssl/private-ca.pem   # extra root for the ACME server's own HTTPS
+public_ip_address = 203.0.113.7; 2001:db8::1       # only ask the CA for names resolving to one of these
+dns_resolvers = 9.9.9.9; 1.1.1.1:53                # resolvers for that check (host or host:port)
+
+# Accepted for compatibility with the Rust version's files, and ignored:
+io_model = events
+worker_threads = 4
+
+[logging]
+stdout = /var/log/tlsproxy/stdout.log    # activity; unset = the process's stdout
+stderr = /var/log/tlsproxy/stderr.log    # problems; unset = the process's stderr
+max_size = 50M                           # rotate at this size (K / M / G, KiB / MiB / GiB, or bytes)
+max_keep = 14                            # rotated generations kept
+compress_after = 2                       # generations above this number are gzip
+
+[console]
+listen = 127.0.0.1
+port = 9443
+password_hash = "pbkdf2-sha256$600000$rbT1NRdts8POqh5mv9xJ4w$2aWzIzv9nmj1Xh6pT3q5N0p3rGZr7m9sQ0Y8v1o2bXk"
+# password = plain text here instead; the proxy replaces it with password_hash on start
+hostnames = console.example.com, admin.example.com
+
+# ---- rules: first match wins; no match = deny -------------------------------
+
+# Clients without SNI (pattern NONE, any letter case).
+[[host]]
+pattern = NONE
+target_host = 10.0.0.99
+target_port = 8443
+
+# Terminate TLS, automatic certificate; the name comes from the literal pattern.
+# The upstream speaks TLS with a self-signed certificate.
+[[host]]
+pattern = nas\.example\.com
+action = allow                     # the default
+cert = auto
+target_host = 192.168.1.10
+target_port = 5001
+upstream_tls = true                # the default when cert is set
+upstream_tls_verify = false        # default true: verify against the system roots
+upstream_sni = nas.internal.lan    # default: the name the client asked for
+
+# Terminate TLS for a regex: the exact names must be listed. shop.* matches the
+# pattern but is not listed, so it gets a self-signed placeholder.
+[[host]]
+pattern = (www|blog|shop)\.example\.com
+cert = auto
+cert_domains = www.example.com, blog.example.com
+target_host = 192.168.1.30
+target_port = 8080
+upstream_tls = false               # plaintext upstream: only http/1.1 is offered to clients
+
+# Terminate TLS with your own certificate: <dir>/cert.pem (leaf + chain),
+# <dir>/key.pem and optionally <dir>/ca.pem; re-read when cert.pem changes.
+[[host]]
+pattern = intranet\.example\.com
+cert = /usr/local/etc/ssl/intranet
+target_host = 192.168.1.40
+
+# Pass-through with a capture group in the target ($1, ${1}; $0 = whole name).
+[[host]]
+pattern = (api|git)\.example\.com
+target_host = backend-$1.lan
+
+[[host]]
+pattern = blocked\.example\.com
+action = deny
+
+# Pass-through: the backend keeps its own certificate.
+[[host]]
+pattern = legacy\.example\.com
+target_host = 192.168.1.50
+target_port = 443
+
+[[host]]
+pattern = .*
+action = deny

@@ -69,6 +69,25 @@ port = 443                      # (required) listen port
 #                               #   the background under a guard: until it finishes the log does
 #                               #   not rotate again, the live file just grows past max_size.
 
+# --- Compatibility ---------------------------------------------------------------
+# io_model and worker_threads belong to the Rust version (tlsproxy_rs_quick). They
+# are accepted here and ignored (with a log line), so one file works for both.
+
+# --- Web console (optional) ---------------------------------------------------
+# Dashboard, connections, certificates, log and a config editor on its own port,
+# over plain HTTP. Keep it on loopback and publish it through a terminating rule
+# of this proxy (see samples/11-web-console.toml). Remove the leading "# " to use:
+#
+# [console]
+# listen = 127.0.0.1            # default 127.0.0.1; any other address logs a warning (plain HTTP)
+# port = 9443                   # required
+# password = change-me          # plain text; the proxy replaces this line with password_hash on start
+# password_hash = "pbkdf2-sha256$..."   # or generate it yourself: tlsproxy --hash-password
+# hostnames = console.example.com       # extra names the console answers to (DNS rebinding protection)
+#
+# listen and port need a restart; password and hostnames follow hot reload. The
+# section is hidden from the console's editor and cannot be changed there.
+
 # --- Rules -------------------------------------------------------------------
 # Checked top to bottom; the first match wins; a name matching no rule is denied.
 # pattern     (required) case-insensitive mini regex, must match the WHOLE SNI;

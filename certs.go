@@ -106,17 +106,9 @@ func NewCertManager() *CertManager {
 // reload). Automatic ones are picked up from disk if present; the rest is the
 // background worker's job.
 func (m *CertManager) Apply(cfg *Config) error {
-	loaded := map[string]*fileCert{}
-	for i := range cfg.Rules {
-		dir := cfg.Rules[i].Cert
-		if dir == "" || dir == "auto" || loaded[dir] != nil {
-			continue
-		}
-		fc, err := loadDirCert(dir)
-		if err != nil {
-			return fmt.Errorf("[[host]] at line %d: cert = %s: %w", cfg.Rules[i].Line, dir, err)
-		}
-		loaded[dir] = fc
+	loaded, err := loadDirCerts(cfg)
+	if err != nil {
+		return err
 	}
 	m.mu.Lock()
 	m.cfg, m.files = cfg, loaded
@@ -130,6 +122,29 @@ func (m *CertManager) Apply(cfg *Config) error {
 	default:
 	}
 	return nil
+}
+
+// Check reports whether cfg's directory certificates can be loaded, without
+// changing anything (the console validates unsaved text with it).
+func (m *CertManager) Check(cfg *Config) error {
+	_, err := loadDirCerts(cfg)
+	return err
+}
+
+func loadDirCerts(cfg *Config) (map[string]*fileCert, error) {
+	loaded := map[string]*fileCert{}
+	for i := range cfg.Rules {
+		dir := cfg.Rules[i].Cert
+		if dir == "" || dir == "auto" || loaded[dir] != nil {
+			continue
+		}
+		fc, err := loadDirCert(dir)
+		if err != nil {
+			return nil, fmt.Errorf("[[host]] at line %d: cert = %s: %w", cfg.Rules[i].Line, dir, err)
+		}
+		loaded[dir] = fc
+	}
+	return loaded, nil
 }
 
 // Start launches the background worker (once).
@@ -676,4 +691,119 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// CertInfo describes one certificate for the console.
+type CertInfo struct {
+	Name        string // the managed name, or the certificate's names for a directory
+	Source      string // "auto" or "directory"
+	Dir         string // where it lives on disk
+	RuleLines   []int  // rules using it
+	Status      string // ok | expiring | expired | missing | failing
+	Detail      string // human-readable status
+	Issuer      string
+	Names       []string // DNS names in the certificate
+	NotBefore   string
+	NotAfter    string
+	DaysLeft    int
+	RenewFrom   string // auto only
+	LastError   string // auto only: why the last attempt failed
+	NextAttempt string // auto only: when it is retried
+}
+
+// Snapshot lists every certificate in use: automatic names and directories.
+func (m *CertManager) Snapshot() []CertInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cfg == nil {
+		return nil
+	}
+	now := time.Now()
+	day := func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04Z") }
+	fill := func(info *CertInfo, c *tls.Certificate) {
+		if c == nil || c.Leaf == nil {
+			info.Status = "missing"
+			return
+		}
+		leaf := c.Leaf
+		info.Issuer, info.Names = leaf.Issuer.CommonName, leaf.DNSNames
+		info.NotBefore, info.NotAfter = day(leaf.NotBefore), day(leaf.NotAfter)
+		info.DaysLeft = int(leaf.NotAfter.Sub(now).Hours() / 24)
+		switch {
+		case now.After(leaf.NotAfter):
+			info.Status = "expired"
+		case now.After(renewAt(leaf, m.cfg.ExpiryThresholdDays)):
+			info.Status = "expiring"
+		default:
+			info.Status = "ok"
+		}
+	}
+	lines := map[string][]int{}
+	var order []string
+	for i := range m.cfg.Rules {
+		r := &m.cfg.Rules[i]
+		keys := r.CertDomains
+		if r.Cert != "" && r.Cert != "auto" {
+			keys = []string{"dir:" + r.Cert}
+		}
+		for _, k := range keys {
+			if _, seen := lines[k]; !seen {
+				order = append(order, k)
+			}
+			lines[k] = append(lines[k], r.Line)
+		}
+	}
+	var out []CertInfo
+	for _, k := range order {
+		info := CertInfo{RuleLines: lines[k]}
+		if dir, isDir := strings.CutPrefix(k, "dir:"); isDir {
+			info.Source, info.Dir, info.Name = "directory", dir, dir
+			if fc := m.files[dir]; fc != nil {
+				fill(&info, fc.cert)
+				info.Detail = "loaded from " + dir + "; re-read when cert.pem changes (you renew this one)"
+				if len(info.Names) > 0 {
+					info.Name = strings.Join(info.Names, ", ")
+				}
+			}
+		} else {
+			info.Source, info.Name, info.Dir = "auto", k, autoDir(m.cfg, k)
+			c := m.auto[k]
+			fill(&info, c)
+			info.Detail = certStatus(c, m.cfg.ExpiryThresholdDays, now)
+			if c != nil && c.Leaf != nil {
+				info.RenewFrom = day(renewAt(c.Leaf, m.cfg.ExpiryThresholdDays))
+			}
+			if e := m.lastError[k]; e != "" {
+				info.LastError, info.NextAttempt = e, day(m.nextTry[k])
+				if info.Status == "missing" || info.Status == "expired" {
+					info.Status = "failing"
+				}
+			}
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+// RetryNow clears a name's wait and wakes the worker. False if the name is
+// not an automatic certificate.
+func (m *CertManager) RetryNow(domain string) bool {
+	m.mu.Lock()
+	known := false
+	if m.cfg != nil {
+		for _, d := range m.cfg.AutoDomains() {
+			known = known || d == domain
+		}
+	}
+	if known {
+		delete(m.nextTry, domain)
+	}
+	m.mu.Unlock()
+	if known {
+		select {
+		case m.wake <- struct{}{}:
+		default:
+		}
+	}
+	return known
 }

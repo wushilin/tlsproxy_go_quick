@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -49,9 +50,22 @@ type Config struct {
 	AcmeDirectory       string   // ACME directory URL
 	AcmeCAFile          string   // extra root CA for the ACME server's HTTPS (private CAs, Pebble)
 	Warnings            []string // non-fatal findings, logged at startup / reload
-	Rules               []Rule
+
+	Console *ConsoleConfig // the [console] section; nil = no web console
+	Rules   []Rule
 	// Settings from the Rust version that no longer apply and were ignored.
 	Ignored []string
+}
+
+// ConsoleConfig is the [console] section: a web console on its own port.
+// Plain HTTP by design: bind it to loopback and publish it through a
+// terminating rule of this proxy if it must be reachable from elsewhere.
+type ConsoleConfig struct {
+	Listen       string
+	Port         int
+	Password     string   // plaintext, only until the proxy replaces it with PasswordHash
+	PasswordHash string   // pbkdf2-sha256$...
+	Hostnames    []string // extra names the console may be addressed by (Host header check)
 }
 
 type Rule struct {
@@ -236,6 +250,12 @@ func ParseConfig(text string) (*Config, error) {
 				return nil, fail("bad section header")
 			}
 			section = strings.TrimSpace(line[1 : len(line)-1])
+			if section == "console" {
+				if cfg.Console == nil {
+					cfg.Console = &ConsoleConfig{Listen: "127.0.0.1"}
+				}
+				continue
+			}
 			if section != "global" && section != "logging" {
 				return nil, fail("unknown section [%s]", section)
 			}
@@ -347,6 +367,26 @@ func ParseConfig(text string) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
+		case "console":
+			switch key {
+			case "listen":
+				cfg.Console.Listen = value
+			case "port":
+				if cfg.Console.Port, err = parsePort(value); err != nil {
+					return nil, fail("%v", err)
+				}
+			case "password":
+				cfg.Console.Password = value
+			case "password_hash":
+				if _, _, _, herr := parseHash(value); herr != nil {
+					return nil, fail("password_hash: %v", herr)
+				}
+				cfg.Console.PasswordHash = value
+			case "hostnames":
+				cfg.Console.Hostnames = splitList(strings.ToLower(value))
+			default:
+				return nil, fail("unknown key %q in [console]", key)
+			}
 		case "logging":
 			switch key {
 			case "stdout":
@@ -454,6 +494,17 @@ func ParseConfig(text string) (*Config, error) {
 			return nil, fail("%v", err)
 		}
 		cfg.Rules = append(cfg.Rules, rule)
+	}
+	if c := cfg.Console; c != nil {
+		if c.Port == 0 {
+			return nil, fmt.Errorf("[console] port is required")
+		}
+		if c.Password == "" && c.PasswordHash == "" {
+			return nil, fmt.Errorf("[console] needs a password: set password = <text> (the proxy replaces it with a hash) or password_hash")
+		}
+		if ip := net.ParseIP(c.Listen); ip == nil || !ip.IsLoopback() {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("[console] listens on %s over plain HTTP: the password crosses the network unencrypted. Prefer listen = 127.0.0.1 behind a terminating rule", c.Listen))
+		}
 	}
 	if auto := cfg.AutoDomains(); len(auto) > 0 {
 		if cfg.Port != 443 {

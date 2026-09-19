@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -48,8 +49,36 @@ func ConfigureLogging(cfg LogConfig) error {
 	return nil
 }
 
+// recentLog keeps the last lines of both streams for the web console.
+const recentLogSize = 2000
+
+var (
+	recentLines [recentLogSize]string
+	recentNext  int // total lines ever stored; index = recentNext % size
+)
+
+// RecentLog returns up to n of the newest lines (oldest first) that contain
+// filter ("" = all).
+func RecentLog(n int, filter string) []string {
+	logMu.Lock()
+	defer logMu.Unlock()
+	var out []string
+	start := max(0, recentNext-recentLogSize)
+	for i := recentNext - 1; i >= start && len(out) < n; i-- {
+		if line := recentLines[i%recentLogSize]; filter == "" || strings.Contains(line, filter) {
+			out = append(out, line)
+		}
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
 func emit(file *FileLogger, fallback io.Writer, format string, args []any) {
 	line := time.Now().UTC().Format("2006-01-02T15:04:05.000Z") + " " + fmt.Sprintf(format, args...) + "\n"
+	recentLines[recentNext%recentLogSize] = strings.TrimSuffix(line, "\n")
+	recentNext++
 	if file != nil {
 		if err := file.WriteLine(line); err == nil {
 			return
