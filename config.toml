@@ -29,6 +29,10 @@ port = 443                      # (required) listen port
 #                               #   min 5 (at most one reload per 5 s), 0 = never.
 #                               #   bind/port changes need a restart; an invalid file is ignored
 
+# --- Throughput tuning ------------------------------------------------------------
+# short_read_delay_us = 0       # (default: 0 = off) pause N microseconds after a short read so
+#                               #   data batches up: less CPU per GiB, more latency per round trip
+
 # --- State reporting ------------------------------------------------------------
 # stats_interval = 60           # (default: 60) log one summary line every N s; 0 = never.
 #                               #   `kill -USR1 <pid>` logs the summary plus every open connection

@@ -233,8 +233,11 @@ func TestConfigRouting(t *testing.T) {
 }
 
 func TestConfigIgnoresRustOnlyKeys(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\nio_model=events\nshort_read_delay_us=50\n")
-	if !reflect.DeepEqual(c.Ignored, []string{"io_model", "short_read_delay_us"}) {
+	c := mustParse(t, "[global]\nport=1\nio_model=events\nworker_threads=4\nshort_read_delay_us=50\n")
+	if c.ShortReadDelay != 50*time.Microsecond {
+		t.Fatal(c.ShortReadDelay)
+	}
+	if !reflect.DeepEqual(c.Ignored, []string{"io_model", "worker_threads"}) {
 		t.Fatal(c.Ignored)
 	}
 }

@@ -76,8 +76,9 @@ with its default, and a test keeps that file in step with the code:
 | `deny_cache_size`      | 4096    | separate LRU cache of denied SNIs (0 = off)                          |
 | `reload_interval`      | 5       | check the config file every N seconds and apply changes; minimum 5, 0 = never |
 | `stats_interval`       | 60      | log a one-line state summary every N seconds; 0 = never              |
+| `short_read_delay_us`  | 0       | pause N µs after a short read so data batches up. Measured in Go: a few percent more throughput at best, +37 µs (50) or +210 µs (200) per round trip, so leave it off unless your box shows otherwise |
 
-`io_model`, `short_read_delay_us` and `worker_threads` from the Rust version
+`io_model` and `worker_threads` from the Rust version
 are accepted and ignored (with a log line), so the same file works for both.
 More examples, each with its expected routing, are in [`samples/`](samples).
 
@@ -161,11 +162,11 @@ Max, client, backend and proxy sharing the machine:
 | 64-byte round trip, added (p50) | +20 µs | +19 µs | +15 µs |
 | connect + ClientHello, added (p50) | **+111 µs** | +197 µs | +165 µs |
 | new connections/s (32 parallel) | **9,800** | 5,300 | 6,300 |
-| 1-stream throughput | 634 MiB/s | 730 MiB/s | 588 MiB/s |
-| proxy CPU per GiB relayed | 1.0 s | 0.4–0.55 s | 0.5–0.75 s |
+| 1-stream throughput | 630–1,070 MiB/s (run to run) | 730 MiB/s | 588 MiB/s |
+| proxy CPU per GiB relayed | 0.6–1.0 s | 0.4–0.55 s | 0.5–0.75 s |
 | memory with 2,000 open connections | 121 MiB (~50 KiB each) | 3.9 MiB | 130 MiB |
 | binary | 2.7 MB static | 0.4 MB | 0.4 MB |
 
-Go is the quickest at setting up connections and about twice as expensive per
+Go is the quickest at setting up connections and somewhat more expensive per
 byte; at gateway speeds (1 Gbit/s ≈ 0.12 CPU-seconds per second) neither
 matters. Lower `buffer_size` if memory is tight.

@@ -382,6 +382,12 @@ func (r *relay) pump(d direction) {
 			bytes.Add(int64(n))
 			total.Add(int64(n))
 			r.c.touch()
+			// Optional coalescing: after a short read the socket is drained;
+			// pausing lets more data queue, so the next read is bigger (fewer
+			// syscalls and goroutine wake-ups per byte).
+			if n < len(buf) && r.cfg.ShortReadDelay > 0 && err == nil {
+				time.Sleep(r.cfg.ShortReadDelay)
+			}
 		}
 		if err == nil {
 			continue

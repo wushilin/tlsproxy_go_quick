@@ -35,6 +35,7 @@ type Config struct {
 	DenyCacheSize     int
 	ReloadInterval    time.Duration // 0 = never
 	StatsInterval     time.Duration // 0 = never
+	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
 	Rules             []Rule
 	// Settings from the Rust version that no longer apply and were ignored.
 	Ignored []string
@@ -261,7 +262,11 @@ func ParseConfig(text string) (*Config, error) {
 				if err = count(&cfg.BufferSize); err == nil && (cfg.BufferSize < 512 || cfg.BufferSize > 1048576) {
 					err = fail("buffer_size must be 512..=1048576, got %d", cfg.BufferSize)
 				}
-			case "io_model", "short_read_delay_us", "worker_threads":
+			case "short_read_delay_us":
+				var us int
+				err = count(&us)
+				cfg.ShortReadDelay = time.Duration(us) * time.Microsecond
+			case "io_model", "worker_threads":
 				// Rust-version tuning knobs; goroutines make them moot.
 				cfg.Ignored = append(cfg.Ignored, key)
 			default:
@@ -407,7 +412,7 @@ func parseValue(v string) (string, error) {
 
 // Describe summarises the settings for the startup / reload log line.
 func (c *Config) Describe() string {
-	return fmt.Sprintf("%d rules (max_connections=%d, idle_timeout=%ds, half_close_timeout=%ds, buffer_size=%d, buffer_pool_max_idle=%d, allow_cache_size=%d, deny_cache_size=%d)",
+	return fmt.Sprintf("%d rules (max_connections=%d, idle_timeout=%ds, half_close_timeout=%ds, buffer_size=%d, buffer_pool_max_idle=%d, allow_cache_size=%d, deny_cache_size=%d, short_read_delay_us=%d)",
 		len(c.Rules), c.MaxConnections, int(c.IdleTimeout.Seconds()), int(c.HalfCloseTimeout.Seconds()),
-		c.BufferSize, c.BufferPoolMaxIdle, c.AllowCacheSize, c.DenyCacheSize)
+		c.BufferSize, c.BufferPoolMaxIdle, c.AllowCacheSize, c.DenyCacheSize, c.ShortReadDelay.Microseconds())
 }
