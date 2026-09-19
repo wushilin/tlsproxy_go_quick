@@ -37,6 +37,22 @@ port = 443                      # (required) listen port
 # stats_interval = 60           # (default: 60) log one summary line every N s; 0 = never.
 #                               #   `kill -USR1 <pid>` logs the summary plus every open connection
 
+# --- Certificates (only for rules that terminate TLS with cert = ...) ------------
+# cert_path = ./certs           # (default: ./certs) automatic certificates: <cert_path>/<name>/cert.pem,
+#                               #   key.pem; the ACME account key lives in <cert_path>/_account/
+# expiry_threshold_days = 15    # (default: 15) renew this many days before expiry (or when a third
+#                               #   of the lifetime is left, if that is later); failures retry every 6 h
+# acme_agree_tos = false        # (default: false) must be true for cert = auto: you accept the CA's terms
+# acme_email = you@example.com  #   optional contact for expiry notices
+# acme_directory = https://acme-v02.api.letsencrypt.org/directory   # (default: Let's Encrypt production)
+#                               #   staging: https://acme-staging-v02.api.letsencrypt.org/directory
+# acme_ca_file = /path/root.pem #   extra root CA for the ACME server's own HTTPS (private CA, Pebble)
+# public_ip_address = 203.0.113.7; 2001:db8::1
+#                               #   cert = auto only asks the CA if the name publicly resolves to one
+#                               #   of these, so a misconfigured name can't burn the CA's rate limits
+# dns_resolvers = 1.1.1.1; 8.8.8.8   # (default: 1.1.1.1; 8.8.8.8) resolvers for that check (not the
+#                               #   local one, which may answer with LAN addresses)
+
 # --- Logging -------------------------------------------------------------------
 # Two streams: normal activity ("stdout": accepted / route / connected / closed,
 # stats, reloads) and problems ("stderr": accept errors, failed reloads, ...).
@@ -61,6 +77,15 @@ port = 443                      # (required) listen port
 # action      (default: allow) allow | deny; deny sends a TLS access_denied alert
 # target_host (required for allow) may use $1 / ${1} for groups, $0 = whole SNI
 # target_port (default: 443)
+#
+# TLS termination (optional; without cert the TLS stream is passed through untouched):
+# cert        auto       issue and renew through ACME with TLS-ALPN-01 (the CA connects to public
+#                        port 443; no port 80 needed). A regex pattern also needs cert_domains.
+#             <dir>      use <dir>/cert.pem (leaf + chain) and <dir>/key.pem, plus optional ca.pem;
+#                        re-read when the files change. Must exist at startup.
+# cert_domains           names to issue, e.g. a.example.com, b.example.com (each must match pattern)
+# upstream_tls           (default: true) connect to the target with TLS; set false for a plaintext target
+# upstream_tls_verify    (default: true) verify the target's certificate against the system roots
 
 [[host]]
 pattern = (.*)\.wushilin\.net

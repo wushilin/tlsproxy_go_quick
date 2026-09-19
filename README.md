@@ -2,15 +2,20 @@
 
 An **extremely simple SNI router for a gateway**. It listens on one port,
 reads the hostname in the TLS ClientHello (SNI), picks a backend from
-`config.toml`, and relays the still-encrypted bytes to it. It never decrypts
-anything, so it needs no certificates or keys.
+`config.toml`, and relays the still-encrypted bytes to it. By default it never
+decrypts anything, so it needs no certificates or keys. Per host it can
+instead **terminate TLS**, with certificates issued and renewed automatically
+by Let's Encrypt over TLS-ALPN-01 (port 443 only, no port 80), or loaded from
+a directory.
 
 This is the Go port of [tlsproxy_rs_quick](https://github.com/wushilin/tlsproxy_rs_quick),
 with identical behaviour, config format and log lines. It exists because a
 firewall such as **pfSense** has no C compiler or linker, so Rust programs
 cannot be built on it, while Go can:
 
-- **Standard library only.** No modules to download; `go build` works offline.
+- **Standard library plus one vendored package.** ACME uses the Go team's
+  `golang.org/x/crypto/acme`, which itself needs only the standard library and
+  is vendored in `vendor/` (100 KB), so `go build` still works offline.
 - **No `cc` needed.** Go has its own linker. Build on the box with the `go`
   package, or cross-compile anywhere: `GOOS=freebsd GOARCH=amd64 go build`.
 - **Static binary.** It doesn't link libc, so one build runs on any FreeBSD
@@ -85,6 +90,83 @@ with its default, and a test keeps that file in step with the code:
 `io_model` and `worker_threads` from the Rust version
 are accepted and ignored (with a log line), so the same file works for both.
 More examples, each with its expected routing, are in [`samples/`](samples).
+
+## TLS termination and automatic certificates
+
+Without `cert`, a rule passes TLS through untouched (the backend keeps its own
+certificate). With `cert`, the proxy terminates TLS for that rule:
+
+```toml
+[global]
+port = 443
+cert_path = /var/db/tlsproxy/certs
+acme_agree_tos = true                 # required for cert = auto
+acme_email = admin@example.com        # optional
+public_ip_address = 203.0.113.7       # only ask the CA for names that point here
+
+[[host]]
+pattern = nas\.example\.com           # literal pattern: the name comes from it
+cert = auto
+target_host = 192.168.1.10
+target_port = 5001
+upstream_tls_verify = false           # the NAS has a self-signed certificate
+
+[[host]]
+pattern = (www|blog)\.example\.com    # regex: list the exact names
+cert = auto
+cert_domains = www.example.com, blog.example.com
+target_host = 192.168.1.30
+target_port = 8080
+upstream_tls = false                  # plain HTTP backend
+
+[[host]]
+pattern = intranet\.example\.com
+cert = /usr/local/etc/ssl/intranet    # cert.pem (leaf + chain), key.pem, optional ca.pem
+target_host = 192.168.1.40
+```
+
+| per rule | default | meaning |
+|---|---|---|
+| `cert` | (none) | `auto`: issue and renew via ACME. `<dir>`: use `cert.pem` + `key.pem` (+ `ca.pem`) from that directory; must exist at startup, re-read when the files change. None: pass through |
+| `cert_domains` | from a literal pattern | exact names to issue; required when `pattern` is a regex (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
+| `upstream_tls` | true | speak TLS to the target; `false` = plaintext |
+| `upstream_tls_verify` | true | verify the target's certificate against the system roots |
+
+| `[global]` | default | meaning |
+|---|---|---|
+| `cert_path` | ./certs | `<cert_path>/<name>/cert.pem`, `key.pem` (mode 0600); account key in `_account/` |
+| `expiry_threshold_days` | 15 | renew this long before expiry, or when a third of the lifetime is left if that is later (short-lived certificates) |
+| `acme_agree_tos` | false | must be `true` before anything is issued |
+| `acme_email` | (none) | contact for the ACME account |
+| `acme_directory` | Let's Encrypt production | use `https://acme-staging-v02.api.letsencrypt.org/directory` while testing |
+| `acme_ca_file` | (none) | extra root for the ACME server's own HTTPS (private CA, Pebble) |
+| `public_ip_address` | (none) | `;`-separated. A name is only sent to the CA if it publicly resolves to one of these; without it the check is skipped (with a warning) |
+| `dns_resolvers` | 1.1.1.1; 8.8.8.8 | resolvers for that check; deliberately not the local one, which may return LAN addresses |
+
+How it works:
+
+- **TLS-ALPN-01 only.** The CA connects to the name on public port 443 with
+  ALPN `acme-tls/1`; the proxy already reads every ClientHello, so it answers
+  those itself with the challenge certificate. Port 80 is never needed. If the
+  proxy listens on another port, forward public 443 to it (a warning reminds
+  you). A challenge for a name the proxy is not currently validating is routed
+  normally, so a passed-through backend can still run its own ACME client.
+- **One job at a time, urgent first.** At startup and every 10 minutes: names
+  with no or an expired certificate first, then renewals by due date. A
+  failure is retried after 6 hours. Certificates found in `cert_path` are
+  reused after a restart.
+- **DNS pre-check** before every order, so a name that doesn't point here
+  never costs you the CA's failed-validation rate limit.
+- **Placeholder.** Until a certificate exists (or for a name matched by the
+  pattern but missing from `cert_domains`) a self-signed placeholder keeps the
+  service reachable, with a browser warning.
+- **ALPN end to end.** The upstream is contacted first and the client is
+  offered exactly the protocol the upstream agreed to, so HTTP/2 works across
+  the proxy. With a plaintext upstream only `http/1.1` is offered.
+- Reload applies certificate settings too; a config whose `cert = <dir>`
+  cannot be loaded is rejected and the running config stays.
+- Terminated connections are still plain TCP relaying: no HTTP parsing, no
+  added headers. They cost more CPU and memory than pass-through.
 
 ## Logging to files
 
@@ -175,8 +257,24 @@ idle time and the state of each direction (`open` / `half-closed`).
 
 ## Tests
 
-`go test ./...` runs 50+ tests, also under the race detector in CI:
+`go test ./...` runs 80+ tests, also under the race detector in CI:
 
+- **ACME, end to end (`TLSPROXY_PEBBLE=1`).** Starts Pebble (Let's Encrypt's
+  official test CA) and its DNS server; Pebble validates TLS-ALPN-01 against
+  the proxy exactly as Let's Encrypt would. Checks issuance for two names,
+  the certificate served to clients, files and permissions, the DNS pre-check
+  refusing a name that resolves elsewhere, renewal, and reuse after a restart.
+- **Live sites (`TLSPROXY_LIVE=1`).** HTTPS GETs to Google, Facebook,
+  Cloudflare and GitHub through the proxy: passed through (the client
+  verifies the real certificates) and terminated (the proxy verifies them),
+  HTTP/2 end to end both ways, and an upstream whose certificate doesn't match
+  is refused.
+- **TLS termination with mock backends:** plaintext and TLS upstreams, ALPN
+  negotiation, half-close, 4 MiB integrity with 4 KiB buffers, termination and
+  pass-through side by side, the placeholder, the challenge responder,
+  certificate reload (and a broken update keeping the old one), start-up
+  errors, config validation, renewal schedule and job priority, and the DNS
+  check against a fake DNS server.
 - **Unit:** ClientHello parsing (every prefix of a fragmented hello,
   post-quantum sizes, malformed input), config parsing and errors, routing,
   LRU eviction order and caps, a denial flood that cannot evict allowed

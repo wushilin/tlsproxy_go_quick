@@ -7,6 +7,7 @@ package main
 // kqueue/epoll by the Go runtime, so this is plain blocking-style code.
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/crypto/acme"
 )
 
 // TLS alert record: fatal (2), access_denied (49).
@@ -45,17 +48,26 @@ func newRuntime(cfg *Config, prev *Runtime) *Runtime {
 type Server struct {
 	runtime atomic.Pointer[Runtime]
 	stats   *Stats
+	certs   *CertManager
 	nextID  atomic.Uint64
 }
 
-func NewServer(cfg *Config) *Server {
-	s := &Server{stats: NewStats()}
+// NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
+func NewServer(cfg *Config) (*Server, error) {
+	s := &Server{stats: NewStats(), certs: NewCertManager()}
+	if err := s.certs.Apply(cfg); err != nil {
+		return nil, err
+	}
 	s.runtime.Store(newRuntime(cfg, nil))
-	return s
+	return s, nil
 }
 
 // Run binds to the configured address and serves forever.
 func Run(cfg *Config, path string) error {
+	srv, err := NewServer(cfg) // before binding: a bad certificate is a startup error
+	if err != nil {
+		return err
+	}
 	l, err := net.Listen("tcp", net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		return err
@@ -64,7 +76,7 @@ func Run(cfg *Config, path string) error {
 	if err := ConfigureLogging(cfg.Log); err != nil {
 		return err
 	}
-	return NewServer(cfg).Serve(l, path)
+	return srv.Serve(l, path)
 }
 
 // Serve accepts connections on l. If path is non-empty the config file is
@@ -72,6 +84,13 @@ func Run(cfg *Config, path string) error {
 func (s *Server) Serve(l net.Listener, path string) error {
 	rt := s.runtime.Load()
 	logf("listening on %s with %s", l.Addr(), rt.cfg.Describe())
+	for _, w := range rt.cfg.Warnings {
+		errorf("config: %s", w)
+	}
+	if n := len(rt.cfg.AutoDomains()); n > 0 {
+		logf("cert: managing %d automatic certificate(s) in %s via %s", n, rt.cfg.CertPath, rt.cfg.AcmeDirectory)
+	}
+	s.certs.Start()
 	for _, k := range rt.cfg.Ignored {
 		logf("config: %q is not used by this version and was ignored", k)
 	}
@@ -157,6 +176,13 @@ func (s *Server) watchConfig(path string) {
 			errorf("config reload: bind/port change to %s:%d needs a restart; still listening on %s:%d",
 				cfg.Bind, cfg.Port, old.cfg.Bind, old.cfg.Port)
 		}
+		if err := s.certs.Apply(cfg); err != nil {
+			errorf("config reload: %s rejected, keeping current config: %v", path, err)
+			continue
+		}
+		for _, w := range cfg.Warnings {
+			errorf("config: %s", w)
+		}
 		if err := ConfigureLogging(cfg.Log); err != nil {
 			errorf("config reload: %v; logging is unchanged", err)
 		}
@@ -176,15 +202,16 @@ func isTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// readHello reads until the ClientHello is complete. It returns the SNI and
-// every byte read (to be forwarded verbatim). buf is a pooled buffer; a hello
+// readHello reads until the ClientHello is complete. It returns the SNI/ALPN
+// and every byte read (forwarded verbatim, or replayed into our own TLS
+// server when terminating). buf is a pooled buffer; a hello
 // that doesn't fit spills into a heap slice, which is returned instead.
-func readHello(client net.Conn, buf []byte) (sni string, data []byte, err error) {
+func readHello(client net.Conn, buf []byte) (info helloInfo, data []byte, err error) {
 	data = buf[:0]
 	for {
 		if len(data) == cap(data) {
 			if cap(data) > maxClientHello+16 {
-				return "", data, errors.New("ClientHello too large")
+				return info, data, errors.New("ClientHello too large")
 			}
 			bigger := make([]byte, len(data), 2*cap(data)+4096)
 			copy(bigger, data)
@@ -193,19 +220,19 @@ func readHello(client net.Conn, buf []byte) (sni string, data []byte, err error)
 		n, rerr := client.Read(data[len(data):cap(data)])
 		data = data[:len(data)+n]
 		if n > 0 {
-			sni, perr := parseClientHello(data)
+			info, perr := parseHello(data)
 			if perr == nil {
-				return sni, data, nil
+				return info, data, nil
 			}
 			if perr != errNeedMore {
-				return "", data, perr
+				return info, data, perr
 			}
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
 				rerr = errors.New("closed before ClientHello was complete")
 			}
-			return "", data, rerr
+			return info, data, rerr
 		}
 	}
 }
@@ -225,7 +252,8 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 	// One overall deadline: a slow trickle can't extend it.
 	client.SetReadDeadline(start.Add(cfg.HandshakeTimeout))
 	helloBuf := rt.pool.Get()
-	sni, hello, err := readHello(client, helloBuf)
+	info, hello, err := readHello(client, helloBuf)
+	sni := info.SNI
 	if err != nil {
 		rt.pool.Put(helloBuf)
 		s.stats.Failed.Add(1)
@@ -238,6 +266,28 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 	}
 	client.SetReadDeadline(time.Time{})
 	sniDisp := sni
+
+	// The CA validating a TLS-ALPN-01 challenge for one of our names. If no
+	// challenge is pending, routing continues: a passed-through backend may
+	// be running its own ACME client.
+	if info.offers(acme.ALPNProto) {
+		if answer := s.certs.Challenge(sni); answer != nil {
+			tc := tls.Server(&prefixConn{Conn: client, prefix: hello}, &tls.Config{
+				Certificates: []tls.Certificate{*answer},
+				NextProtos:   []string{acme.ALPNProto},
+			})
+			tc.SetDeadline(time.Now().Add(cfg.HandshakeTimeout))
+			err := tc.Handshake()
+			tc.Close()
+			rt.pool.Put(helloBuf)
+			if err != nil {
+				errorf("[#%d] cert: TLS-ALPN-01 challenge for %s from %s failed: %v", id, sni, src, err)
+			} else {
+				logf("[#%d] cert: answered the TLS-ALPN-01 challenge for %s from %s", id, sni, src)
+			}
+			return
+		}
+	}
 	if sni == "" {
 		sniDisp = "<none>"
 	}
@@ -280,29 +330,49 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 		logf("[#%d] closed src=%s sni=%s dst=%s: connect failed: %v after %s", id, src, sniDisp, destDisp, err, humanDuration(time.Since(t0)))
 		return
 	}
-	server := up.(*net.TCPConn)
-	defer server.Close()
-	peer := server.RemoteAddr().String()
+	defer up.Close()
+	peer := up.RemoteAddr().String()
 	c.mu.Lock()
 	c.Peer = peer
 	c.mu.Unlock()
-	logf("[#%d] connected %s -> %s (%s) in %s", id, src, destDisp, peer, humanDuration(time.Since(t0)))
 
-	if cfg.IdleTimeout > 0 {
-		server.SetWriteDeadline(time.Now().Add(cfg.IdleTimeout))
+	var clientSide, serverSide duplex = client, up.(*net.TCPConn)
+	mode := ""
+	if d.Rule != nil && d.Rule.Terminates() {
+		// Terminate TLS here. The upstream is contacted first so the client is
+		// offered exactly the application protocol (h2, http/1.1) the upstream
+		// agreed to; the ClientHello we already read is replayed into our TLS
+		// server instead of being forwarded.
+		tlsClient, tlsServer, how, err := s.terminate(client, up, hello, info, d, cfg)
+		rt.pool.Put(helloBuf)
+		if err != nil {
+			s.stats.Failed.Add(1)
+			logf("[#%d] closed src=%s sni=%s dst=%s (%s): %v", id, src, sniDisp, destDisp, peer, err)
+			return
+		}
+		clientSide, mode = tlsClient, how
+		if tlsServer != nil {
+			serverSide = tlsServer
+		}
+		logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
+	} else {
+		logf("[#%d] connected %s -> %s (%s) in %s", id, src, destDisp, peer, humanDuration(time.Since(t0)))
+		if cfg.IdleTimeout > 0 {
+			up.SetWriteDeadline(time.Now().Add(cfg.IdleTimeout))
+		}
+		_, err = up.Write(hello)
+		rt.pool.Put(helloBuf) // back to the pool before the (possibly long) relay
+		if err != nil {
+			s.stats.Failed.Add(1)
+			logf("[#%d] closed src=%s sni=%s dst=%s: upstream write error: %v", id, src, sniDisp, destDisp, err)
+			return
+		}
+		c.BytesUp.Add(int64(len(hello)))
+		s.stats.BytesUp.Add(int64(len(hello)))
 	}
-	_, err = server.Write(hello)
-	rt.pool.Put(helloBuf) // back to the pool before the (possibly long) relay
-	if err != nil {
-		s.stats.Failed.Add(1)
-		logf("[#%d] closed src=%s sni=%s dst=%s: upstream write error: %v", id, src, sniDisp, destDisp, err)
-		return
-	}
-	c.BytesUp.Add(int64(len(hello)))
-	s.stats.BytesUp.Add(int64(len(hello)))
 	c.touch()
 
-	r := &relay{c: c, stats: s.stats, cfg: cfg, pool: rt.pool, client: client, server: server}
+	r := &relay{c: c, stats: s.stats, cfg: cfg, pool: rt.pool, client: clientSide, server: serverSide}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	s.stats.GoroutinesStarted.Add(1)
@@ -318,6 +388,78 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 	logf("[#%d] closed src=%s sni=%s dst=%s (%s) up=%s down=%s duration=%s reason=%s",
 		id, src, sniDisp, destDisp, peer, humanBytes(c.BytesUp.Load()), humanBytes(c.BytesDown.Load()),
 		humanDuration(time.Since(start)), r.reason())
+}
+
+// duplex is a connection whose write side can be closed on its own
+// (*net.TCPConn: FIN; *tls.Conn: close_notify).
+type duplex interface {
+	net.Conn
+	CloseWrite() error
+}
+
+// prefixConn replays bytes that were already read from the socket (the
+// ClientHello) before continuing with the socket itself.
+type prefixConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (p *prefixConn) Read(b []byte) (int, error) {
+	if len(p.prefix) > 0 {
+		n := copy(b, p.prefix)
+		p.prefix = p.prefix[n:]
+		return n, nil
+	}
+	return p.Conn.Read(b)
+}
+
+// terminate completes TLS with the client (and with the upstream, if the rule
+// says so). It returns the two sides to relay between (upstream is nil when it
+// stays plaintext) and a short description for the log.
+func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d Decision, cfg *Config) (*tls.Conn, *tls.Conn, string, error) {
+	rule := d.Rule
+	var offer []string // what the client asked for, minus ACME's pseudo protocol
+	for _, p := range info.ALPN {
+		if p != acme.ALPNProto {
+			offer = append(offer, p)
+		}
+	}
+	var tlsUp *tls.Conn
+	var protos []string
+	how := "tls terminated, plaintext upstream"
+	if rule.UpstreamTLS {
+		tlsUp = tls.Client(up, &tls.Config{
+			ServerName:         d.Host,
+			InsecureSkipVerify: !rule.UpstreamTLSVerify,
+			NextProtos:         offer,
+			MinVersion:         tls.VersionTLS12,
+		})
+		tlsUp.SetDeadline(time.Now().Add(cfg.ConnectTimeout))
+		if err := tlsUp.Handshake(); err != nil {
+			return nil, nil, "", fmt.Errorf("upstream TLS handshake failed: %v", err)
+		}
+		tlsUp.SetDeadline(time.Time{})
+		how = "tls terminated, tls upstream"
+		if p := tlsUp.ConnectionState().NegotiatedProtocol; p != "" {
+			protos = []string{p}
+			how += " " + p
+		}
+	} else if info.offers("http/1.1") {
+		protos = []string{"http/1.1"} // a plaintext upstream can't do h2 over TLS ALPN
+	}
+	tlsClient := tls.Server(&prefixConn{Conn: client, prefix: hello}, &tls.Config{
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return s.certs.CertificateFor(rule, info.SNI)
+		},
+		NextProtos: protos,
+		MinVersion: tls.VersionTLS12,
+	})
+	tlsClient.SetDeadline(time.Now().Add(cfg.HandshakeTimeout))
+	if err := tlsClient.Handshake(); err != nil {
+		return nil, nil, "", fmt.Errorf("client TLS handshake failed: %v", err)
+	}
+	tlsClient.SetDeadline(time.Time{})
+	return tlsClient, tlsUp, how, nil
 }
 
 func (c *ConnState) touch() { c.lastActivityUnixNano.Store(time.Now().UnixNano()) }
@@ -341,7 +483,7 @@ type relay struct {
 	stats          *Stats
 	cfg            *Config
 	pool           *BufferPool
-	client, server *net.TCPConn
+	client, server duplex
 }
 
 func (r *relay) dirState(d direction) *atomic.Int32 {

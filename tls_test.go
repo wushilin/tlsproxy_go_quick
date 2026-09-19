@@ -1,0 +1,442 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/binary"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/acme"
+)
+
+// testCA issues leaf certificates for tests.
+type testCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	pool *x509.CertPool
+}
+
+func newTestCA(t *testing.T) *testCA {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ := x509.ParseCertificate(der)
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	return &testCA{cert, key, pool}
+}
+
+// issue returns PEM for a leaf valid for names (and 127.0.0.1) with the given life.
+func (ca *testCA) issue(t *testing.T, life time.Duration, names ...string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: names[0]}, DNSNames: names,
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:   time.Now().Add(-time.Hour), NotAfter: time.Now().Add(life),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+}
+
+// certDir writes cert.pem + key.pem for names into a fresh directory.
+func (ca *testCA) certDir(t *testing.T, names ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	certPEM, keyPEM := ca.issue(t, 12*time.Hour, names...)
+	os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0o600)
+	os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0o600)
+	return dir
+}
+
+// tlsBackend is a TLS echo server (tag first) offering the given ALPN protocols.
+func (ca *testCA) tlsBackend(t *testing.T, tag string, protos ...string) int {
+	t.Helper()
+	certPEM, keyPEM := ca.issue(t, 12*time.Hour, "backend.internal")
+	cert, _ := tls.X509KeyPair(certPEM, keyPEM)
+	return backend(t, func(c *net.TCPConn) {
+		tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: protos})
+		if tc.Handshake() != nil {
+			return
+		}
+		fmt.Fprintf(tc, "%s[%s]", tag, tc.ConnectionState().NegotiatedProtocol)
+		io.Copy(tc, tc)
+		tc.CloseWrite()
+	})
+}
+
+func tlsDial(t *testing.T, p *proxyUnderTest, cfg *tls.Config) (*tls.Conn, error) {
+	t.Helper()
+	raw := dial(t, p)
+	tc := tls.Client(raw, cfg)
+	tc.SetDeadline(time.Now().Add(T))
+	return tc, tc.Handshake()
+}
+
+func TestTerminateWithPlaintextUpstream(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	port := backend(t, func(c *net.TCPConn) {
+		data, _ := io.ReadAll(c) // plaintext: exactly what the client sent inside TLS
+		fmt.Fprintf(c, "plain backend got %q", data)
+	})
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=app\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+		ca.certDir(t, "app.test"), port))
+	tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "app.test", NextProtos: []string{"h2", "http/1.1"}})
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	st := tc.ConnectionState()
+	if st.NegotiatedProtocol != "http/1.1" || st.PeerCertificates[0].DNSNames[0] != "app.test" {
+		t.Fatalf("alpn=%q cert=%v", st.NegotiatedProtocol, st.PeerCertificates[0].DNSNames)
+	}
+	tc.Write([]byte("hello through tls"))
+	tc.CloseWrite() // half-close must reach the backend as EOF, and the reply must come back
+	if got := string(readToEnd(t, tc)); got != `plain backend got "hello through tls"` {
+		t.Fatal(got)
+	}
+	if r := closeReason(t, "app.test"); !strings.HasPrefix(r, "client closed, then upstream closed") {
+		t.Fatal(r)
+	}
+}
+
+func TestTerminateWithTLSUpstreamNegotiatesALPNEndToEnd(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	port := ca.tlsBackend(t, "B", "h2", "http/1.1")
+	rule := func(name, extra string) string {
+		return fmt.Sprintf("[[host]]\npattern=%s\ncert=%s\n%starget_host=127.0.0.1\ntarget_port=%d\n", strings.ReplaceAll(name, ".", `\.`), ca.certDir(t, name), extra, port)
+	}
+	p := startProxy(t, "", rule("noverify.test", "upstream_tls_verify=false\n")+rule("verify.test", ""))
+
+	for offer, want := range map[string]string{"h2,http/1.1": "h2", "http/1.1": "http/1.1", "": ""} {
+		var protos []string
+		if offer != "" {
+			protos = strings.Split(offer, ",")
+		}
+		tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "noverify.test", NextProtos: protos})
+		if err != nil {
+			t.Fatalf("offer %q: %v", offer, err)
+		}
+		if got := tc.ConnectionState().NegotiatedProtocol; got != want {
+			t.Fatalf("offer %q: client negotiated %q, want %q", offer, got, want)
+		}
+		tc.Write([]byte("ping"))
+		if got, wantEcho := string(readN(t, tc, len("B[]ping")+len(want))), "B["+want+"]ping"; got != wantEcho {
+			t.Fatalf("offer %q: %q", offer, got) // the backend saw the same protocol
+		}
+		tc.Close()
+	}
+
+	// upstream_tls_verify defaults to true: the backend's CA is unknown to the
+	// system roots, so the proxy must refuse to relay.
+	raw := dial(t, p)
+	tc := tls.Client(raw, &tls.Config{RootCAs: ca.pool, ServerName: "verify.test"})
+	tc.SetDeadline(time.Now().Add(T))
+	if err := tc.Handshake(); err == nil {
+		if n, _ := tc.Read(make([]byte, 1)); n > 0 {
+			t.Fatal("relayed to an unverified upstream")
+		}
+	}
+}
+
+func TestTerminationAndPassThroughSideBySide(t *testing.T) {
+	t.Parallel()
+	ca, backendCA := newTestCA(t), newTestCA(t)
+	port := backendCA.tlsBackend(t, "P")
+	p := startProxy(t, "", fmt.Sprintf(
+		"[[host]]\npattern=term\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.certDir(t, "term.test"), port, port))
+	// Terminated: the client sees OUR certificate.
+	tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "term.test"})
+	if err != nil || tc.ConnectionState().PeerCertificates[0].Subject.CommonName != "term.test" {
+		t.Fatalf("terminated: %v", err)
+	}
+	// Passed through: the client sees the BACKEND's certificate, end to end.
+	tc, err = tlsDial(t, p, &tls.Config{RootCAs: backendCA.pool, ServerName: "backend.internal"})
+	if err == nil {
+		t.Fatal("SNI backend.internal matches no rule and must be denied")
+	}
+	raw := dial(t, p)
+	tc = tls.Client(raw, &tls.Config{RootCAs: backendCA.pool, ServerName: "pass.test", InsecureSkipVerify: true})
+	tc.SetDeadline(time.Now().Add(T))
+	if err := tc.Handshake(); err != nil || tc.ConnectionState().PeerCertificates[0].Subject.CommonName != "backend.internal" {
+		t.Fatalf("pass-through: %v", err)
+	}
+}
+
+func TestTerminatedTransferIntegrity(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	plain := echoBackend(t, "")
+	secure := ca.tlsBackend(t, "")
+	dir := ca.certDir(t, "a.test", "b.test")
+	p := startProxy(t, "buffer_size=4096", fmt.Sprintf(
+		"[[host]]\npattern=a\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\npattern=b\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", dir, plain, dir, secure))
+	for _, name := range []string{"a.test", "b.test"} {
+		tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tc.SetDeadline(time.Now().Add(60 * time.Second))
+		data := pattern(4<<20, 7)
+		go func() { tc.Write(data); tc.CloseWrite() }()
+		got := readToEnd(t, tc)
+		if name == "b.test" {
+			got = bytes.TrimPrefix(got, []byte("[]"))
+		}
+		if !bytes.Equal(got, data) {
+			t.Fatalf("%s: %d bytes back, corrupted or truncated", name, len(got))
+		}
+	}
+}
+
+func TestPlaceholderUntilAutomaticCertificateExists(t *testing.T) {
+	t.Parallel()
+	l, dead := listen(t)
+	l.Close() // the "CA" is unreachable, so issuance fails and the placeholder stays
+	p := startProxy(t, fmt.Sprintf("cert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir", t.TempDir(), dead),
+		fmt.Sprintf("[[host]]\npattern=(.*)\\.auto\\.test\ncert=auto\ncert_domains=www.auto.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
+	tc, err := tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: "www.auto.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := tc.ConnectionState().PeerCertificates[0]
+	if leaf.Subject.Organization[0] != "tlsproxy placeholder" || leaf.DNSNames[0] != "www.auto.test" {
+		t.Fatalf("%v %v", leaf.Subject, leaf.DNSNames)
+	}
+	tc.Write([]byte("x"))
+	if got := string(readN(t, tc, 2)); got != "Ex" {
+		t.Fatal(got) // reachable, just not trusted yet
+	}
+}
+
+func TestAnswersTLSALPN01Challenge(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=.*\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.certDir(t, "x.test"), echoBackend(t, "")))
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	answer, err := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("token-123", "x.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := p.srv.certs
+	m.mu.Lock()
+	m.challenges["x.test"] = &answer
+	m.mu.Unlock()
+
+	// What the CA does: connect with ALPN acme-tls/1 and look at the certificate.
+	tc, err := tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: "x.test", NextProtos: []string{acme.ALPNProto}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := tc.ConnectionState()
+	leaf := st.PeerCertificates[0]
+	hasACMEExt := false
+	for _, e := range leaf.Extensions {
+		if e.Id.String() == "1.3.6.1.5.5.7.1.31" && e.Critical {
+			hasACMEExt = true
+		}
+	}
+	if st.NegotiatedProtocol != acme.ALPNProto || !hasACMEExt || len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "x.test" {
+		t.Fatalf("alpn=%q ext=%v names=%v", st.NegotiatedProtocol, hasACMEExt, leaf.DNSNames)
+	}
+	// An ordinary client to the same name still gets the real certificate.
+	tc, err = tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "x.test"})
+	if err != nil || tc.ConnectionState().PeerCertificates[0].Subject.CommonName != "x.test" {
+		t.Fatal(err)
+	}
+}
+
+func TestDirectoryCertificateIsReloadedAndRequiredAtStartup(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	dir := ca.certDir(t, "old.test")
+	rules := fmt.Sprintf("[[host]]\npattern=.*\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", dir, echoBackend(t, ""))
+	p := startProxy(t, "", rules)
+	served := func() string {
+		tc, err := tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: "whatever.test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tc.Close()
+		return tc.ConnectionState().PeerCertificates[0].Subject.CommonName
+	}
+	if served() != "old.test" {
+		t.Fatal("initial certificate")
+	}
+	certPEM, keyPEM := ca.issue(t, time.Hour, "new.test")
+	os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0o600)
+	os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0o600)
+	os.Chtimes(filepath.Join(dir, "cert.pem"), time.Now(), time.Now().Add(time.Minute)) // make sure mtime differs
+	p.srv.certs.refreshFileCerts()
+	if served() != "new.test" {
+		t.Fatal("changed files were not picked up")
+	}
+	// A broken update keeps the previous certificate.
+	os.WriteFile(filepath.Join(dir, "cert.pem"), []byte("garbage"), 0o600)
+	os.Chtimes(filepath.Join(dir, "cert.pem"), time.Now(), time.Now().Add(2*time.Minute))
+	p.srv.certs.refreshFileCerts()
+	if served() != "new.test" {
+		t.Fatal("a broken file must not replace a working certificate")
+	}
+
+	cfg := mustParse(t, "[global]\nport=1\n[[host]]\npattern=.*\ncert=/nonexistent/dir\ntarget_host=x.lan\n")
+	if _, err := NewServer(cfg); err == nil || !strings.Contains(err.Error(), "line 3") {
+		t.Fatalf("a missing certificate directory must be a startup error: %v", err)
+	}
+}
+
+func TestCertConfigValidation(t *testing.T) {
+	auto := "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\n"
+	c := mustParse(t, auto+"[[host]]\npattern=nas\\.example\\.com\ncert=auto\ntarget_host=10.0.0.5\n"+
+		"[[host]]\npattern=(.*)\\.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=$1.lan\n"+
+		"[[host]]\npattern=plain\\.example\\.com\ntarget_host=10.0.0.6\n")
+	if got := fmt.Sprint(c.AutoDomains()); got != "[nas.example.com a.wushilin.net b.wushilin.net]" {
+		t.Fatal(got) // literal pattern derived; list lowercased and de-duplicated
+	}
+	r := c.Rules
+	if !r[0].UpstreamTLS || !r[0].UpstreamTLSVerify || r[1].UpstreamTLS || r[2].Terminates() || len(c.Warnings) != 0 ||
+		fmt.Sprint(c.PublicIPs) != "[203.0.113.7 2001:db8::1]" || c.CertPath != "./certs" || c.ExpiryThresholdDays != 15 {
+		t.Fatalf("%+v\n%+v", r, c)
+	}
+	c = mustParse(t, "[global]\nport=8443\nacme_agree_tos=true\n[[host]]\npattern=a\\.b\\.com\ncert=auto\ntarget_host=x.lan\n")
+	if len(c.Warnings) != 2 { // not on 443, and no public_ip_address
+		t.Fatal(c.Warnings)
+	}
+	for name, text := range map[string]string{
+		"regex without cert_domains": auto + "[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ntarget_host=$1.lan\n",
+		"tos not agreed":             "[global]\nport=443\n[[host]]\npattern=a\\.x\\.com\ncert=auto\ntarget_host=x.lan\n",
+		"domain outside the pattern": auto + "[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ncert_domains=a.y.com\ntarget_host=x.lan\n",
+		"wildcard":                   auto + "[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ncert_domains=*.x.com\ntarget_host=x.lan\n",
+		"auto without sni":           auto + "[[host]]\npattern=NONE\ncert=auto\ntarget_host=x.lan\n",
+		"cert on deny":               auto + "[[host]]\npattern=.*\naction=deny\ncert=auto\n",
+		"upstream_tls without cert":  auto + "[[host]]\npattern=.*\nupstream_tls=true\ntarget_host=x.lan\n",
+		"cert_domains without auto":  auto + "[[host]]\npattern=.*\ncert=/tmp\ncert_domains=a.x.com\ntarget_host=x.lan\n",
+		"bad bool":                   auto + "[[host]]\npattern=.*\ncert=/tmp\nupstream_tls=maybe\ntarget_host=x.lan\n",
+		"bad ip":                     "[global]\nport=443\npublic_ip_address=not-an-ip\n",
+		"bad threshold":              "[global]\nport=443\nexpiry_threshold_days=0\n",
+	} {
+		if _, err := ParseConfig(text); err == nil {
+			t.Errorf("%s: should be rejected", name)
+		}
+	}
+}
+
+func TestRenewalScheduleAndPriority(t *testing.T) {
+	leaf := func(life, age time.Duration) *tls.Certificate {
+		nb := time.Now().Add(-age)
+		return &tls.Certificate{Leaf: &x509.Certificate{NotBefore: nb, NotAfter: nb.Add(life)}}
+	}
+	day := 24 * time.Hour
+	// 90-day certificate: due 15 days before expiry. 6-day certificate: a third of its life before.
+	if got := renewAt(leaf(90*day, 0).Leaf, 15); got.Sub(time.Now()).Round(day) != 75*day {
+		t.Fatal(got)
+	}
+	if got := renewAt(leaf(6*day, 0).Leaf, 15); got.Sub(time.Now()).Round(time.Hour) != 4*day {
+		t.Fatal(got)
+	}
+	m := NewCertManager()
+	m.cfg = mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=.*\\.t\\.com\ncert=auto\n"+
+		"cert_domains=fresh.t.com,due-later.t.com,missing.t.com,due-sooner.t.com,expired.t.com,backoff.t.com\ntarget_host=x.lan\n")
+	m.auto["fresh.t.com"] = leaf(90*day, 10*day)
+	m.auto["due-later.t.com"] = leaf(90*day, 80*day)
+	m.auto["due-sooner.t.com"] = leaf(90*day, 88*day)
+	m.auto["expired.t.com"] = leaf(90*day, 91*day)
+	m.nextTry["backoff.t.com"] = time.Now().Add(time.Hour) // failed recently: left alone
+	var order []string
+	for _, j := range m.pendingJobs(time.Now()) {
+		order = append(order, j.domain)
+	}
+	// Missing and expired first (config order), then renewals, most urgent first.
+	if got := strings.Join(order, " "); got != "missing.t.com expired.t.com due-sooner.t.com due-later.t.com" {
+		t.Fatal(got)
+	}
+}
+
+// fakeDNS answers every A query with ip (and AAAA with no records).
+func fakeDNS(t *testing.T, ip string) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			q := buf[:n]
+			end := 12 // skip the question name
+			for end < n && q[end] != 0 {
+				end += int(q[end]) + 1
+			}
+			end += 5
+			if n < 12 || end > n {
+				continue
+			}
+			resp := append([]byte(nil), q[:end]...)
+			resp[2], resp[3] = 0x81, 0x80 // response, recursion available
+			binary.BigEndian.PutUint16(resp[6:], 0)
+			binary.BigEndian.PutUint16(resp[8:], 0)
+			binary.BigEndian.PutUint16(resp[10:], 0)
+			if binary.BigEndian.Uint16(q[end-4:]) == 1 { // type A
+				binary.BigEndian.PutUint16(resp[6:], 1)
+				resp = append(resp, 0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
+				resp = append(resp, net.ParseIP(ip).To4()...)
+			}
+			pc.WriteTo(resp, addr)
+		}
+	}()
+	return pc.LocalAddr().String()
+}
+
+func TestDNSPreCheckUsesTheConfiguredResolvers(t *testing.T) {
+	t.Parallel()
+	dns := fakeDNS(t, "203.0.113.7")
+	cfg := func(ips string) *Config {
+		return mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s\npublic_ip_address=%s\n", dns, ips))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), T)
+	defer cancel()
+	if err := checkDNS(ctx, cfg("198.51.100.1;203.0.113.7"), "www.example.test"); err != nil {
+		t.Fatalf("should pass: %v", err)
+	}
+	err := checkDNS(ctx, cfg("198.51.100.1"), "www.example.test")
+	if err == nil || !strings.Contains(err.Error(), "203.0.113.7") || !strings.Contains(err.Error(), "not asking the CA") {
+		t.Fatalf("should name the mismatch: %v", err)
+	}
+	if err := checkDNS(ctx, mustParse(t, "[global]\nport=443\n"), "anything.test"); err != nil {
+		t.Fatalf("no public_ip_address = check skipped: %v", err)
+	}
+}

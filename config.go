@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,7 +38,18 @@ type Config struct {
 	StatsInterval     time.Duration // 0 = never
 	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
 	Log               LogConfig     // the [logging] section
-	Rules             []Rule
+
+	// Certificates (only used by rules with cert = ...).
+	CertPath            string   // where automatic certificates and the ACME account live
+	ExpiryThresholdDays int      // renew this many days before expiry
+	PublicIPs           []string // auto-issue only if the name resolves to one of these
+	DNSResolvers        []string // public resolvers for that check (host or host:port)
+	AcmeEmail           string   // optional contact for the ACME account
+	AcmeAgreeTOS        bool     // must be true before anything is issued
+	AcmeDirectory       string   // ACME directory URL
+	AcmeCAFile          string   // extra root CA for the ACME server's HTTPS (private CAs, Pebble)
+	Warnings            []string // non-fatal findings, logged at startup / reload
+	Rules               []Rule
 	// Settings from the Rust version that no longer apply and were ignored.
 	Ignored []string
 }
@@ -52,7 +64,17 @@ type Rule struct {
 	Allow      bool
 	TargetHost string
 	TargetPort int
+
+	// TLS termination: set when the rule has cert = auto | <dir>. Without it
+	// the rule passes TLS through untouched.
+	Cert              string   // "", "auto", or a directory holding cert.pem + key.pem (+ ca.pem)
+	CertDomains       []string // names to issue for when Cert is "auto"
+	UpstreamTLS       bool     // connect to the target with TLS (default true)
+	UpstreamTLSVerify bool     // verify the target's certificate (default true)
 }
+
+// Terminates reports whether the proxy terminates TLS for this rule.
+func (r *Rule) Terminates() bool { return r.Cert != "" }
 
 // Decision is the outcome of routing one SNI.
 type Decision struct {
@@ -60,6 +82,7 @@ type Decision struct {
 	Host     string
 	Port     int
 	RuleLine int    // 0 = no rule matched
+	Rule     *Rule  // the matched allow rule (nil otherwise)
 	Err      string // non-empty: routing failed (treated as deny)
 }
 
@@ -99,7 +122,7 @@ func (c *Config) Route(sni string) Decision {
 		if err != nil {
 			return Decision{RuleLine: r.Line, Err: err.Error()}
 		}
-		return Decision{Allow: true, Host: host, Port: r.TargetPort, RuleLine: r.Line}
+		return Decision{Allow: true, Host: host, Port: r.TargetPort, RuleLine: r.Line, Rule: r}
 	}
 	return Decision{}
 }
@@ -154,9 +177,13 @@ func expand(template, input string, m []int) (string, error) {
 	return out.String(), nil
 }
 
+// LetsEncryptDirectory is the default ACME directory.
+const LetsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
+
 type rawRule struct {
-	line                               int
-	pattern, action, targetHost, tport *string
+	cert, certDomains, upstreamTLS, upstreamVerify *string
+	line                                           int
+	pattern, action, targetHost, tport             *string
 }
 
 func ParseConfig(text string) (*Config, error) {
@@ -173,6 +200,11 @@ func ParseConfig(text string) (*Config, error) {
 		ReloadInterval:   5 * time.Second,
 		StatsInterval:    60 * time.Second,
 		Log:              defaultLogConfig(),
+
+		CertPath:            "./certs",
+		ExpiryThresholdDays: 15,
+		DNSResolvers:        []string{"1.1.1.1", "8.8.8.8"},
+		AcmeDirectory:       LetsEncryptDirectory,
 	}
 	poolMaxIdle := -1
 	var raws []rawRule
@@ -276,6 +308,35 @@ func ParseConfig(text string) (*Config, error) {
 				var us int
 				err = count(&us)
 				cfg.ShortReadDelay = time.Duration(us) * time.Microsecond
+			case "cert_path":
+				cfg.CertPath = value
+			case "expiry_threshold_days":
+				if err = count(&cfg.ExpiryThresholdDays); err == nil && cfg.ExpiryThresholdDays < 1 {
+					err = fail("expiry_threshold_days must be at least 1")
+				}
+			case "public_ip_address":
+				cfg.PublicIPs = nil
+				for _, ip := range splitList(value) {
+					addr, perr := netip.ParseAddr(ip)
+					if perr != nil {
+						return nil, fail("public_ip_address: %q is not an IP address", ip)
+					}
+					cfg.PublicIPs = append(cfg.PublicIPs, addr.Unmap().String())
+				}
+			case "dns_resolvers":
+				if cfg.DNSResolvers = splitList(value); len(cfg.DNSResolvers) == 0 {
+					err = fail("dns_resolvers must not be empty")
+				}
+			case "acme_email":
+				cfg.AcmeEmail = value
+			case "acme_agree_tos":
+				if cfg.AcmeAgreeTOS, err = parseBool(value); err != nil {
+					err = fail("acme_agree_tos: %v", err)
+				}
+			case "acme_directory":
+				cfg.AcmeDirectory = value
+			case "acme_ca_file":
+				cfg.AcmeCAFile = value
 			case "io_model", "worker_threads":
 				// Rust-version tuning knobs; goroutines make them moot.
 				cfg.Ignored = append(cfg.Ignored, key)
@@ -317,6 +378,14 @@ func ParseConfig(text string) (*Config, error) {
 				r.targetHost = &v
 			case "target_port":
 				r.tport = &v
+			case "cert":
+				r.cert = &v
+			case "cert_domains":
+				r.certDomains = &v
+			case "upstream_tls":
+				r.upstreamTLS = &v
+			case "upstream_tls_verify":
+				r.upstreamVerify = &v
 			default:
 				return nil, fail("unknown key %q in [[host]]", key)
 			}
@@ -378,7 +447,18 @@ func ParseConfig(text string) (*Config, error) {
 		default:
 			return nil, fail("action must be allow or deny, got %q", action)
 		}
+		if err := tlsSettings(cfg, &rule, r); err != nil {
+			return nil, fail("%v", err)
+		}
 		cfg.Rules = append(cfg.Rules, rule)
+	}
+	if auto := cfg.AutoDomains(); len(auto) > 0 {
+		if cfg.Port != 443 {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: the CA validates on public port 443, but this proxy listens on %d; make sure 443 is forwarded here", cfg.Port))
+		}
+		if len(cfg.PublicIPs) == 0 {
+			cfg.Warnings = append(cfg.Warnings, "cert = auto without public_ip_address: the DNS pre-check is skipped, so a misconfigured name will burn CA rate limits")
+		}
 	}
 	return cfg, nil
 }
@@ -404,6 +484,108 @@ func parseSize(v string) (int64, error) {
 		return 0, fmt.Errorf("invalid size %q (use a number with optional K, M or G)", v)
 	}
 	return n * unit, nil
+}
+
+// tlsSettings validates and applies cert / cert_domains / upstream_tls*.
+func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
+	if r.cert == nil || *r.cert == "" {
+		for _, kv := range []struct {
+			name string
+			v    *string
+		}{{"cert_domains", r.certDomains}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify}} {
+			if kv.v != nil {
+				return fmt.Errorf("%s only applies when the rule terminates TLS (set cert = auto or a directory)", kv.name)
+			}
+		}
+		return nil
+	}
+	if !rule.Allow {
+		return fmt.Errorf("cert makes no sense on a deny rule")
+	}
+	rule.Cert = *r.cert
+	rule.UpstreamTLS, rule.UpstreamTLSVerify = true, true
+	var err error
+	if r.upstreamTLS != nil {
+		if rule.UpstreamTLS, err = parseBool(*r.upstreamTLS); err != nil {
+			return fmt.Errorf("upstream_tls: %v", err)
+		}
+	}
+	if r.upstreamVerify != nil {
+		if rule.UpstreamTLSVerify, err = parseBool(*r.upstreamVerify); err != nil {
+			return fmt.Errorf("upstream_tls_verify: %v", err)
+		}
+	}
+	if !strings.EqualFold(rule.Cert, "auto") {
+		if r.certDomains != nil {
+			return fmt.Errorf("cert_domains only applies to cert = auto")
+		}
+		return nil
+	}
+	rule.Cert = "auto"
+	if !cfg.AcmeAgreeTOS {
+		return fmt.Errorf("cert = auto needs acme_agree_tos = true in [global] (you accept the CA's terms of service)")
+	}
+	if rule.NoSNI {
+		return fmt.Errorf("cert = auto needs a host name; a pattern = NONE rule can only use cert = <directory>")
+	}
+	if r.certDomains != nil {
+		rule.CertDomains = splitList(strings.ToLower(*r.certDomains))
+	} else if host, ok := literalHost(rule.Source); ok {
+		rule.CertDomains = []string{host}
+	}
+	if len(rule.CertDomains) == 0 {
+		return fmt.Errorf("cert = auto with a regex pattern needs cert_domains = name1, name2 (certificates are issued per exact name)")
+	}
+	for _, d := range rule.CertDomains {
+		if !validDomain(d) {
+			return fmt.Errorf("cert_domains: %q is not a valid host name (wildcards are not possible with TLS-ALPN-01)", d)
+		}
+		if !rule.Pattern.MatchString(d) {
+			return fmt.Errorf("cert_domains: %q does not match this rule's pattern %q", d, rule.Source)
+		}
+	}
+	return nil
+}
+
+// literalHost reports whether a pattern is just one host name (dots escaped
+// or not, optional ^ and $), and returns that name lowercased.
+func literalHost(pattern string) (string, bool) {
+	p := strings.TrimSuffix(strings.TrimPrefix(pattern, "^"), "$")
+	p = strings.ToLower(strings.ReplaceAll(p, `\.`, "."))
+	return p, validDomain(p)
+}
+
+func validDomain(d string) bool {
+	if d == "" || len(d) > 253 || !strings.Contains(d, ".") || strings.HasPrefix(d, ".") || strings.HasSuffix(d, ".") || strings.Contains(d, "..") {
+		return false
+	}
+	for i := 0; i < len(d); i++ {
+		if !isHostChar(d[i]) || d[i] == '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// splitList splits on ';' and ',' and drops empty items.
+func splitList(v string) []string {
+	var out []string
+	for _, item := range strings.FieldsFunc(v, func(r rune) bool { return r == ';' || r == ',' }) {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func parseBool(v string) (bool, error) {
+	switch strings.ToLower(v) {
+	case "true", "yes", "on":
+		return true, nil
+	case "false", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("expected true or false, got %q", v)
 }
 
 func parsePort(v string) (int, error) {
@@ -475,4 +657,22 @@ func (c *Config) Describe() string {
 	return fmt.Sprintf("%d rules (max_connections=%d, idle_timeout=%ds, half_close_timeout=%ds, buffer_size=%d, buffer_pool_max_idle=%d, allow_cache_size=%d, deny_cache_size=%d, short_read_delay_us=%d)",
 		len(c.Rules), c.MaxConnections, int(c.IdleTimeout.Seconds()), int(c.HalfCloseTimeout.Seconds()),
 		c.BufferSize, c.BufferPoolMaxIdle, c.AllowCacheSize, c.DenyCacheSize, c.ShortReadDelay.Microseconds())
+}
+
+// AutoDomains lists every name that needs an automatic certificate.
+func (c *Config) AutoDomains() []string {
+	seen := map[string]bool{}
+	var out []string
+	for i := range c.Rules {
+		if c.Rules[i].Cert != "auto" {
+			continue
+		}
+		for _, d := range c.Rules[i].CertDomains {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+	}
+	return out
 }

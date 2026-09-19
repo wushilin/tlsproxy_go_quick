@@ -1,0 +1,46 @@
+# TLS termination with automatic certificates (Let's Encrypt, TLS-ALPN-01).
+# Go version only. Routing expectations are checked by `go test`; certificates
+# are not needed for that.
+#
+#> nas.example.com       => 192.168.1.10:5001
+#> www.example.com       => 192.168.1.30:8080
+#> blog.example.com      => 192.168.1.30:8080
+#> shop.example.com      => 192.168.1.30:8080
+#> legacy.example.com    => 192.168.1.40:443
+#> other.org             => DENY
+
+[global]
+bind = 0.0.0.0
+port = 443                        # the CA validates on public port 443
+cert_path = /var/db/tlsproxy/certs
+acme_agree_tos = true
+acme_email = admin@example.com
+public_ip_address = 203.0.113.7   # only ask the CA for names that really point here
+
+# A literal pattern: the certificate name is taken from it. The NAS speaks
+# HTTPS with a self-signed certificate, so don't verify it.
+[[host]]
+pattern = nas\.example\.com
+cert = auto
+target_host = 192.168.1.10
+target_port = 5001
+upstream_tls_verify = false
+
+# A regex pattern: certificates are per exact name, so list them. shop.* is
+# routed too, but gets a self-signed placeholder until it is added here.
+[[host]]
+pattern = (www|blog|shop)\.example\.com
+cert = auto
+cert_domains = www.example.com, blog.example.com
+target_host = 192.168.1.30
+target_port = 8080
+upstream_tls = false              # plain HTTP backend
+
+# No cert: passed through untouched; the backend keeps its own certificate.
+[[host]]
+pattern = legacy\.example\.com
+target_host = 192.168.1.40
+
+[[host]]
+pattern = .*
+action = deny

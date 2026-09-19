@@ -21,7 +21,11 @@ jobs:
         with:
           go-version: stable
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - name: Test (race detector; live sites and a Pebble ACME CA included)
+        env:
+          TLSPROXY_LIVE: "1"
+          TLSPROXY_PEBBLE: "1"
+        run: go test -race -count=1 ./...
       - name: Cross-build (static, no cgo)
         env:
           CGO_ENABLED: "0"

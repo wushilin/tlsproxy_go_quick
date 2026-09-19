@@ -37,7 +37,7 @@ var testLog = &capturedLog{}
 
 func TestMain(m *testing.M) {
 	logMu.Lock()
-	logOut = testLog
+	logOut, logErr = testLog, testLog // activity and problems alike
 	logMu.Unlock()
 	os.Exit(m.Run())
 }

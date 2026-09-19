@@ -39,7 +39,10 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(cfg)
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
 	go srv.Serve(l, path)
 	t.Cleanup(func() { l.Close() })
 	return &proxyUnderTest{addr: l.Addr().String(), srv: srv}
