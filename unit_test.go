@@ -345,7 +345,7 @@ func TestConfigErrors(t *testing.T) {
 		"[global]\nport=1\nreload_interval=1\n", "[global]\nport=1\nreload_interval=4\n",
 		"[global]\nport=1\n[[host]]\npattern=a\n",                            // allow without target
 		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=10.0.0.1:8080\n", // the port belongs in target_port
-		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=[::1]:443\n", "[global]\nport=1\n[[host]]\npattern=(.*)\ntarget_host=$1:8080\n",
+		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=[::1]:443\n", "[global]\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=$1:8080\n",
 		"[global]\nport=1\n[[host]]\npattern=a\naction=nope\n",
 		"[global]\nport=1\n[[host]]\npattern=\"abc\n", "[global]\nport=1\n[[host]]\npattern='abc\n",
 		"[global]\nport=1\n[[host]]\npattern=\"a\" junk\n",

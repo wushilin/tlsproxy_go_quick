@@ -63,7 +63,11 @@ func get(t *testing.T, c *http.Client, host string) *http.Response {
 // roots, so this proves the TLS stream reaches the site bit for bit.
 func TestLivePassThrough(t *testing.T) {
 	requireLive(t)
-	p := startProxy(t, "", "[[host]]\npattern=(.*\\.)?(google|facebook|cloudflare|github)\\.com\ntarget_host=$0\n[[host]]\npattern=.*\naction=deny\n")
+	var rules strings.Builder
+	for _, site := range []string{"google", "facebook", "cloudflare", "github"} { // the name itself and one label below it
+		fmt.Fprintf(&rules, "[[host]]\npattern=%s.com\ntarget_host=$0\n[[host]]\npattern=*.%s.com\ntarget_host=$0\n", site, site)
+	}
+	p := startProxy(t, "", rules.String()+"[[host]]\npattern=ANY\naction=deny\n")
 	c := clientVia(p, nil) // default config: full verification against system roots
 	for _, host := range liveSites {
 		resp := get(t, c, host)
