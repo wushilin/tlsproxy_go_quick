@@ -111,6 +111,7 @@ with its default, and a test keeps that file in step with the code:
 | `idle_timeout`         | 600     | close after N seconds with no traffic in either direction (0 = never); also reaps half-open connections |
 | `half_close_timeout`   | 30      | after one side closes, the other side gets N seconds to finish (0 = unlimited) |
 | `max_connections`      | 1024    | further connections are rejected; goroutines ≤ 2 × this              |
+| `proxy_protocol_from`  | (none)  | who may put a PROXY protocol header in front of a connection: IP addresses or networks (`10.0.0.0/8`), `;`-separated. See [The client's address](#the-clients-address-proxy-protocol) |
 | `max_handshakes_per_ip` | 64     | connections from one source (an IPv4 address, or an IPv6 /64) that have not sent their ClientHello yet. Further ones are closed at once, so one address cannot hold every slot with silent sockets for `handshake_timeout` each. Established connections don't count. 0 = unlimited |
 | `buffer_size`          | 65536   | bytes per pooled buffer; each open connection holds two              |
 | `buffer_pool_max_idle` | 2 × max_connections | capacity of the pool's channel                           |
@@ -128,8 +129,8 @@ option is missing from it, from `config.toml` or from this README):
 
 | section | options |
 |---|---|
-| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
-| `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `upstream_tls` `upstream_tls_verify` `upstream_sni` |
+| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | `[console]` | `listen` `port` `password` `password_hash` `hostnames` |
 
@@ -179,6 +180,50 @@ Samples, each with its expected routing checked by `go test`:
 - The console's `listen` follows the same rules, and its Host check accepts
   IPv6 literals.
 
+## The client's address (PROXY protocol)
+
+A backend behind the proxy sees every connection coming from the proxy. The
+ClientHello cannot carry the client's address: TLS covers every byte of the
+handshake, so a hello changed in transit fails. The PROXY protocol solves it
+without touching TLS: a small header is sent as the very first bytes of the
+upstream connection, and the untouched stream follows.
+
+```toml
+[[host]]
+pattern = www.example.com          # passed through: header, then the client's ClientHello as it was
+target_host = 192.168.1.30
+proxy = true                       # default false
+proxy_version = 2                  # default 2 (binary); 1 is the text form
+
+[[host]]
+pattern = api.example.com          # terminated: header, then our upstream TLS handshake (or plaintext)
+cert = auto
+upstream_tls = false
+target_host = 192.168.1.31
+target_port = 8080
+proxy = true
+```
+
+- The header states the client's address and port, and the address and port it
+  connected to. IPv4 and IPv6; if the two differ in family, the IPv4 one is
+  written in its IPv4-mapped form. The `connected` log line says `PROXY v2
+  header sent`.
+- **The target must expect it**, on that port: nginx `listen 443 ssl
+  proxy_protocol;` with `set_real_ip_from <this proxy>;`, HAProxy
+  `accept-proxy`, Apache `mod_remoteip`, Traefik, Envoy, Caddy. A port that
+  expects the header rejects connections without it and the reverse, so it is
+  a per-rule setting. Your own server can accept both by looking at the first
+  bytes: the v2 signature (`\r\n\r\n\0\r\nQUIT\n`) and `PROXY ` cannot begin a
+  TLS or HTTP stream. It should only do so for connections from this proxy.
+- **Incoming headers** (a load balancer in front of this proxy) are accepted
+  only from the peers in `proxy_protocol_from`, v1 or v2, detected
+  automatically; a listed peer may also connect without one. The stated source
+  then becomes the address that is logged, counted by `max_handshakes_per_ip`
+  and passed on to targets, and the stated destination is passed on as well.
+  From anybody else a header is never looked for (it is simply a bad
+  ClientHello): otherwise any client could choose the address you log, evade
+  the per-source limit, and lie to your backends.
+
 ## TLS termination and automatic certificates
 
 Without `cert`, a rule passes TLS through untouched (the backend keeps its own
@@ -198,6 +243,8 @@ cert = auto
 target_host = 192.168.1.10
 target_port = 5001
 upstream_tls_verify = false           # the NAS has a self-signed certificate
+proxy = true                          # send the original connection addresses first
+proxy_version = 2                     # v2 (default), or 1
 
 [[host]]
 pattern = *.example.com               # wildcard: list the exact names
@@ -221,6 +268,8 @@ target_host = 192.168.1.40
 | `upstream_tls` | true | speak TLS to the target; `false` = plaintext |
 | `upstream_tls_verify` | true | verify the target's certificate against the system roots |
 | `upstream_sni` | the client's SNI | name sent to the target as SNI, and the name its certificate is verified against. The default passes the client's name through, so a target that routes or selects certificates by SNI works even when `target_host` is an IP address |
+| `proxy` | false | for **any** allow rule, passed through or terminated: tell the target the client's address with a PROXY protocol header. See [The client's address](#the-clients-address-proxy-protocol) |
+| `proxy_version` | 2 | PROXY protocol version, `1` or `2`; only valid when `proxy = true` |
 
 | `[global]` | default | meaning |
 |---|---|---|

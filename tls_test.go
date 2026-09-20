@@ -127,6 +127,81 @@ func TestTerminateWithPlaintextUpstream(t *testing.T) {
 	}
 }
 
+func TestTerminateSendsProxyProtocolToPlaintextUpstream(t *testing.T) {
+	ca := newTestCA(t)
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			addresses := make(chan string, 1)
+			port := backend(t, func(raw *net.TCPConn) {
+				c, err := detectProxyProtocol(raw)
+				if err != nil {
+					addresses <- "error: " + err.Error()
+					return
+				}
+				addresses <- c.RemoteAddr().String()
+				data, _ := io.ReadAll(c)
+				fmt.Fprintf(c, "backend got %q", data)
+			})
+			p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=proxy.test\ncert=%s\nupstream_tls=false\nproxy=true\nproxy_version=%d\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+				ca.certDir(t, "proxy.test"), version, port))
+
+			raw := dial(t, p)
+			originalSource := raw.LocalAddr().String()
+			tc := tls.Client(raw, &tls.Config{RootCAs: ca.pool, ServerName: "proxy.test"})
+			tc.SetDeadline(time.Now().Add(T))
+			if err := tc.Handshake(); err != nil {
+				t.Fatal(err)
+			}
+			tc.Write([]byte("hello"))
+			tc.CloseWrite()
+			if got := string(readToEnd(t, tc)); got != `backend got "hello"` {
+				t.Fatal(got)
+			}
+			if got := <-addresses; got != originalSource {
+				t.Fatalf("PROXY source = %q, want %q", got, originalSource)
+			}
+		})
+	}
+}
+
+func TestTerminateSendsProxyProtocolBeforeUpstreamTLS(t *testing.T) {
+	clientCA, backendCA := newTestCA(t), newTestCA(t)
+	certPEM, keyPEM := backendCA.issue(t, 12*time.Hour, "backend.internal")
+	cert, _ := tls.X509KeyPair(certPEM, keyPEM)
+	addresses := make(chan string, 1)
+	port := backend(t, func(raw *net.TCPConn) {
+		proxied, err := detectProxyProtocol(raw)
+		if err != nil {
+			addresses <- "error: " + err.Error()
+			return
+		}
+		addresses <- proxied.RemoteAddr().String()
+		upstream := tls.Server(proxied, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if upstream.Handshake() != nil {
+			return
+		}
+		io.Copy(upstream, upstream)
+		upstream.CloseWrite()
+	})
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=proxy-tls.test\ncert=%s\nupstream_tls_verify=false\nproxy=true\nproxy_version=2\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+		clientCA.certDir(t, "proxy-tls.test"), port))
+	raw := dial(t, p)
+	originalSource := raw.LocalAddr().String()
+	tc := tls.Client(raw, &tls.Config{RootCAs: clientCA.pool, ServerName: "proxy-tls.test"})
+	tc.SetDeadline(time.Now().Add(T))
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	tc.Write([]byte("through both TLS connections"))
+	if got := string(readN(t, tc, len("through both TLS connections"))); got != "through both TLS connections" {
+		t.Fatal(got)
+	}
+	if got := <-addresses; got != originalSource {
+		t.Fatalf("PROXY source = %q, want %q", got, originalSource)
+	}
+	tc.Close()
+}
+
 func TestTerminateWithTLSUpstreamNegotiatesALPNEndToEnd(t *testing.T) {
 	t.Parallel()
 	ca := newTestCA(t)
@@ -324,7 +399,7 @@ func TestCertConfigValidation(t *testing.T) {
 		t.Fatal(got) // literal pattern derived; list lowercased and de-duplicated
 	}
 	r := c.Rules
-	if !r[0].UpstreamTLS || !r[0].UpstreamTLSVerify || r[1].UpstreamTLS || r[2].Terminates() || len(c.Warnings) != 0 ||
+	if !r[0].UpstreamTLS || !r[0].UpstreamTLSVerify || r[0].Proxy || r[0].ProxyVersion != 2 || r[1].UpstreamTLS || r[2].Terminates() || len(c.Warnings) != 0 ||
 		fmt.Sprint(c.PublicIPs) != "[203.0.113.7 2001:db8::1]" || c.CertPath != "./certs" || c.ExpiryThresholdDays != 15 {
 		t.Fatalf("%+v\n%+v", r, c)
 	}
@@ -346,6 +421,9 @@ func TestCertConfigValidation(t *testing.T) {
 		"upstream_tls without cert":  auto + "[[host]]\npattern=.*\nupstream_tls=true\ntarget_host=x.lan\n",
 		"cert_domains without auto":  auto + "[[host]]\npattern=.*\ncert=/tmp\ncert_domains=a.x.com\ntarget_host=x.lan\n",
 		"bad bool":                   auto + "[[host]]\npattern=.*\ncert=/tmp\nupstream_tls=maybe\ntarget_host=x.lan\n",
+		"bad proxy bool":             auto + "[[host]]\npattern=.*\ncert=/tmp\nproxy=maybe\ntarget_host=x.lan\n",
+		"version without proxy":      auto + "[[host]]\npattern=.*\ncert=/tmp\nproxy_version=1\ntarget_host=x.lan\n",
+		"bad proxy version":          auto + "[[host]]\npattern=.*\ncert=/tmp\nproxy=true\nproxy_version=3\ntarget_host=x.lan\n",
 		"bad ip":                     "[global]\nport=443\npublic_ip_address=not-an-ip\n",
 		"bad threshold":              "[global]\nport=443\nexpiry_threshold_days=0\n",
 	} {

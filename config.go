@@ -36,14 +36,18 @@ type Config struct {
 	HalfCloseTimeout   time.Duration // after one side closes, the other gets this long; 0 = unlimited
 	MaxConnections     int
 	MaxHandshakesPerIP int // connections per source still sending their ClientHello; 0 = unlimited
-	BufferSize         int
-	BufferPoolMaxIdle  int
-	AllowCacheSize     int
-	DenyCacheSize      int
-	ReloadInterval     time.Duration // 0 = never
-	StatsInterval      time.Duration // 0 = never
-	ShortReadDelay     time.Duration // pause after a short read so data batches up; 0 = off
-	Log                LogConfig     // the [logging] section
+	// ProxyProtocolFrom lists who may put a PROXY protocol header in front of a
+	// connection (a load balancer ahead of this proxy). Empty: nobody, headers
+	// are never looked for.
+	ProxyProtocolFrom []netip.Prefix
+	BufferSize        int
+	BufferPoolMaxIdle int
+	AllowCacheSize    int
+	DenyCacheSize     int
+	ReloadInterval    time.Duration // 0 = never
+	StatsInterval     time.Duration // 0 = never
+	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
+	Log               LogConfig     // the [logging] section
 
 	// Certificates (only used by rules with cert = ...).
 	CertPath            string   // where automatic certificates and the ACME account live
@@ -116,6 +120,8 @@ type Rule struct {
 	UpstreamTLS        bool   // connect to the target with TLS (default true)
 	UpstreamTLSVerify  bool   // verify the target's certificate (default true)
 	UpstreamSNI        string // SNI sent to (and verified against) the target; "" = the client's SNI
+	Proxy              bool   // send a PROXY protocol header to the target
+	ProxyVersion       int    // PROXY protocol version (1 or 2; default 2)
 }
 
 // Terminates reports whether the proxy terminates TLS for this rule.
@@ -374,6 +380,23 @@ func listenNetwork(addr string) string {
 	return "tcp"
 }
 
+// trustsProxyProtocolFrom reports whether a peer may assert another source
+// address with a PROXY protocol header.
+func (c *Config) trustsProxyProtocolFrom(peer net.Addr) bool {
+	tcp, ok := peer.(*net.TCPAddr)
+	if !ok || len(c.ProxyProtocolFrom) == 0 {
+		return false
+	}
+	ip, _ := netip.AddrFromSlice(tcp.IP)
+	ip = ip.Unmap()
+	for _, prefix := range c.ProxyProtocolFrom {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // listenAddrs is every address the proxy listens on, for display.
 func listenAddrs(c *Config) string {
 	var out []string
@@ -388,6 +411,7 @@ const LetsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
 type rawRule struct {
 	cert, certDomains, certScript, upstreamTLS, upstreamVerify, upstreamSNI *string
+	proxy, proxyVersion                                                     *string
 	line                                                                    int
 	pattern, action, targetHost, tport                                      *string
 }
@@ -523,6 +547,18 @@ func ParseConfig(text string) (*Config, error) {
 				err = count(&cfg.MaxConnections)
 			case "max_handshakes_per_ip":
 				err = count(&cfg.MaxHandshakesPerIP)
+			case "proxy_protocol_from":
+				cfg.ProxyProtocolFrom = nil
+				for _, item := range splitList(value) {
+					prefix, perr := netip.ParsePrefix(item)
+					if addr, aerr := netip.ParseAddr(item); aerr == nil {
+						prefix, perr = netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()), nil
+					}
+					if perr != nil {
+						return nil, fail("proxy_protocol_from: %q is not an IP address or a network (10.0.0.0/8)", item)
+					}
+					cfg.ProxyProtocolFrom = append(cfg.ProxyProtocolFrom, prefix.Masked())
+				}
 			case "allow_cache_size":
 				err = count(&cfg.AllowCacheSize)
 			case "deny_cache_size":
@@ -639,6 +675,10 @@ func ParseConfig(text string) (*Config, error) {
 				r.upstreamVerify = &v
 			case "upstream_sni":
 				r.upstreamSNI = &v
+			case "proxy":
+				r.proxy = &v
+			case "proxy_version":
+				r.proxyVersion = &v
 			default:
 				return nil, fail("unknown key %q in [[host]]", key)
 			}
@@ -714,6 +754,9 @@ func ParseConfig(text string) (*Config, error) {
 		if err := tlsSettings(cfg, &rule, r); err != nil {
 			return nil, fail("%v", err)
 		}
+		if err := proxySettings(&rule, r); err != nil {
+			return nil, fail("%v", err)
+		}
 		cfg.Rules = append(cfg.Rules, rule)
 	}
 	if err := cfg.prioritise(); err != nil {
@@ -781,6 +824,31 @@ func parseSize(v string) (int64, error) {
 		return 0, fmt.Errorf("invalid size %q (use a number with optional K, M or G)", v)
 	}
 	return n * unit, nil
+}
+
+// proxySettings validates and applies proxy / proxy_version. They apply to
+// every allow rule: a passed-through backend needs the client's address as
+// much as one behind a terminating rule.
+func proxySettings(rule *Rule, r rawRule) error {
+	rule.ProxyVersion = 2
+	var err error
+	if r.proxy != nil {
+		if !rule.Allow {
+			return fmt.Errorf("proxy makes no sense on a deny rule")
+		}
+		if rule.Proxy, err = parseBool(*r.proxy); err != nil {
+			return fmt.Errorf("proxy: %v", err)
+		}
+	}
+	if r.proxyVersion != nil {
+		if !rule.Proxy {
+			return fmt.Errorf("proxy_version only applies with proxy = true")
+		}
+		if rule.ProxyVersion, err = strconv.Atoi(*r.proxyVersion); err != nil || rule.ProxyVersion != 1 && rule.ProxyVersion != 2 {
+			return fmt.Errorf("proxy_version must be 1 or 2, got %q", *r.proxyVersion)
+		}
+	}
+	return nil
 }
 
 // tlsSettings validates and applies cert / cert_domains / upstream_tls*.

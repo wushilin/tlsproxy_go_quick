@@ -17,6 +17,9 @@ port = 443                      # (required) listen port
 
 # --- Limits and memory ----------------------------------------------------
 # max_connections = 1024        # (default: 1024) more are rejected; goroutines <= 2 x this
+# proxy_protocol_from = 10.0.0.2; 10.1.0.0/16   # (nobody unless set) load balancers in front of this proxy that may
+#                               #   state the client's address in a PROXY protocol header (v1 or v2). From
+#                               #   anybody else a header is never looked for
 # max_handshakes_per_ip = 64    # (default: 64) connections from one source (IPv4 address or IPv6 /64)
 #                               #   that have not sent their ClientHello yet; more are closed at once,
 #                               #   so one address cannot hold every slot with silent sockets. 0 = unlimited
@@ -47,6 +50,7 @@ port = 443                      # (required) listen port
 # expiry_threshold_days = 15    # (default: 15) renew this many days before expiry (or when a third
 #                               #   of the lifetime is left, if that is later); failures retry every 6 h
 # acme_agree_tos = false        # (default: false) must be true for cert = auto: you accept the CA's terms
+acme_agree_tos = true           # required by the cert = auto rule for myweb below
 # acme_email = you@example.com  #   optional contact for expiry notices
 # acme_directory = https://acme-v02.api.letsencrypt.org/directory   # (default: Let's Encrypt production)
 #                               #   staging: https://acme-staging-v02.api.letsencrypt.org/directory
@@ -126,6 +130,21 @@ port = 443                      # (required) listen port
 # upstream_sni           the name sent to the target as SNI and checked in its certificate.
 #                        Default: the name the client asked for, so a target that itself routes
 #                        by SNI (another proxy) works even when target_host is an IP address
+# proxy                  (default: false) any allow rule, passed through or terminated: tell the target
+#                        the client's address (and the address it connected to) in a PROXY protocol
+#                        header, sent before the ClientHello / upstream TLS / plaintext. The target
+#                        must expect it (nginx: listen ... proxy_protocol)
+# proxy_version          (default: 2) PROXY protocol version; 1 or 2 (only used when proxy is enabled)
+
+[[host]]
+pattern = myhome.wushilin.net
+action = allow
+cert = auto
+upstream_tls = false
+target_host = 127.0.0.1
+target_port = 3782
+proxy = true
+proxy_version = 2
 
 [[host]]
 pattern = *.wushilin.net

@@ -269,19 +269,11 @@ func (s *Server) acceptLoop(l net.Listener) error {
 			sock.Close()
 			continue
 		}
-		if !s.beginHandshake(sourceKey(sock.RemoteAddr()), rt.cfg.MaxHandshakesPerIP) {
-			s.handshakeLog.logf("[#%d] rejected %s: %d connections from this source are still sending their ClientHello (max_handshakes_per_ip)", id, sock.RemoteAddr(), rt.cfg.MaxHandshakesPerIP)
-			s.stats.Active.Add(-1)
-			s.stats.Rejected.Add(1)
-			sock.Close()
-			continue
-		}
-		s.stats.Accepted.Add(1)
 		s.stats.GoroutinesStarted.Add(1)
 		go func() {
 			defer s.stats.GoroutinesFinished.Add(1)
 			defer s.stats.Active.Add(-1)
-			s.handle(id, sock.(*net.TCPConn), int(active), rt)
+			s.handle(id, sock, int(active), rt)
 		}()
 	}
 }
@@ -458,10 +450,51 @@ func readHello(client net.Conn, buf []byte) (info helloInfo, data []byte, err er
 	}
 }
 
-func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime) {
-	defer client.Close()
+func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
+	defer sock.Close()
 	cfg := rt.cfg
 	start := time.Now()
+	physicalKey := sourceKey(sock.RemoteAddr())
+	if !s.beginHandshake(physicalKey, cfg.MaxHandshakesPerIP) {
+		s.handshakeLog.logf("[#%d] rejected %s: %d connections from this source are still sending their ClientHello (max_handshakes_per_ip)", id, sock.RemoteAddr(), cfg.MaxHandshakesPerIP)
+		s.stats.Rejected.Add(1)
+		return
+	}
+	s.stats.Accepted.Add(1)
+	handshakeKey, handshakeCounted := physicalKey, true
+	defer func() {
+		if handshakeCounted {
+			s.endHandshake(handshakeKey)
+		}
+	}()
+
+	// A PROXY protocol header is only looked for when the peer is listed in
+	// proxy_protocol_from: whoever may send one chooses the address that is
+	// logged, counted by max_handshakes_per_ip and passed on to the target, so
+	// it must not be any client that happens to connect. For everybody else
+	// the stream is TLS from its first byte (a header would simply be a bad
+	// ClientHello). Header detection shares the ClientHello deadline.
+	sock.SetReadDeadline(start.Add(cfg.HandshakeTimeout))
+	client, err := &proxyConn{Conn: sock}, error(nil)
+	if cfg.trustsProxyProtocolFrom(sock.RemoteAddr()) {
+		client, err = detectProxyProtocol(sock)
+	}
+	if err != nil {
+		s.stats.Failed.Add(1)
+		logf("[#%d] closed src=%s: bad PROXY protocol header: %v after %s", id, sock.RemoteAddr(), err, humanDuration(time.Since(start)))
+		return
+	}
+	proxiedKey := sourceKey(client.RemoteAddr())
+	if proxiedKey != physicalKey {
+		if !s.beginHandshake(proxiedKey, cfg.MaxHandshakesPerIP) {
+			s.handshakeLog.logf("[#%d] rejected %s: %d connections from this source are still sending their ClientHello (max_handshakes_per_ip)", id, client.RemoteAddr(), cfg.MaxHandshakesPerIP)
+			s.stats.Accepted.Add(-1) // source admission happens after header detection
+			s.stats.Rejected.Add(1)
+			return
+		}
+		s.endHandshake(physicalKey)
+		handshakeKey = proxiedKey
+	}
 	src := client.RemoteAddr().String()
 	logf("[#%d] accepted from %s (active=%d)", id, src, active)
 
@@ -471,10 +504,10 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 	defer s.stats.unregister(c)
 
 	// One overall deadline: a slow trickle can't extend it.
-	client.SetReadDeadline(start.Add(cfg.HandshakeTimeout))
 	helloBuf := rt.pool.Get()
 	info, hello, err := readHello(client, helloBuf)
-	s.endHandshake(sourceKey(client.RemoteAddr())) // counted by the accept loop
+	s.endHandshake(handshakeKey)
+	handshakeCounted = false
 	sni := info.SNI
 	if err != nil {
 		rt.pool.Put(helloBuf)
@@ -602,6 +635,23 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 		}
 		logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
 	} else {
+		// A foreign TLS-ALPN-01 challenge bypasses normal termination, but a
+		// backend configured for PROXY protocol still needs its header before
+		// the untouched ClientHello.
+		if d.Rule != nil && d.Rule.Proxy {
+			up.SetWriteDeadline(time.Now().Add(cfg.ConnectTimeout))
+			if err := writeProxyProtocol(up, d.Rule.ProxyVersion, client.RemoteAddr(), client.LocalAddr()); err != nil {
+				rt.pool.Put(helloBuf)
+				s.stats.Failed.Add(1)
+				logf("[#%d] closed src=%s sni=%s dst=%s: upstream PROXY protocol v%d header failed: %v", id, src, sniDisp, destDisp, d.Rule.ProxyVersion, err)
+				return
+			}
+			up.SetWriteDeadline(time.Time{})
+			if mode != "" {
+				mode += ", "
+			}
+			mode += fmt.Sprintf("PROXY v%d header sent", d.Rule.ProxyVersion)
+		}
 		if mode != "" {
 			logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
 		} else {
@@ -675,9 +725,19 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 			offer = append(offer, p)
 		}
 	}
+	if rule.Proxy {
+		up.SetWriteDeadline(time.Now().Add(cfg.ConnectTimeout))
+		if err := writeProxyProtocol(up, rule.ProxyVersion, client.RemoteAddr(), client.LocalAddr()); err != nil {
+			return nil, nil, "", fmt.Errorf("upstream PROXY protocol v%d header failed: %v", rule.ProxyVersion, err)
+		}
+		up.SetWriteDeadline(time.Time{})
+	}
 	var tlsUp *tls.Conn
 	var protos []string
 	how := "tls terminated, plaintext"
+	if rule.Proxy {
+		how += fmt.Sprintf(" with PROXY v%d", rule.ProxyVersion)
+	}
 	if rule.UpstreamTLS {
 		// Like any reverse proxy, present the name the client asked for, so an
 		// upstream that itself routes or picks certificates by SNI works (and
@@ -703,6 +763,9 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 		}
 		tlsUp.SetDeadline(time.Time{})
 		how = "tls terminated, tls sni=" + serverName
+		if rule.Proxy {
+			how += fmt.Sprintf(" with PROXY v%d", rule.ProxyVersion)
+		}
 		if !rule.UpstreamTLSVerify {
 			how += " (certificate not verified)"
 		}
