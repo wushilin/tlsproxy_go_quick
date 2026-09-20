@@ -15,16 +15,14 @@ cost or leak in normal operation · **P3** edge case or polish.
 | [4](#4-changing-logging-on-reload-leaks-the-old-log-files) | P2 | file descriptors | Old log files not closed when `[logging]` changes | **fixed** `29fe7a8` |
 | [5](#5-terminated-clients-never-resume-a-tls-session) | P2 | performance | No TLS session resumption for terminated clients | **fixed** `29fe7a8`: shared ticket keys, rotated daily |
 | [6](#6-the-buffer-pool-never-shrinks) | P2 | memory | Buffer pool never shrinks after a peak | **fixed** `29fe7a8`: default cap 2 x `max_connections`, half shed after a minute at the cap |
-| [7](#7-logging-is-synchronous-under-one-lock-on-the-data-path) | P2 | blocking | Logging is synchronous, under one global lock, on the data path | **open** |
+| [7](#7-logging-is-synchronous-under-one-lock-on-the-data-path) | P2 | blocking | Logging is synchronous, under one global lock, on the data path | **fixed**: lines are buffered in memory and written by a background goroutine; flood lines are rate limited |
 | [8](#8-no-upstream-tls-session-resumption) | P3 | performance | No upstream TLS session cache | **fixed** `29fe7a8`: one LRU cache per rule |
 | [9](#9-the-console-server-has-no-read-or-write-timeout) | P3 | goroutines | Console `http.Server` has only `ReadHeaderTimeout` | **fixed** `29fe7a8`: 30 s read and write timeouts |
-| [10](#10-no-caching-of-resolved-target-addresses) | P3 | performance | DNS lookup for every new connection to a host-name target | **open** |
-| [11](#11-smaller-items) | P3 | various | see the list | partly open |
+| [10](#10-no-caching-of-resolved-target-addresses) | P3 | performance | DNS lookup for every new connection to a host-name target | **fixed**: 5-second cache in front of a Happy Eyeballs dialer (`dial.go`) |
+| [11](#11-smaller-items) | P3 | various | see the list | **fixed** |
 | [12](#12-a-placeholder-certificate-per-client-chosen-name) | P1 | DoS | A key and a self-signed certificate generated per made-up name | **fixed** in v0.3.0: one placeholder per rule |
 
-Still open: **7**, **10**, and from 11: the `unexpected EOF` wording, `$0`
-targets following the client's SNI, no per-source limit on handshake slots,
-one `bind` address only.
+Nothing from the review is open any more.
 
 ---
 
@@ -217,7 +215,7 @@ seconds) would take the load off it at high connection rates.
   live file fails after the generations were shifted, the shift is repeated on
   every following log line and history is deleted. Unlikely (same directory).
   Fix: rename the live file first, or stop rotating after an error.
-- **`unexpected EOF` close reason.** Peers that skip the TLS `close_notify`
+- *(fixed; and the finding was partly wrong: a peer that closes between records without `close_notify` already read as a normal close. Only a connection ending inside a TLS record gave `unexpected EOF`; that now reads "closed in the middle of a TLS record, without close_notify")* **`unexpected EOF` close reason.** Peers that skip the TLS `close_notify`
   (many HTTP clients) end terminated connections with `reason=... error:
   unexpected EOF`, and both directions close at once. Defensible (it could be
   truncation), but the wording looks like a fault. Fix: say "closed without
@@ -226,13 +224,13 @@ seconds) would take the load off it at high connection rates.
   (`proxy.go:207`); it needs a restart. Fix: log that.
 - *(fixed `29fe7a8`)* **Answered ACME challenges are not counted** (`proxy.go:313`): neither
   completed nor failed, so `accepted` drifts from the sum of the others.
-- **`$0` / `$1` targets follow the client's SNI.** With a broad pattern and
+- *(fixed: an SNI that is an IP address is refused, as RFC 6066 requires; a catch-all whose target follows the client is warned about at start-up)* **`$0` / `$1` targets follow the client's SNI.** With a broad pattern and
   `target_host = $0`, an SNI such as `10.0.0.1` makes the proxy connect to that
   address on `target_port`. The samples use explicit names; the README should
   warn, or such rules could refuse SNIs that are IP addresses.
-- **Slow handshakes hold slots cheaply.** `max_connections` slots can be held
+- *(fixed: `max_handshakes_per_ip`, default 64, counted per IPv4 address or IPv6 /64)* **Slow handshakes hold slots cheaply.** `max_connections` slots can be held
   for `handshake_timeout` each at almost no cost; there is no per-source limit.
-- **One `bind` address only.** One specific IPv4 plus one specific IPv6 address
+- *(fixed: `bind` takes a list)* **One `bind` address only.** One specific IPv4 plus one specific IPv6 address
   is not possible; a list would be.
 
 ## 12. A placeholder certificate per client-chosen name

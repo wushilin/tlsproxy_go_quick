@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -66,6 +67,14 @@ type Server struct {
 	reloadNow  chan struct{} // poked by the console after a save
 	console    *Console
 
+	dialer *targetDialer // resolves targets (cached) and connects
+
+	// Connections per source address that have not sent their ClientHello yet.
+	handshakeMu sync.Mutex
+	handshakes  map[netip.Addr]int
+
+	rejectLog, handshakeLog rateLimitedLog
+
 	ticketMu      sync.Mutex
 	ticketKeys    [][32]byte
 	ticketRotated time.Time
@@ -93,12 +102,76 @@ func (s *Server) sessionTicketKeys() [][32]byte {
 
 // NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan struct{}, 1)}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan struct{}, 1), dialer: newTargetDialer()}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}
 	s.runtime.Store(newRuntime(cfg, nil))
 	return s, nil
+}
+
+// rateLimitedLog writes at most one line a second and says how many it left
+// out, so a flood cannot fill the log or slow down whoever is logging.
+type rateLimitedLog struct {
+	mu         sync.Mutex
+	last       time.Time
+	suppressed int
+}
+
+func (r *rateLimitedLog) logf(format string, args ...any) {
+	r.mu.Lock()
+	if time.Since(r.last) < time.Second {
+		r.suppressed++
+		r.mu.Unlock()
+		return
+	}
+	n := r.suppressed
+	r.last, r.suppressed = time.Now(), 0
+	r.mu.Unlock()
+	if n > 0 {
+		format += fmt.Sprintf(" (and %d more like this in the last second, not logged)", n)
+	}
+	logf(format, args...)
+}
+
+// sourceKey is what per-source limits count by: the IPv4 address, or the /64
+// of an IPv6 address (one host typically owns a whole /64).
+func sourceKey(addr net.Addr) netip.Addr {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return netip.Addr{}
+	}
+	ip, _ := netip.AddrFromSlice(tcp.IP)
+	if ip = ip.Unmap(); ip.Is6() {
+		p, _ := ip.Prefix(64)
+		return p.Addr()
+	}
+	return ip
+}
+
+// beginHandshake counts a connection that is about to send its ClientHello. It
+// reports false when its source already has max_handshakes_per_ip of them:
+// slots cost a client nothing to hold for handshake_timeout, so without this
+// one address could occupy all of max_connections with idle sockets.
+func (s *Server) beginHandshake(key netip.Addr, limit int) bool {
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	if limit > 0 && s.handshakes[key] >= limit {
+		return false
+	}
+	if s.handshakes == nil {
+		s.handshakes = map[netip.Addr]int{}
+	}
+	s.handshakes[key]++
+	return true
+}
+
+func (s *Server) endHandshake(key netip.Addr) {
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	if s.handshakes[key]--; s.handshakes[key] <= 0 {
+		delete(s.handshakes, key)
+	}
 }
 
 // Run binds to the configured address and serves forever.
@@ -107,22 +180,40 @@ func Run(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	l, err := net.Listen(listenNetwork(cfg.Bind), net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port)))
-	if err != nil {
-		return err
+	var listeners []net.Listener
+	for _, bind := range cfg.Binds {
+		network := listenNetwork(bind)
+		if len(cfg.Binds) > 1 && network == "tcp" {
+			network = "tcp6" // several addresses: each listens for its own family only
+		}
+		l, err := net.Listen(network, net.JoinHostPort(bind, strconv.Itoa(cfg.Port)))
+		if err != nil {
+			for _, open := range listeners {
+				open.Close()
+			}
+			return err
+		}
+		listeners = append(listeners, l)
 	}
 	// From here on the streams go to their log files, if configured.
 	if err := ConfigureLogging(cfg.Log); err != nil {
 		return err
 	}
-	return srv.Serve(l, path)
+	StartAsyncLogging() // from here on nobody waits for the log to be written
+	defer FlushLogs()
+	return srv.Serve(listeners[0], path, listeners[1:]...)
 }
 
-// Serve accepts connections on l. If path is non-empty the config file is
-// watched and reloaded when it changes.
-func (s *Server) Serve(l net.Listener, path string) error {
+// Serve accepts connections on l (and on any further listeners: one per bind
+// address). If path is non-empty the config file is watched and reloaded when
+// it changes.
+func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error {
 	rt := s.runtime.Load()
-	logf("listening on %s with %s", l.Addr(), rt.cfg.Describe())
+	addrs := l.Addr().String()
+	for _, extra := range more {
+		addrs += ", " + extra.Addr().String()
+	}
+	logf("listening on %s with %s", addrs, rt.cfg.Describe())
 	for _, w := range rt.cfg.Warnings {
 		errorf("config: %s", w)
 	}
@@ -150,6 +241,14 @@ func (s *Server) Serve(l net.Listener, path string) error {
 		}
 	}
 	watchSignals(s)
+	for _, extra := range more {
+		go s.acceptLoop(extra)
+	}
+	return s.acceptLoop(l)
+}
+
+// acceptLoop serves one listener until it is closed.
+func (s *Server) acceptLoop(l net.Listener) error {
 	for {
 		sock, err := l.Accept()
 		if err != nil {
@@ -164,7 +263,14 @@ func (s *Server) Serve(l net.Listener, path string) error {
 		id := s.nextID.Add(1)
 		active := s.stats.Active.Add(1)
 		if int(active) > rt.cfg.MaxConnections {
-			logf("[#%d] rejected %s: too many connections (%d > %d)", id, sock.RemoteAddr(), active, rt.cfg.MaxConnections)
+			s.rejectLog.logf("[#%d] rejected %s: too many connections (%d > %d)", id, sock.RemoteAddr(), active, rt.cfg.MaxConnections)
+			s.stats.Active.Add(-1)
+			s.stats.Rejected.Add(1)
+			sock.Close()
+			continue
+		}
+		if !s.beginHandshake(sourceKey(sock.RemoteAddr()), rt.cfg.MaxHandshakesPerIP) {
+			s.handshakeLog.logf("[#%d] rejected %s: %d connections from this source are still sending their ClientHello (max_handshakes_per_ip)", id, sock.RemoteAddr(), rt.cfg.MaxHandshakesPerIP)
 			s.stats.Active.Add(-1)
 			s.stats.Rejected.Add(1)
 			sock.Close()
@@ -368,6 +474,7 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 	client.SetReadDeadline(start.Add(cfg.HandshakeTimeout))
 	helloBuf := rt.pool.Get()
 	info, hello, err := readHello(client, helloBuf)
+	s.endHandshake(sourceKey(client.RemoteAddr())) // counted by the accept loop
 	sni := info.SNI
 	if err != nil {
 		rt.pool.Put(helloBuf)
@@ -443,8 +550,7 @@ func (s *Server) handle(id uint64, client *net.TCPConn, active int, rt *Runtime)
 	defer c.host.Active.Add(-1)
 
 	t0 := time.Now()
-	dialer := net.Dialer{Timeout: cfg.ConnectTimeout}
-	up, err := dialer.Dial("tcp", dest)
+	up, err := s.dialer.Dial(d.Host, d.Port, cfg.ConnectTimeout)
 	if err != nil {
 		rt.pool.Put(helloBuf)
 		s.stats.Failed.Add(1)
@@ -742,6 +848,13 @@ func (r *relay) pump(d direction) {
 				continue // the other direction was active; keep waiting
 			}
 			r.closeAll(r.idleReason())
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			// Only a terminated (TLS) side reports this: the TCP connection
+			// ended in the middle of a TLS record. (One that ends between
+			// records without a close_notify, as many HTTP peers do, reads as a
+			// normal close.) The data is incomplete, so it is not forwarded as
+			// a clean end of stream; say what happened rather than "error".
+			r.closeAll(fmt.Sprintf("%s in the middle of a TLS record, without close_notify; closed by proxy", closedLabel[d]))
 		default:
 			r.closeAll(fmt.Sprintf("%s error: %v", dirName[d], err))
 		}

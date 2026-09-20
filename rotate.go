@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync/atomic"
 )
 
@@ -69,6 +70,30 @@ func OpenFileLogger(path string, cfg LogConfig) (*FileLogger, error) {
 	return &FileLogger{cfg: cfg, path: path, file: f, size: size}, nil
 }
 
+// WriteLines writes a batch of whole lines, rotating exactly where writing
+// them one by one would have: the file is filled up to MaxSize (never splitting
+// a line), rotated, and the rest goes on in the new file.
+func (l *FileLogger) WriteLines(text string) error {
+	for len(text) > 0 {
+		chunk := text
+		if room := l.cfg.MaxSize - l.size; room > 0 && int64(len(text)) > room {
+			// The line that crosses MaxSize still belongs to this file.
+			if end := strings.IndexByte(text[room-1:], '\n'); end >= 0 {
+				chunk = text[:int(room)-1+end+1]
+			}
+		} else if room <= 0 {
+			if end := strings.IndexByte(text, '\n'); end >= 0 {
+				chunk = text[:end+1] // WriteLine rotates first, if it may
+			}
+		}
+		if err := l.WriteLine(chunk); err != nil {
+			return err
+		}
+		text = text[len(chunk):]
+	}
+	return nil
+}
+
 func (l *FileLogger) WriteLine(line string) error {
 	// Compress guard: never rotate while a compression is still running.
 	if l.size >= l.cfg.MaxSize && !l.compressing.Load() && !l.rotationFailed.Load() {
@@ -127,6 +152,9 @@ func (l *FileLogger) rotate() error {
 		return err
 	}
 
+	if l.cfg.CompressAfter >= keep {
+		return nil // nothing is ever compressed: no guard to take, no goroutine
+	}
 	// Take the guard, then compress every generation past CompressAfter that
 	// is still plain (normally just the one that crossed the line).
 	l.compressing.Store(true)

@@ -22,5 +22,14 @@ func watchSignals(s *Server) {
 				s.stats.Dump(s.runtime.Load())
 			}
 		}()
+		// Logging is buffered: write out what is pending before going down.
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+		go func() {
+			sig := <-stop
+			logf("stopping: received %s", sig)
+			FlushLogs()
+			os.Exit(0)
+		}()
 	})
 }

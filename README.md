@@ -73,6 +73,11 @@ action = deny
 - The port is always separate: `target_host` is a name or an IP address (IPv6
   without brackets) and the port goes in `target_port`. `target_host =
   10.0.0.1:8080` is rejected at load time.
+- An SNI that is an IP address is refused (RFC 6066 forbids it), so a
+  `target_host = $0` rule cannot be pointed at arbitrary addresses. A catch-all
+  whose target follows the client (`pattern = .*` with `target_host = $0`)
+  still connects to any *name* a client sends, internal ones included; that is
+  logged as a warning at start-up.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
   `access_denied` alert. `target_port` defaults to 443.
 - `pattern = NONE` (any letter case) is explicit: it matches only clients that
@@ -92,12 +97,13 @@ with its default, and a test keeps that file in step with the code:
 
 | key                    | default | meaning                                                              |
 |------------------------|---------|----------------------------------------------------------------------|
-| `bind`                 | 0.0.0.0 | listen address (`::` for IPv6)                                       |
+| `bind`                 | 0.0.0.0 | listen address: `0.0.0.0` all IPv4, `::` all IPv6 and IPv4, or specific addresses, several separated by `;` |
 | `handshake_timeout`    | 10      | seconds to receive the whole ClientHello (a slow trickle can't extend it) |
 | `connect_timeout`      | 10      | seconds to resolve and connect to the target                         |
 | `idle_timeout`         | 600     | close after N seconds with no traffic in either direction (0 = never); also reaps half-open connections |
 | `half_close_timeout`   | 30      | after one side closes, the other side gets N seconds to finish (0 = unlimited) |
 | `max_connections`      | 1024    | further connections are rejected; goroutines ≤ 2 × this              |
+| `max_handshakes_per_ip` | 64     | connections from one source (an IPv4 address, or an IPv6 /64) that have not sent their ClientHello yet. Further ones are closed at once, so one address cannot hold every slot with silent sockets for `handshake_timeout` each. Established connections don't count. 0 = unlimited |
 | `buffer_size`          | 65536   | bytes per pooled buffer; each open connection holds two              |
 | `buffer_pool_max_idle` | 2 × max_connections | capacity of the pool's channel                           |
 | `allow_cache_size`     | 4096    | LRU cache of allowed SNI → target decisions (0 = off)                |
@@ -114,7 +120,7 @@ option is missing from it, from `config.toml` or from this README):
 
 | section | options |
 |---|---|
-| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
 | `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `upstream_tls` `upstream_tls_verify` `upstream_sni` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | `[console]` | `listen` `port` `password` `password_hash` `hostnames` |
@@ -139,6 +145,8 @@ Samples, each with its expected routing checked by `go test`:
 
 ## IPv6
 
+- **Several addresses.** `bind = 192.0.2.1; 2001:db8::1` listens on exactly
+  those, each for its own family.
 - **Clients.** `bind = ::` listens on IPv6 **and** IPv4 with one socket;
   `0.0.0.0`, the default, is IPv4 only (enforced: left to itself Go would make
   it dual-stack); a specific address of either family
@@ -148,9 +156,11 @@ Samples, each with its expected routing checked by `go test`:
 - **Targets.** `target_host` may be an IPv6 address, written without brackets
   (`target_host = 2001:db8::10`, or `fe80::1%em0` with its zone for a
   link-local address); logs show it as `[2001:db8::10]:443`. A host name with
-  both A and AAAA records is dialled with Happy Eyeballs: IPv6 first, IPv4
-  0.3 s later if that has not connected, whichever answers first wins, all
-  within `connect_timeout`.
+  both A and AAAA records is dialled with Happy Eyeballs: the family the
+  resolver prefers first, the other 0.3 s later (or at once if the first
+  fails), whichever connects first wins, all within `connect_timeout`.
+  Resolved addresses are cached for 5 seconds, so a busy name costs the
+  resolver one lookup every few seconds, not one per connection.
 - **Certificates.** Let's Encrypt validates over IPv6 when a name has an AAAA
   record. The DNS pre-check therefore requires **every** address of the name, A
   and AAAA, to be in `public_ip_address`; a stray AAAA record is reported
@@ -435,6 +445,7 @@ The `reason=` on the closing line says exactly how the connection ended:
 | `client closed, then idle timeout (10m00s); closed by proxy` | one side finished, the other stayed open but silent |
 | `idle timeout (10m00s); closed by proxy` | nobody closed and nothing moved for `idle_timeout` |
 | `upstream stopped reading, then ...` | a write failed because the receiver closed its read side or vanished; the other direction still got its chance to finish |
+| `client closed in the middle of a TLS record, without close_notify; closed by proxy` | terminated connections only: the TCP connection ended inside a TLS record, so the data was incomplete. (A peer that closes between records without `close_notify`, as many HTTP clients do, counts as a normal close) |
 | `client->upstream error: ...` / `upstream->client error: ...` | a socket error such as a connection reset |
 
 A global registry tracks everything live, lock-free on the data path:
@@ -449,6 +460,14 @@ idle time and the state of each direction (`open` / `half-closed`).
 
 ## Design notes
 
+- **Logging never holds up traffic.** A log call appends the line to a buffer
+  in memory; a background goroutine writes it out ten times a second, and at
+  once after a problem line. A slow disk or a stalled stdout pipe therefore
+  cannot block connection handlers or the accept loop. If the destination
+  cannot keep up, at most 4 MiB is held; further lines are dropped and the
+  number is logged. `SIGTERM` / `SIGINT` write out what is pending before the
+  process exits. Lines that a flood would repeat ("too many connections",
+  `max_handshakes_per_ip`) are logged at most once a second, with a count.
 - **Goroutines, no event loop.** One goroutine per connection reads the
   ClientHello, routes, connects and copies client → server; a second copies
   server → client. The Go runtime multiplexes them over kqueue/epoll.

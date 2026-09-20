@@ -27,21 +27,23 @@ import (
 const MinReloadInterval = 5
 
 type Config struct {
-	Bind              string
-	Port              int
-	HandshakeTimeout  time.Duration
-	ConnectTimeout    time.Duration
-	IdleTimeout       time.Duration // no traffic either way for this long closes; 0 = never
-	HalfCloseTimeout  time.Duration // after one side closes, the other gets this long; 0 = unlimited
-	MaxConnections    int
-	BufferSize        int
-	BufferPoolMaxIdle int
-	AllowCacheSize    int
-	DenyCacheSize     int
-	ReloadInterval    time.Duration // 0 = never
-	StatsInterval     time.Duration // 0 = never
-	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
-	Log               LogConfig     // the [logging] section
+	Bind               string   // as configured, normalised: "0.0.0.0", or "192.0.2.1; 2001:db8::1"
+	Binds              []string // the addresses in Bind
+	Port               int
+	HandshakeTimeout   time.Duration
+	ConnectTimeout     time.Duration
+	IdleTimeout        time.Duration // no traffic either way for this long closes; 0 = never
+	HalfCloseTimeout   time.Duration // after one side closes, the other gets this long; 0 = unlimited
+	MaxConnections     int
+	MaxHandshakesPerIP int // connections per source still sending their ClientHello; 0 = unlimited
+	BufferSize         int
+	BufferPoolMaxIdle  int
+	AllowCacheSize     int
+	DenyCacheSize      int
+	ReloadInterval     time.Duration // 0 = never
+	StatsInterval      time.Duration // 0 = never
+	ShortReadDelay     time.Duration // pause after a short read so data batches up; 0 = off
+	Log                LogConfig     // the [logging] section
 
 	// Certificates (only used by rules with cert = ...).
 	CertPath            string   // where automatic certificates and the ACME account live
@@ -366,6 +368,15 @@ func listenNetwork(addr string) string {
 	return "tcp"
 }
 
+// listenAddrs is every address the proxy listens on, for display.
+func listenAddrs(c *Config) string {
+	var out []string
+	for _, b := range c.Binds {
+		out = append(out, net.JoinHostPort(b, strconv.Itoa(c.Port)))
+	}
+	return strings.Join(out, ", ")
+}
+
 // LetsEncryptDirectory is the default ACME directory.
 const LetsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
@@ -377,18 +388,20 @@ type rawRule struct {
 
 func ParseConfig(text string) (*Config, error) {
 	cfg := &Config{
-		Bind:             "0.0.0.0",
-		HandshakeTimeout: 10 * time.Second,
-		ConnectTimeout:   10 * time.Second,
-		IdleTimeout:      600 * time.Second,
-		HalfCloseTimeout: 30 * time.Second,
-		MaxConnections:   1024,
-		BufferSize:       64 * 1024,
-		AllowCacheSize:   4096,
-		DenyCacheSize:    4096,
-		ReloadInterval:   5 * time.Second,
-		StatsInterval:    60 * time.Second,
-		Log:              defaultLogConfig(),
+		Bind:               "0.0.0.0",
+		Binds:              []string{"0.0.0.0"},
+		HandshakeTimeout:   10 * time.Second,
+		ConnectTimeout:     10 * time.Second,
+		IdleTimeout:        600 * time.Second,
+		HalfCloseTimeout:   30 * time.Second,
+		MaxConnections:     1024,
+		MaxHandshakesPerIP: 64,
+		BufferSize:         64 * 1024,
+		AllowCacheSize:     4096,
+		DenyCacheSize:      4096,
+		ReloadInterval:     5 * time.Second,
+		StatsInterval:      60 * time.Second,
+		Log:                defaultLogConfig(),
 
 		CertPath:            "./certs",
 		ExpiryThresholdDays: 15,
@@ -466,7 +479,20 @@ func ParseConfig(text string) (*Config, error) {
 		case "global":
 			switch key {
 			case "bind":
-				cfg.Bind = strings.Trim(value, "[]") // [::] and :: are the same thing
+				cfg.Binds = nil
+				for _, b := range splitList(value) {
+					b = strings.Trim(b, "[]") // [::] and :: are the same thing
+					for _, seen := range cfg.Binds {
+						if seen == b {
+							return nil, fail("bind lists %s twice", b)
+						}
+					}
+					cfg.Binds = append(cfg.Binds, b)
+				}
+				if len(cfg.Binds) == 0 {
+					return nil, fail("bind must not be empty")
+				}
+				cfg.Bind = strings.Join(cfg.Binds, "; ")
 			case "port":
 				if cfg.Port, err = parsePort(value); err != nil {
 					return nil, fail("%v", err)
@@ -489,6 +515,8 @@ func ParseConfig(text string) (*Config, error) {
 				}
 			case "max_connections":
 				err = count(&cfg.MaxConnections)
+			case "max_handshakes_per_ip":
+				err = count(&cfg.MaxHandshakesPerIP)
 			case "allow_cache_size":
 				err = count(&cfg.AllowCacheSize)
 			case "deny_cache_size":
@@ -685,6 +713,11 @@ func ParseConfig(text string) (*Config, error) {
 	if err := cfg.prioritise(); err != nil {
 		return nil, err
 	}
+	for i := range cfg.Rules {
+		if r := &cfg.Rules[i]; r.Allow && r.Kind == kindCatchAll && strings.Contains(strings.ReplaceAll(r.TargetHost, "$$", ""), "$") {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("[[host]] at line %d: pattern = %s with target_host = %s connects to whatever name a client sends (port %d), internal names included. List the names or domains you mean to allow instead", r.Line, r.Source, r.TargetHost, r.TargetPort))
+		}
+	}
 	if c := cfg.Console; c != nil {
 		if c.Port == 0 {
 			return nil, fmt.Errorf("[console] port is required")
@@ -700,7 +733,13 @@ func ParseConfig(text string) (*Config, error) {
 		if cfg.Port != 443 {
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: the CA validates on public port 443, but this proxy listens on %d; make sure 443 is forwarded here", cfg.Port))
 		}
-		if bind, err := netip.ParseAddr(cfg.Bind); err == nil && bind.Unmap().Is4() {
+		v4Only := true
+		for _, b := range cfg.Binds {
+			if bind, err := netip.ParseAddr(b); err != nil || !bind.Unmap().Is4() {
+				v4Only = false
+			}
+		}
+		if v4Only {
 			for _, ip := range cfg.PublicIPs {
 				if a, _ := netip.ParseAddr(ip); a.Is6() {
 					cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: public_ip_address lists the IPv6 address %s, but bind = %s listens on IPv4 only. The CA prefers IPv6 when a name has an AAAA record, and would not reach this proxy; use bind = :: to listen on both", ip, cfg.Bind))

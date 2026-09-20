@@ -5,7 +5,8 @@
 # `port` is required.
 
 [global]
-bind = 0.0.0.0                  # (default: 0.0.0.0) listen address; "::" for IPv6
+bind = 0.0.0.0                  # (default: 0.0.0.0) listen address: 0.0.0.0 = all IPv4, :: = all IPv6 and IPv4;
+                                #   or specific addresses, several separated by ";" (192.0.2.1; 2001:db8::1)
 port = 443                      # (required) listen port
 
 # --- Timeouts, in seconds -----------------------------------------------
@@ -16,6 +17,9 @@ port = 443                      # (required) listen port
 
 # --- Limits and memory ----------------------------------------------------
 # max_connections = 1024        # (default: 1024) more are rejected; goroutines <= 2 x this
+# max_handshakes_per_ip = 64    # (default: 64) connections from one source (IPv4 address or IPv6 /64)
+#                               #   that have not sent their ClientHello yet; more are closed at once,
+#                               #   so one address cannot hold every slot with silent sockets. 0 = unlimited
 # buffer_size = 65536           # (default: 65536) bytes per pooled buffer; 2 held per open connection
 # buffer_pool_max_idle = 2048   # (default: 2 x max_connections) free buffers kept for reuse
 

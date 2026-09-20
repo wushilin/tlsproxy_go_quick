@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -228,7 +229,13 @@ func TestBinaryLogsToRotatingFiles(t *testing.T) {
 			t.Fatal("proxy did not start")
 		}
 	}
-	for i := 0; i < 150; i++ { // ~2 lines per denied connection: plenty of rotations at 3K
+	for i := 0; i < 200; i++ { // ~2 lines per denied connection: plenty of rotations at 3K
+		if i%25 == 0 {
+			// Lines are written in batches ten times a second, and the log does
+			// not rotate again while a generation is being compressed: arrive in
+			// waves, so that every wave finds the previous compression finished.
+			time.Sleep(250 * time.Millisecond)
+		}
 		c, err := net.Dial("tcp", addr)
 		if err != nil {
 			t.Fatal(err)
@@ -282,5 +289,41 @@ func TestBinaryLogsToRotatingFiles(t *testing.T) {
 		if out, err := exec.Command(gz, "-t", gens[len(gens)-1]).CombinedOutput(); err != nil {
 			t.Fatalf("gzip -t: %v %s", err, out)
 		}
+	}
+}
+
+// A batch of lines must rotate exactly where the same lines written one by one
+// would have, and never split a line.
+func TestWriteLinesRotatesLikeLineByLine(t *testing.T) {
+	var lines []string
+	for i := 0; i < 400; i++ {
+		lines = append(lines, fmt.Sprintf("line %03d %s\n", i, strings.Repeat("x", i%37)))
+	}
+	cfg := LogConfig{MaxSize: 1000, MaxKeep: 50, CompressAfter: 50} // no compression: no guard in the way
+	write := func(name string, batch int) []string {
+		path := filepath.Join(t.TempDir(), name)
+		l, err := OpenFileLogger(path, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < len(lines); i += batch {
+			if err := l.WriteLines(strings.Join(lines[i:min(i+batch, len(lines))], "")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		l.Close()
+		var files []string
+		for _, g := range append(generations(path, 50), path) {
+			data, _ := os.ReadFile(g)
+			if len(data) > 0 && data[len(data)-1] != '\n' {
+				t.Fatalf("%s ends in the middle of a line", g)
+			}
+			files = append(files, string(data))
+		}
+		return files
+	}
+	one, all, some := write("one.log", 1), write("all.log", len(lines)), write("some.log", 7)
+	if len(one) < 5 || !reflect.DeepEqual(one, all) || !reflect.DeepEqual(one, some) {
+		t.Fatalf("generations differ: %d line by line, %d in one batch, %d in batches of 7", len(one), len(all), len(some))
 	}
 }

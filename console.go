@@ -319,7 +319,7 @@ func (c *Console) status(w http.ResponseWriter, r *http.Request) {
 	allow, deny := rt.cache.Len()
 	writeJSON(w, 200, map[string]any{
 		"uptimeSeconds": int(time.Since(st.Started).Seconds()),
-		"listen":        net.JoinHostPort(rt.cfg.Bind, strconv.Itoa(rt.cfg.Port)),
+		"listen":        listenAddrs(rt.cfg),
 		"rules":         len(rt.cfg.Rules),
 		"active":        st.Active.Load(), "accepted": st.Accepted.Load(), "completed": st.Completed.Load(),
 		"denied": st.Denied.Load(), "failed": st.Failed.Load(), "rejected": st.Rejected.Load(),

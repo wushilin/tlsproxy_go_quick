@@ -27,7 +27,7 @@ type proxyUnderTest struct {
 // startProxy starts the proxy with rules (appended after [global]) on a free port.
 func startProxy(t *testing.T, global, rules string) *proxyUnderTest {
 	t.Helper()
-	return startProxyText(t, "[global]\nport=1\nstats_interval=0\n"+global+"\n"+rules, "")
+	return startProxyText(t, "[global]\nport=1\nstats_interval=0\nmax_handshakes_per_ip=0\n"+global+"\n"+rules, "")
 }
 
 func startProxyText(t *testing.T, text, path string) *proxyUnderTest {

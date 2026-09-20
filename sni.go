@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -178,6 +179,12 @@ func parseExtensions(body []byte) (helloInfo, error) {
 					if !isHostChar(b) {
 						return info, fmt.Errorf("invalid SNI host name %q", name)
 					}
+				}
+				// RFC 6066: literal IP addresses are not permitted. Refusing them
+				// also keeps target_host = $0 rules from being pointed at
+				// arbitrary addresses by the client.
+				if _, err := netip.ParseAddr(string(name)); err == nil {
+					return info, fmt.Errorf("invalid SNI host name %q: an IP address is not a host name", name)
 				}
 				info.SNI = strings.ToLower(string(name))
 				break

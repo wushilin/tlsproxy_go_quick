@@ -13,7 +13,7 @@
 #> other.org              => DENY
 
 [global]
-bind = "::"                        # listen address; "::" = all IPv6 (and usually IPv4) addresses
+bind = "::"                        # :: = all IPv6 and IPv4 addresses; or a list: 192.0.2.1; 2001:db8::1
 port = 443                         # required
 
 handshake_timeout = 5              # seconds to receive the whole ClientHello
@@ -22,6 +22,7 @@ idle_timeout = 300                 # close after this long without traffic eithe
 half_close_timeout = 10            # after one side closes, the other gets this long; 0 = unlimited
 
 max_connections = 4096             # more are rejected; goroutines <= 2 x this
+max_handshakes_per_ip = 32         # per source, connections still sending their ClientHello; default 64, 0 = unlimited
 buffer_size = 32768                # bytes per pooled buffer (512..1048576); two per open connection
 buffer_pool_max_idle = 2048        # free buffers kept for reuse; default 2 x max_connections
 short_read_delay_us = 0            # microseconds to pause after a short read; 0 = off (little gain in Go)
