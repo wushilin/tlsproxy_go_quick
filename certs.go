@@ -344,6 +344,11 @@ func (m *CertManager) loadAutoFromDisk(cfg *Config, domain string) {
 // CertificateFor returns what to present for a terminating rule and SNI.
 // Until an automatic certificate exists, a short-lived self-signed placeholder
 // keeps the service reachable (with a browser warning).
+//
+// Placeholders are never made per client-chosen name: a flood of random names
+// would cost a key generation and a signature each. Only a name from
+// cert_domains (a list the configuration bounds) gets its own; every other name
+// shares one placeholder per rule, a wildcard where the pattern allows it.
 func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, error) {
 	m.mu.RLock()
 	var cert *tls.Certificate
@@ -358,8 +363,11 @@ func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, 
 	} else if fc := m.files[rule.Cert]; fc != nil {
 		cert = fc.cert
 	}
+	key, name := placeholderFor(rule, sni)
 	if cert == nil {
-		cert = m.placeholders[sni]
+		if cert = m.placeholders[key]; cert != nil && time.Now().After(cert.Leaf.NotAfter.Add(-time.Hour)) {
+			cert = nil // about to expire: make a new one
+		}
 	}
 	m.mu.RUnlock()
 	if propose {
@@ -368,21 +376,33 @@ func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, 
 	if cert != nil {
 		return cert, nil
 	}
-	name := sni
-	if name == "" {
-		name = "localhost"
-	}
 	ph, err := selfSigned(name, 7*24*time.Hour)
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
-	if len(m.placeholders) > 256 { // bounded: names come from clients
+	if len(m.placeholders) > 256 { // keys come from the configuration; a backstop all the same
 		m.placeholders = map[string]*tls.Certificate{}
 	}
-	m.placeholders[sni] = ph
+	m.placeholders[key] = ph
 	m.mu.Unlock()
 	return ph, nil
+}
+
+// placeholderFor says which placeholder serves sni under rule: the key it is
+// kept under and the name it is made for.
+func placeholderFor(rule *Rule, sni string) (key, name string) {
+	if slices.Contains(rule.CertDomains, sni) {
+		return sni, sni // a configured name: its own, replaced by the real certificate
+	}
+	key = fmt.Sprintf("rule %d %s", rule.Line, rule.Source)
+	switch rest, ok := strings.CutPrefix(strings.ToLower(rule.Source), "*."); {
+	case rule.Kind == kindWildcard && ok && validDomain(rest):
+		return key, "*." + rest // *.s3.example.com: matches whatever the client asked for
+	case rule.Kind == kindLiteral:
+		return key, literalName(rule.Source)
+	}
+	return key, "placeholder.invalid" // a regex or the catch-all: no one name fits
 }
 
 // propose queues a client-requested name for the rule's cert_validate_script.
@@ -478,7 +498,6 @@ func (m *CertManager) adoptCandidates(cfg *Config) {
 		}
 		m.auto[d], m.dynamic[d] = fc.cert, true
 		delete(m.candidates, d)
-		delete(m.placeholders, d)
 		logf("cert: %s: certificate found in %s, issued earlier with the approval of cert_validate_script; the script is asked again when it is due for renewal", d, autoDir(cfg, d))
 	}
 }

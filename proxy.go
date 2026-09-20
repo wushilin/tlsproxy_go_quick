@@ -630,12 +630,17 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 		alpn = "none"
 	}
 	how = fmt.Sprintf("TLS terminated here: client %s alpn=%s, %s; upstream %s",
-		tls.VersionName(st.Version), alpn, describeCert(rule, served), strings.TrimPrefix(how, "tls terminated, "))
+		tls.VersionName(st.Version), alpn, describeCert(rule, served, st.DidResume), strings.TrimPrefix(how, "tls terminated, "))
 	return tlsClient, tlsUp, how, nil
 }
 
 // describeCert says which certificate a terminated connection was given.
-func describeCert(rule *Rule, c *tls.Certificate) string {
+func describeCert(rule *Rule, c *tls.Certificate, resumed bool) string {
+	if resumed && c == nil {
+		// A resumed session skips the certificate: the client verified it when
+		// the session was first set up.
+		return "cert=" + rule.Cert + " (TLS session resumed, no certificate sent)"
+	}
 	if c == nil || c.Leaf == nil {
 		return "cert=?"
 	}

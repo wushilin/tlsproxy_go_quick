@@ -22,7 +22,8 @@ or linker, so anything that needs one cannot be built on it, while Go can:
 ## Build and run
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o tlsproxy .
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(git describe --tags --always)" -o tlsproxy .
+./tlsproxy --version                                   # tlsproxy v0.3.0
 ./tlsproxy config.toml                                 # run (logs to stderr)
 ./tlsproxy config.toml --test foo.wushilin.net x.com   # dry run: show routing only
 ./tlsproxy config.toml --test ""                       # dry run for a client without SNI
@@ -232,6 +233,13 @@ target_host = 192.168.1.50
 grep -qxF "$1" /usr/local/etc/tlsproxy/customers.txt
 ```
 
+A complete example is [`samples/s3-bucket-admission.sh`](samples/s3-bucket-admission.sh):
+for an S3-compatible server with virtual-hosted buckets, `<bucket>.s3.example.com`
+gets a certificate only if the bucket exists. It lists the buckets with a
+SigV4-signed request, parses the answer as XML (`xmllint`, not `grep`), keeps
+the secret key out of the process list, and tells "no such bucket" (exit 1)
+from "could not find out" (exit 2).
+
 - The script is run as `<script> <name>`, without a shell, and only with names
   that are valid host names matching the rule. Exit status 0 accepts the name;
   any other status refuses it. It is killed after 20 seconds, and no answer
@@ -292,8 +300,13 @@ How it works:
 - **DNS pre-check** before every order, so a name that doesn't point here
   never costs you the CA's failed-validation rate limit.
 - **Placeholder.** Until a certificate exists (or for a name matched by the
-  pattern but missing from `cert_domains`) a self-signed placeholder keeps the
-  service reachable, with a browser warning.
+  pattern but missing from `cert_domains`, or refused by the script) a
+  self-signed placeholder keeps the service reachable, with a browser warning.
+  A name from `cert_domains` gets its own. Names chosen by clients never do:
+  they share **one placeholder per rule**, a wildcard (`*.s3.example.com`) when
+  the pattern is one, so a flood of made-up names costs no key generation or
+  signature at all. Placeholders live 7 days and are replaced before they
+  expire.
 - **ALPN end to end.** The upstream is contacted first and the client is
   offered exactly the protocol the upstream agreed to, so HTTP/2 works across
   the proxy. With a plaintext upstream only `http/1.1` is offered.

@@ -30,8 +30,10 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: |
+          version=$(git describe --tags --always --dirty)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version=$GITHUB_REF_NAME; fi
           for target in freebsd/amd64 freebsd/arm64 linux/amd64 linux/arm64; do
-            GOOS=${target%/*} GOARCH=${target#*/} go build -trimpath -ldflags="-s -w" \
+            GOOS=${target%/*} GOARCH=${target#*/} go build -trimpath -ldflags="-s -w -X main.version=$version" \
               -o "tlsproxy-${target%/*}-${target#*/}" .
           done
           sha256sum tlsproxy-* > SHA256SUMS

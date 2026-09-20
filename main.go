@@ -13,11 +13,18 @@ import (
 	"strings"
 )
 
+// version is set at build time: -ldflags "-X main.version=v0.3.0".
+var version = "dev"
+
 func main() {
 	args := os.Args[1:]
 	for _, a := range args {
+		if a == "--version" {
+			fmt.Println("tlsproxy", version)
+			return
+		}
 		if a == "-h" || a == "--help" {
-			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--test <sni>...]\n       %s --hash-password    (reads a password from stdin, prints a [console] password_hash line)\n", os.Args[0], os.Args[0])
+			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--test <sni>...]\n       %s --hash-password    (reads a password from stdin, prints a [console] password_hash line)\n       %s --version\n", os.Args[0], os.Args[0], os.Args[0])
 			return
 		}
 		if a == "--hash-password" {

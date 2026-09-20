@@ -215,3 +215,52 @@ func TestCertValidateScriptTimeoutCountsAsRefusal(t *testing.T) {
 		t.Fatalf("a script that cannot run refuses: %v %v", ok, err)
 	}
 }
+
+// A flood of random names must not cost a key and a certificate each: names the
+// configuration does not list share one placeholder per rule.
+func TestPlaceholderIsSharedForClientChosenNames(t *testing.T) {
+	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n"+
+		"[[host]]\npattern=*.s3.test\ncert=auto\ncert_domains=www.s3.test\ncert_validate_script=/nonexistent\ntarget_host=x.lan\n"+
+		"[[host]]\npattern=(.*)\\.re\\.test\ncert=auto\ncert_validate_script=/nonexistent\ntarget_host=y.lan\n")
+	m := NewCertManager()
+	m.cfg = cfg // no worker: nothing is ever issued
+	var first *tls.Certificate
+	for i := 0; i < 5000; i++ {
+		c, err := m.CertificateFor(&cfg.Rules[0], fmt.Sprintf("random-%d.s3.test", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == nil {
+			first = c
+		}
+		if c != first {
+			t.Fatalf("name %d got a placeholder of its own", i)
+		}
+	}
+	if first.Leaf.DNSNames[0] != "*.s3.test" || first.Leaf.Subject.Organization[0] != "tlsproxy placeholder" {
+		t.Fatalf("a wildcard rule gets a wildcard placeholder: %v", first.Leaf.DNSNames)
+	}
+	if err := first.Leaf.VerifyHostname("random-7.s3.test"); err != nil {
+		t.Fatalf("and it matches what the client asked for: %v", err)
+	}
+	// A configured name keeps its own; a regex rule shares one without a usable name.
+	own, _ := m.CertificateFor(&cfg.Rules[0], "www.s3.test")
+	re1, _ := m.CertificateFor(&cfg.Rules[1], "a.re.test")
+	re2, _ := m.CertificateFor(&cfg.Rules[1], "b.re.test")
+	if own == first || own.Leaf.DNSNames[0] != "www.s3.test" || re1 != re2 || re1 == first || re1.Leaf.DNSNames[0] != "placeholder.invalid" {
+		t.Fatalf("%v %v", own.Leaf.DNSNames, re1.Leaf.DNSNames)
+	}
+	m.mu.RLock()
+	n, queued := len(m.placeholders), len(m.candidates)
+	m.mu.RUnlock()
+	if n != 3 || queued > maxCandidates {
+		t.Fatalf("%d placeholders, %d names queued", n, queued)
+	}
+	// An expiring placeholder is replaced, not served for ever.
+	m.mu.Lock()
+	first.Leaf.NotAfter = time.Now().Add(time.Minute)
+	m.mu.Unlock()
+	if c, _ := m.CertificateFor(&cfg.Rules[0], "random-1.s3.test"); c == first || time.Until(c.Leaf.NotAfter) < 6*24*time.Hour {
+		t.Fatal("placeholder not renewed")
+	}
+}
