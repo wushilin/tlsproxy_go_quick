@@ -2,21 +2,23 @@
 # This file is deliberately written "upside down" (broadest first) to show it.
 #
 #   1. NONE and literal names      vq.example.com        exact match; always win
-#   2. wildcards                   *.example.com         * stays inside one label, so it does not
-#                                  api-*.example.com       match a.b.example.com; ** spans one or more
-#                                  **.example.com          labels. More literal characters win.
-#   3. regular expressions         (www|blog)\.x\.com    in file order among themselves
-#   4. the catch-all               .*                    always last
+#   2. wildcards                   *.example.com         a * is one label, or part of one; it never
+#                                  api-*.example.com       crosses a dot, so *.example.com does not
+#                                  *.*.example.com         match a.b.example.com. More literal
+#                                                          characters win; then file order.
+#   3. ANY                         ANY                   everything; always last
 #
-# Matching ignores case throughout. $1, $2 ... are the *s (or regex groups).
+# There are no regular expressions and no **. Matching ignores case throughout.
+# $1, $2 ... are the *s from the left; $0 is the whole name.
 #
 #> vq.example.com          => 10.0.0.1:443
 #> VQ.Example.COM          => 10.0.0.1:443
 #> files.example.com       => 10.0.1.1:8443
 #> api-billing.example.com => 10.0.2.1:9000
-#> a.b.example.com         => 10.0.3.1:443
-#> node7.example.com       => 10.0.1.1:8443
-#> node7.cluster.io        => node-7.cluster.internal:443
+#> api-.example.com        => 10.0.2.1:9000
+#> a.b.example.com         => b-a.deep.lan:443
+#> a.b.c.example.com       => 10.0.9.9:443
+#> example.com             => 10.0.9.9:443
 #> secret.example.com      => DENY
 #> anything.else.org       => 10.0.9.9:443
 #> <none>                  => 10.0.0.99:443
@@ -25,29 +27,25 @@
 bind = 0.0.0.0
 port = 443
 
-# The catch-all comes first in the file and is still evaluated last.
+# ANY comes first in the file and is still evaluated last.
 [[host]]
-pattern = .*
+pattern = ANY
 target_host = 10.0.9.9
 
-# A regular expression: tried after every literal and wildcard.
+# Exactly two labels under example.com: two *, two captures.
 [[host]]
-pattern = node(\d+)\.(example\.com|cluster\.io)
-target_host = node-$1.cluster.internal
+pattern = *.*.example.com
+target_host = $2-$1.deep.lan
 
-# One or more labels under example.com.
-[[host]]
-pattern = **.example.com
-target_host = 10.0.3.1
-
-# Exactly one label under example.com. Beats ** above, and beats the regex, so
-# node7.example.com comes here.
+# Exactly one label under example.com. example.com itself and a.b.c.example.com
+# match none of the wildcards and fall through to ANY.
 [[host]]
 pattern = *.example.com
 target_host = 10.0.1.1
 target_port = 8443
 
-# More literal characters than *.example.com, so it wins for api-... names.
+# More literal characters than *.example.com, so it wins for api-... names. A *
+# inside a label may be empty: api-.example.com matches too.
 [[host]]
 pattern = api-*.example.com
 target_host = 10.0.2.1
@@ -62,7 +60,7 @@ target_host = 10.0.0.1
 pattern = secret.example.com
 action = deny
 
-# Clients without SNI; without this rule the catch-all would take them.
+# Clients without SNI; without this rule ANY would take them.
 [[host]]
 pattern = NONE
 target_host = 10.0.0.99

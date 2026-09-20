@@ -342,7 +342,7 @@ func TestIPAddressIsNotAnSNI(t *testing.T) {
 	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "connects to whatever name a client sends") {
 		t.Fatalf("%q", c.Warnings)
 	}
-	if c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=(.*)\\.example\\.com\ntarget_host=$0\n[[host]]\npattern=.*\ntarget_host=fixed.lan\n"); len(c.Warnings) != 0 {
+	if c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=*.example\\.com\ntarget_host=$0\n[[host]]\npattern=.*\ntarget_host=fixed.lan\n"); len(c.Warnings) != 0 {
 		t.Fatalf("%q", c.Warnings)
 	}
 }

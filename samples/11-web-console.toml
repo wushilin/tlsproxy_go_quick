@@ -40,16 +40,16 @@ hostnames = console.example.com    # names the console may be addressed by, besi
 # new config is applied at once.
 
 [[host]]
-pattern = console\.example\.com
+pattern = console.example.com
 cert = auto
 upstream_tls = false               # the console is plain HTTP
 target_host = 127.0.0.1
 target_port = 9443
 
 [[host]]
-pattern = www\.example\.com
+pattern = www.example.com
 target_host = 10.0.0.10
 
 [[host]]
-pattern = .*
+pattern = ANY
 action = deny

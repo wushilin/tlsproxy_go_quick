@@ -93,7 +93,7 @@ func TestPebbleIssuesOverTLSALPN01(t *testing.T) {
 	p := startProxy(t, fmt.Sprintf("cert_path=%s\nacme_agree_tos=true\nacme_email=admin@acme.test\n"+
 		"acme_directory=https://127.0.0.1:%d/dir\nacme_ca_file=%s\ndns_resolvers=127.0.0.1:%d\npublic_ip_address=127.0.0.1",
 		certPath, apiPort, filepath.Join(pebbleCerts, "pebble.minica.pem"), dnsPort),
-		fmt.Sprintf("[[host]]\npattern=(.*)\\.acme\\.test\ncert=auto\ncert_domains=www.acme.test, api.acme.test, elsewhere.acme.test\n"+
+		fmt.Sprintf("[[host]]\npattern=*.acme\\.test\ncert=auto\ncert_domains=www.acme.test, api.acme.test, elsewhere.acme.test\n"+
 			"upstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
 	_, proxyPort, _ := net.SplitHostPort(p.addr)
 

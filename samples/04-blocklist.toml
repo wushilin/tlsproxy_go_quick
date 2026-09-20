@@ -1,10 +1,17 @@
 # Blocklist: pass everything through to the real host, except blocked names.
+# The proxy then connects to whatever name a client sends: only for networks
+# whose clients you trust (the proxy says so in a warning at start-up).
+#
+# A * is one label, so a blocked domain is listed once per depth you want
+# covered.
 #
 #> www.google.com         => www.google.com:443
 #> ads.doubleclick.net    => DENY
+#> a.ads.doubleclick.net  => DENY
 #> doubleclick.net        => DENY
 #> telemetry.vendor.io    => DENY
 #> metrics7.vendor.io     => DENY
+#> metrics.vendor.io      => DENY
 #> api.vendor.io          => api.vendor.io:443
 #> <none>                 => DENY
 
@@ -13,18 +20,31 @@ bind = 0.0.0.0
 port = 8443
 
 [[host]]
-pattern = (.*\.)?doubleclick\.net
+pattern = doubleclick.net
 action = deny
 
 [[host]]
-pattern = (telemetry|metrics\d*)\.vendor\.io
+pattern = *.doubleclick.net
+action = deny
+
+[[host]]
+pattern = *.*.doubleclick.net
+action = deny
+
+[[host]]
+pattern = telemetry.vendor.io
+action = deny
+
+# metrics.vendor.io, metrics7.vendor.io, ...: a * inside a label may be empty.
+[[host]]
+pattern = metrics*.vendor.io
 action = deny
 
 # Clients without SNI can't be forwarded anywhere meaningful.
 [[host]]
-pattern = ^$
+pattern = NONE
 action = deny
 
 [[host]]
-pattern = .*
+pattern = ANY
 target_host = $0

@@ -9,8 +9,8 @@ package main
 //
 // Rules are evaluated by specificity, not by their position in the file (see
 // ruleKind): NONE and literal names first, then wildcards (more literal
-// characters first), then regexes in file order, the catch-all last. A host
-// that matches no rule is denied.
+// characters first), ANY last. A host that matches no rule is denied. Patterns
+// are host names with optional * wildcards; there are no regular expressions.
 
 import (
 	"fmt"
@@ -84,23 +84,19 @@ type ruleKind int
 const (
 	kindNone     ruleKind = iota // pattern = NONE: only clients without SNI
 	kindLiteral                  // a plain host name: exact match, always wins over the kinds below
-	kindWildcard                 // *.example.com: * is one label (or part of one), ** one or more labels
-	kindRegex                    // anything else: a regular expression; file order among themselves
-	kindCatchAll                 // .* (or * / **): always last
+	kindWildcard                 // *.example.com, api-*.example.com: a * never crosses a dot
+	kindCatchAll                 // pattern = ANY: everything, always last
 )
 
 func (k ruleKind) String() string {
-	return [...]string{"no SNI", "literal", "wildcard", "regex", "catch-all"}[k]
+	return [...]string{"no SNI", "literal", "wildcard", "catch-all"}[k]
 }
 
 type Rule struct {
-	Line   int
-	Source string
-	Kind   ruleKind
-	// literalChars ranks wildcards (more is more specific); multiLabel (a **
-	// in the pattern) ranks after an equally long single-label wildcard.
-	literalChars int
-	multiLabel   bool
+	Line         int
+	Source       string
+	Kind         ruleKind
+	literalChars int // ranks wildcards: more literal characters is more specific
 	// NoSNI is set by `pattern = NONE` (any case): the rule matches only
 	// connections without an SNI, and Pattern is nil.
 	NoSNI      bool
@@ -141,7 +137,7 @@ func isHostChar(b byte) bool {
 }
 
 // Route evaluates the rules for a lowercased SNI, most specific first. No SNI
-// is matched as "" by regexes and the catch-all (after a NONE rule, if any).
+// is matched by NONE, else by ANY; never by a literal or a wildcard.
 func (c *Config) Route(sni string) Decision {
 	if r := c.literals[sni]; r != nil {
 		return r.decide(sni, []int{0, len(sni)})
@@ -188,61 +184,72 @@ func (r *Rule) decide(sni string, m []int) Decision {
 }
 
 // classify works out what kind of pattern this is and returns the regular
-// expression that implements it (unanchored; "" for NONE).
+// expression that implements it internally (unanchored; "" for NONE).
 //
-//	NONE                          no SNI
-//	vq.example.com                literal; so are vq\.example\.com and ^vq.example.com$
-//	*.example.com  api-*.x.com    wildcard: * stays within one label, so *.example.com
-//	**.example.com                does not match a.b.example.com; ** spans one or more labels
-//	.*  (.*)  *  **               catch-all
-//	anything else                 regular expression (RE2)
+//	NONE                          only clients that send no SNI
+//	vq.example.com                literal; vq\.example\.com and ^vq.example.com$ mean the same
+//	*.example.com                 wildcard: a * that is a whole label is exactly one label, so
+//	api-*.example.com               *.example.com does not match a.b.example.com (nor example.com);
+//	*.*.example.com                 a * inside a label is any run of characters, none included:
+//	                                api-*.x.com matches api-1.x.com and api-.x.com, abc*.x.com
+//	                                matches abc.x.com. Each * is a capture: $1, $2, ... left to right
+//	ANY                           everything, with or without SNI (".*" is accepted as an old spelling)
 //
-// A wildcard has no backslash and no empty label; its *s are capture groups,
-// so $1 works in target_host as it does for a regex.
-func classify(pattern string) (kind ruleKind, expr string, literalChars int, multiLabel bool, err error) {
-	if strings.EqualFold(pattern, "none") {
-		return kindNone, "", 0, false, nil
+// Nothing else is a pattern: there are no regular expressions and no **.
+func classify(pattern string) (kind ruleKind, expr string, literalChars int, err error) {
+	switch {
+	case strings.EqualFold(pattern, "none"):
+		return kindNone, "", 0, nil
+	case strings.EqualFold(pattern, "any"), strings.TrimSuffix(strings.TrimPrefix(pattern, "^"), "$") == ".*":
+		return kindCatchAll, ".*", 0, nil
 	}
-	bare := strings.TrimSuffix(strings.TrimPrefix(pattern, "^"), "$")
-	switch bare {
-	case ".*", "(.*)":
-		return kindCatchAll, pattern, 0, false, nil
-	case "*", "**":
-		return kindCatchAll, "(.*)", 0, false, nil
-	}
-	hostOnly := func(s string, star bool) bool {
-		for i := 0; i < len(s); i++ {
-			if !isHostChar(s[i]) && !(star && s[i] == '*') {
-				return false
-			}
+	name := literalName(pattern) // ^ $ and \. are tolerated spellings, for literals and wildcards alike
+	for i := 0; i < len(name); i++ {
+		if !isHostChar(name[i]) && name[i] != '*' {
+			return 0, "", 0, fmt.Errorf("pattern %q is not a host name: %s", pattern, patternHelp(pattern))
 		}
-		return s != ""
 	}
-	if name := literalName(pattern); hostOnly(name, false) {
-		return kindLiteral, regexp.QuoteMeta(name), len(name), false, nil
+	if name == "" || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
+		return 0, "", 0, fmt.Errorf("pattern %q is not a host name: %s", pattern, patternHelp(pattern))
 	}
-	if !strings.Contains(pattern, "*") || !hostOnly(pattern, true) ||
-		strings.HasPrefix(pattern, ".") || strings.HasSuffix(pattern, ".") || strings.Contains(pattern, "..") {
-		return kindRegex, pattern, 0, false, nil
+	if !strings.Contains(name, "*") {
+		return kindLiteral, regexp.QuoteMeta(name), len(name), nil
 	}
-	if strings.Contains(pattern, "***") {
-		return 0, "", 0, false, fmt.Errorf("bad wildcard %q: use * for one label or ** for one or more", pattern)
+	if strings.Contains(name, "**") {
+		return 0, "", 0, fmt.Errorf("pattern %q: ** is not supported. A * never crosses a dot: write one rule per depth (*.example.com, *.*.example.com)", pattern)
 	}
 	var out strings.Builder
-	for i := 0; i < len(pattern); i++ {
-		switch {
-		case strings.HasPrefix(pattern[i:], "**"):
-			out.WriteString(`([^.]+(?:\.[^.]+)*)`)
-			multiLabel = true
-			i++
-		case pattern[i] == '*':
-			out.WriteString(`([^.]+)`)
-		default:
-			out.WriteString(regexp.QuoteMeta(pattern[i : i+1]))
-			literalChars++
+	for n, label := range strings.Split(name, ".") {
+		if n > 0 {
+			out.WriteString(`\.`)
+		}
+		if label == "*" {
+			out.WriteString(`([^.]+)`) // a whole label: there has to be one
+			continue
+		}
+		for i := 0; i < len(label); i++ {
+			if label[i] == '*' {
+				out.WriteString(`([^.]*)`) // part of a label: may be nothing
+			} else {
+				out.WriteString(regexp.QuoteMeta(label[i : i+1]))
+				literalChars++
+			}
 		}
 	}
-	return kindWildcard, out.String(), literalChars, multiLabel, nil
+	return kindWildcard, out.String(), literalChars + strings.Count(name, "."), nil
+}
+
+// patternHelp says what to write instead of a pattern that is not one: most
+// often a regular expression from a configuration written for an older version.
+func patternHelp(pattern string) string {
+	help := "Use a host name, with * for one label or part of one (*.example.com, api-*.example.com; each * is $1, $2, ... in target_host), NONE for clients without SNI, or ANY for everything"
+	switch {
+	case strings.Contains(pattern, "|"):
+		return "regular expressions are no longer supported; write one rule per alternative. " + help
+	case strings.ContainsAny(pattern, `()[]{}+?\^$`) || strings.Contains(pattern, ".*"):
+		return "regular expressions are no longer supported; (.*) and .* become *. " + help
+	}
+	return help
 }
 
 // literalName is the host name a literal pattern stands for: vq\.example\.com,
@@ -267,6 +274,11 @@ func (c *Config) prioritise() error {
 			}
 			c.literals[name] = r
 			continue
+		case kindWildcard:
+			if prev := c.literals["\x00"+literalName(r.Source)]; prev != nil {
+				return fmt.Errorf("[[host]] at line %d: pattern %s already has a rule at line %d; only one of them could ever match", r.Line, literalName(r.Source), prev.Line)
+			}
+			c.literals["\x00"+literalName(r.Source)] = r // never equals an SNI: only remembers the pattern
 		case kindNone, kindCatchAll:
 			if prev := first[r.Kind]; prev != nil {
 				return fmt.Errorf("[[host]] at line %d: pattern = %s can never match, the rule at line %d (%s) already matches the same clients", r.Line, r.Source, prev.Line, prev.Source)
@@ -277,16 +289,10 @@ func (c *Config) prioritise() error {
 	}
 	sort.SliceStable(c.byPriority, func(i, j int) bool {
 		a, b := c.byPriority[i], c.byPriority[j]
-		switch {
-		case a.Kind != b.Kind:
+		if a.Kind != b.Kind {
 			return a.Kind < b.Kind
-		case a.Kind != kindWildcard:
-			return false // regexes keep their file order
-		case a.literalChars != b.literalChars:
-			return a.literalChars > b.literalChars
-		default:
-			return !a.multiLabel && b.multiLabel
 		}
+		return a.literalChars > b.literalChars // equally specific: file order (the sort is stable)
 	})
 	// Say so once when that differs from a top-to-bottom reading of the file:
 	// a rule that an earlier, broader rule would have caught.
@@ -303,7 +309,7 @@ func (c *Config) prioritise() error {
 		}
 	}
 	if len(later) > 0 {
-		c.Warnings = append(c.Warnings, "rules are evaluated by specificity, not file order (literal names, then wildcards, then regexes, the catch-all last): "+strings.Join(later, "; "))
+		c.Warnings = append(c.Warnings, "rules are evaluated by specificity, not file order (literal names, then wildcards, ANY last): "+strings.Join(later, "; "))
 	}
 	return nil
 }
@@ -659,7 +665,7 @@ func ParseConfig(text string) (*Config, error) {
 		groups := 0
 		expr := ""
 		var err error
-		if rule.Kind, expr, rule.literalChars, rule.multiLabel, err = classify(*r.pattern); err != nil {
+		if rule.Kind, expr, rule.literalChars, err = classify(*r.pattern); err != nil {
 			return nil, fail("%v", err)
 		}
 		if rule.Kind == kindNone {
@@ -841,7 +847,7 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 		}
 	}
 	if len(rule.CertDomains) == 0 && rule.CertValidateScript == "" {
-		return fmt.Errorf("cert = auto with a regex pattern needs cert_domains = name1, name2 (certificates are issued per exact name) or a cert_validate_script that decides per name")
+		return fmt.Errorf("cert = auto with a wildcard or ANY pattern needs cert_domains = name1, name2 (certificates are issued per exact name) or a cert_validate_script that decides per name")
 	}
 	for _, d := range rule.CertDomains {
 		if !validDomain(d) {

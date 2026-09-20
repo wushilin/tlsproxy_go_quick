@@ -7,7 +7,7 @@
 #> www.example.com        => 192.168.1.30:8080
 #> shop.example.com       => 192.168.1.30:8080
 #> intranet.example.com   => 192.168.1.40:443
-#> api.example.com        => backend-api.lan:443
+#> api.svc.example.com    => backend-api.lan:443
 #> blocked.example.com    => DENY
 #> legacy.example.com     => 192.168.1.50:443
 #> other.org              => DENY
@@ -72,7 +72,7 @@ target_port = 8443
 # Terminate TLS, automatic certificate; the name comes from the literal pattern.
 # The upstream speaks TLS with a self-signed certificate.
 [[host]]
-pattern = nas\.example\.com
+pattern = nas.example.com
 action = allow                     # the default
 cert = auto
 target_host = 192.168.1.10
@@ -81,10 +81,10 @@ upstream_tls = true                # the default when cert is set
 upstream_tls_verify = false        # default true: verify against the system roots
 upstream_sni = nas.internal.lan    # default: the name the client asked for
 
-# Terminate TLS for a regex: the exact names must be listed. shop.* matches the
+# Terminate TLS for a wildcard: the exact names must be listed. shop matches the
 # pattern but is not listed, so it gets a self-signed placeholder.
 [[host]]
-pattern = (www|blog|shop)\.example\.com
+pattern = *.example.com
 cert = auto
 cert_domains = www.example.com, blog.example.com
 target_host = 192.168.1.30
@@ -97,7 +97,7 @@ upstream_tls = false               # plaintext upstream: only http/1.1 is offere
 # (so does no answer within 20 s). cert_domains may be given as well: listed
 # names are never put to the script.
 [[host]]
-pattern = (.*)\.customers\.example\.com
+pattern = *.customers.example.com
 cert = auto
 cert_validate_script = /usr/local/etc/tlsproxy/domains.sh
 target_host = 192.168.1.50
@@ -107,25 +107,26 @@ upstream_tls = false
 # Terminate TLS with your own certificate: <dir>/cert.pem (leaf + chain),
 # <dir>/key.pem and optionally <dir>/ca.pem; re-read when cert.pem changes.
 [[host]]
-pattern = intranet\.example\.com
+pattern = intranet.example.com
 cert = /usr/local/etc/ssl/intranet
 target_host = 192.168.1.40
 
-# Pass-through with a capture group in the target ($1, ${1}; $0 = whole name).
+# Pass-through with a capture in the target: each * is $1, $2, ... from the left
+# (${1} when a digit or letter follows); $0 is the whole name.
 [[host]]
-pattern = (api|git)\.example\.com
+pattern = *.svc.example.com
 target_host = backend-$1.lan
 
 [[host]]
-pattern = blocked\.example\.com
+pattern = blocked.example.com
 action = deny
 
 # Pass-through: the backend keeps its own certificate.
 [[host]]
-pattern = legacy\.example\.com
+pattern = legacy.example.com
 target_host = 192.168.1.50
 target_port = 443
 
 [[host]]
-pattern = .*
+pattern = ANY
 action = deny

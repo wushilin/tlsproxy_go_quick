@@ -3,8 +3,8 @@
 # a default backend, named hosts are routed normally, and the rest is denied.
 #
 # NONE matches only a missing SNI; a host that is literally called "none"
-# still has an SNI (match that one with ^none$ if you ever need to).
-# target_host must be a literal: there are no capture groups to expand.
+# still has an SNI (match that one with ^none$ if you ever need to; likewise
+# ^any$). target_host must be a literal: there is nothing to capture.
 #
 #> <none>              => 10.0.0.99:443
 #> www.example.com     => 10.0.0.10:443
@@ -21,9 +21,13 @@ pattern = NONE
 target_host = 10.0.0.99
 
 [[host]]
-pattern = (www|api)\.example\.com
+pattern = www.example.com
 target_host = 10.0.0.10
 
 [[host]]
-pattern = .*
+pattern = api.example.com
+target_host = 10.0.0.10
+
+[[host]]
+pattern = ANY
 action = deny

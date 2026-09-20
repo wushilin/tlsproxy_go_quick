@@ -98,19 +98,21 @@ port = 443                      # (required) listen port
 # pattern     (required) one of, in order of precedence:
 #               NONE                 only clients that send no SNI
 #               vq.example.com       a literal name: exact match, always wins
-#               *.example.com        wildcard: * is one label (or part of one: api-*.x.com), so it
-#                                    does not match a.b.example.com; ** is one or more labels.
-#                                    More literal characters win. $1 is what the first * matched
-#               (www|blog)\.x\.com   regular expression (RE2), must match the WHOLE SNI; regexes
-#                                    are tried in file order (a client without SNI is matched as "")
-#               .*                   the catch-all: always last
+#               *.example.com        wildcard: a * never crosses a dot. As a whole label it is
+#                                    exactly one label (not a.b.example.com, not example.com);
+#                                    inside a label it is any run of characters, none included
+#                                    (abc*.x.com matches abc1.x.com and abc.x.com). Several * are
+#                                    fine: *.*.example.com. More literal characters win
+#               ANY                  everything, with or without SNI: always last
+#             No regular expressions, no **, no "a or b": one rule per name and per depth.
 # action      (default: allow) allow | deny; deny sends a TLS access_denied alert
-# target_host (required for allow) may use $1 / ${1} for groups, $0 = whole SNI
+# target_host (required for allow) $1, $2, ... = what each * matched, from the left (${1} before a
+#             digit or letter); $0 = the whole SNI
 # target_port (default: 443)
 #
 # TLS termination (optional; without cert the TLS stream is passed through untouched):
 # cert        auto       issue and renew through ACME with TLS-ALPN-01 (the CA connects to public
-#                        port 443; no port 80 needed). A regex pattern also needs cert_domains
+#                        port 443; no port 80 needed). A pattern with * (or ANY) also needs cert_domains
 #                        and/or cert_validate_script.
 #             <dir>      use <dir>/cert.pem (leaf + chain) and <dir>/key.pem, plus optional ca.pem;
 #                        re-read when the files change. Must exist at startup.
@@ -126,11 +128,11 @@ port = 443                      # (required) listen port
 #                        by SNI (another proxy) works even when target_host is an IP address
 
 [[host]]
-pattern = (.*)\.wushilin\.net
+pattern = *.wushilin.net
 action = allow
 target_host = $1.wushilin.internal.net
 target_port = 443
 
 [[host]]
-pattern = .*
+pattern = ANY
 action = deny

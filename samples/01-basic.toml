@@ -1,8 +1,11 @@
 # The original example: map *.wushilin.net to *.wushilin.internal.net.
+# A * is exactly one label: a.b.wushilin.net is not covered (that would be
+# pattern = *.*.wushilin.net, with $1 and $2).
 #
 # Expected routing (checked by `go test`):
 #> foo.wushilin.net        => foo.wushilin.internal.net:443
-#> a.b.wushilin.net        => a.b.wushilin.internal.net:443
+#> FOO.Wushilin.NET        => foo.wushilin.internal.net:443
+#> a.b.wushilin.net        => DENY
 #> wushilin.net            => DENY
 #> foo.wushilin.net.evil.io => DENY
 #> <none>                  => DENY
@@ -12,11 +15,12 @@ bind = 0.0.0.0
 port = 443
 
 [[host]]
-pattern = (.*)\.wushilin\.net
+pattern = *.wushilin.net
 action = allow
 target_host = $1.wushilin.internal.net
 target_port = 443
 
+# Everything else. (A name that matches no rule is denied anyway; this makes it explicit.)
 [[host]]
-pattern = .*
+pattern = ANY
 action = deny

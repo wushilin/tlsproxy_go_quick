@@ -224,7 +224,7 @@ func TestPlaceholderUntilAutomaticCertificateExists(t *testing.T) {
 	l, dead := listen(t)
 	l.Close() // the "CA" is unreachable, so issuance fails and the placeholder stays
 	p := startProxy(t, fmt.Sprintf("cert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir", t.TempDir(), dead),
-		fmt.Sprintf("[[host]]\npattern=(.*)\\.auto\\.test\ncert=auto\ncert_domains=www.auto.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
+		fmt.Sprintf("[[host]]\npattern=*.auto\\.test\ncert=auto\ncert_domains=www.auto.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
 	tc, err := tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: "www.auto.test"})
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +318,7 @@ func TestDirectoryCertificateIsReloadedAndRequiredAtStartup(t *testing.T) {
 func TestCertConfigValidation(t *testing.T) {
 	auto := "[global]\nbind=::\nport=443\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\n"
 	c := mustParse(t, auto+"[[host]]\npattern=nas\\.example\\.com\ncert=auto\ntarget_host=10.0.0.5\n"+
-		"[[host]]\npattern=(.*)\\.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=$1.lan\n"+
+		"[[host]]\npattern=*.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=$1.lan\n"+
 		"[[host]]\npattern=plain\\.example\\.com\ntarget_host=10.0.0.6\n")
 	if got := fmt.Sprint(c.AutoDomains()); got != "[nas.example.com a.wushilin.net b.wushilin.net]" {
 		t.Fatal(got) // literal pattern derived; list lowercased and de-duplicated
@@ -337,10 +337,10 @@ func TestCertConfigValidation(t *testing.T) {
 		t.Fatal(c.Warnings)
 	}
 	for name, text := range map[string]string{
-		"regex without cert_domains": auto + "[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ntarget_host=$1.lan\n",
+		"regex without cert_domains": auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ntarget_host=$1.lan\n",
 		"tos not agreed":             "[global]\nport=443\n[[host]]\npattern=a\\.x\\.com\ncert=auto\ntarget_host=x.lan\n",
-		"domain outside the pattern": auto + "[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ncert_domains=a.y.com\ntarget_host=x.lan\n",
-		"wildcard":                   auto + "[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ncert_domains=*.x.com\ntarget_host=x.lan\n",
+		"domain outside the pattern": auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ncert_domains=a.y.com\ntarget_host=x.lan\n",
+		"wildcard":                   auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ncert_domains=*.x.com\ntarget_host=x.lan\n",
 		"auto without sni":           auto + "[[host]]\npattern=NONE\ncert=auto\ntarget_host=x.lan\n",
 		"cert on deny":               auto + "[[host]]\npattern=.*\naction=deny\ncert=auto\n",
 		"upstream_tls without cert":  auto + "[[host]]\npattern=.*\nupstream_tls=true\ntarget_host=x.lan\n",
@@ -369,7 +369,7 @@ func TestRenewalScheduleAndPriority(t *testing.T) {
 		t.Fatal(got)
 	}
 	m := NewCertManager()
-	m.cfg = mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=.*\\.t\\.com\ncert=auto\n"+
+	m.cfg = mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=*.t\\.com\ncert=auto\n"+
 		"cert_domains=fresh.t.com,due-later.t.com,missing.t.com,due-sooner.t.com,expired.t.com,backoff.t.com\ntarget_host=x.lan\n")
 	m.auto["fresh.t.com"] = leaf(90*day, 10*day)
 	m.auto["due-later.t.com"] = leaf(90*day, 80*day)
@@ -462,7 +462,7 @@ func TestDNSPreCheckUsesTheConfiguredResolvers(t *testing.T) {
 }
 
 func TestIssuanceRetriesAndLogging(t *testing.T) {
-	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=.*\\.retry\\.test\ncert=auto\n"+
+	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=*.retry\\.test\ncert=auto\n"+
 		"cert_domains=flaky.retry.test,wrongdns.retry.test,down.retry.test\ntarget_host=x.lan\n")
 	m := NewCertManager()
 	m.cfg = cfg
@@ -648,7 +648,7 @@ func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
 // Names are independent: several jobs run at once, but never two for one name.
 func TestCertificateJobsRunInParallelPerName(t *testing.T) {
 	names := []string{"a.par.test", "b.par.test", "c.par.test", "d.par.test", "e.par.test", "f.par.test"}
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n[[host]]\npattern=.*\\.par\\.test\ncert=auto\ncert_domains=%s\ntarget_host=x.lan\n",
+	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n[[host]]\npattern=*.par\\.test\ncert=auto\ncert_domains=%s\ntarget_host=x.lan\n",
 		t.TempDir(), strings.Join(names, ",")))
 	m := NewCertManager()
 	var mu sync.Mutex

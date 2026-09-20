@@ -16,11 +16,11 @@ buffer_size = 65536          # bytes per pooled buffer, 2 held per connection (5
 buffer_pool_max_idle = 1024  # free buffers kept for reuse; default 2 x max_connections
 
 [[host]]
-pattern = "mail\.example\.com"
+pattern = "mail.example.com"
 action = "allow"
 target_host = "::1"
 target_port = "993"
 
 [[host]]
-pattern = '.*'
+pattern = 'ANY'
 action = 'deny'

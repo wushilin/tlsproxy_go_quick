@@ -402,7 +402,7 @@ func placeholderFor(rule *Rule, sni string) (key, name string) {
 	case rule.Kind == kindLiteral:
 		return key, literalName(rule.Source)
 	}
-	return key, "placeholder.invalid" // a regex or the catch-all: no one name fits
+	return key, "placeholder.invalid" // several *, or ANY: no one certificate name fits
 }
 
 // propose queues a client-requested name for the rule's cert_validate_script.

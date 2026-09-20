@@ -2,9 +2,14 @@
 # forward on :443) may only reach approved sites; the proxy connects to the
 # real hostname ($0 = the whole SNI).
 #
+# A * is one label, so every depth that is allowed is written down: github.com,
+# its direct subdomains, and nothing deeper. That is a feature here: one more
+# label does not slip through an allowlist.
+#
 #> github.com                 => github.com:443
 #> api.github.com             => api.github.com:443
 #> objects.githubusercontent.com => objects.githubusercontent.com:443
+#> a.b.github.com             => DENY
 #> time.apple.com             => time.apple.com:443
 #> deb.debian.org             => deb.debian.org:443
 #> security.debian.org        => security.debian.org:443
@@ -19,17 +24,29 @@ port = 8443
 max_connections = 256
 
 [[host]]
-pattern = (?:[a-z0-9-]+\.)*(github\.com|githubusercontent\.com)
+pattern = github.com
 target_host = $0
 
 [[host]]
-pattern = time\.apple\.com
+pattern = *.github.com
 target_host = $0
 
 [[host]]
-pattern = (deb|security)\.debian\.org
+pattern = *.githubusercontent.com
 target_host = $0
 
 [[host]]
-pattern = .*
+pattern = time.apple.com
+target_host = $0
+
+[[host]]
+pattern = deb.debian.org
+target_host = $0
+
+[[host]]
+pattern = security.debian.org
+target_host = $0
+
+[[host]]
+pattern = ANY
 action = deny

@@ -175,9 +175,9 @@ func TestRoutesBySNI(t *testing.T) {
 	t.Parallel()
 	a, b := echoBackend(t, "A"), echoBackend(t, "B")
 	p := startProxy(t, "", fmt.Sprintf(
-		"[[host]]\npattern=(.*)\\.a\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=b\\.test|(.*)\\.b\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=vip\\..*\ntarget_host=$0\n[[host]]\npattern=.*\naction=deny\n", a, b))
+		"[[host]]\npattern=*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=*.*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\npattern=b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=*.b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\npattern=vip.*\ntarget_host=$0\n[[host]]\npattern=ANY\naction=deny\n", a, a, b, b))
 	roundtrip(t, p, "x.a.test", "A")
 	roundtrip(t, p, "y.z.a.test", "A")
 	roundtrip(t, p, "b.test", "B")
@@ -185,13 +185,14 @@ func TestRoutesBySNI(t *testing.T) {
 	roundtrip(t, p, "UPPER.A.TEST", "A") // case-insensitive
 	expectDenied(t, p, clientHello("evil.test"))
 	expectDenied(t, p, clientHello("x.a.test.evil.com")) // whole-name match
+	expectDenied(t, p, clientHello("x.y.z.a.test"))      // a * never crosses a dot: no rule has three
 }
 
 func TestCaptureGroupBuildsTarget(t *testing.T) {
 	t.Parallel()
 	port := echoBackend(t, "C")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=(.*)\\.fwd\\.test\ntarget_host=$1\ntarget_port=%d\n", port))
-	roundtrip(t, p, "127.0.0.1.fwd.test", "C")
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=*.*.*.*.fwd.test\ntarget_host=$1.$2.$3.$4\ntarget_port=%d\n", port))
+	roundtrip(t, p, "127.0.0.1.fwd.test", "C")      // four captures, left to right
 	expectDenied(t, p, clientHello("nomatch.test")) // no rule matched
 }
 
@@ -200,7 +201,7 @@ func TestMissingSNIMatchesEmptyString(t *testing.T) {
 	noSNI := wrapRecords(buildClientHello(nil, 0), 16384)
 	expectDenied(t, startProxy(t, "", "[[host]]\npattern=.*\naction=deny\n"), noSNI)
 	port := echoBackend(t, "N")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=^$\ntarget_host=127.0.0.1\ntarget_port=%d\n", port))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=ANY\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)) // ANY takes clients without SNI too
 	c := dial(t, p)
 	c.Write(noSNI)
 	if got := readN(t, c, 1); got[0] != 'N' {
@@ -212,7 +213,7 @@ func TestNonePatternRoutesClientsWithoutSNI(t *testing.T) {
 	t.Parallel()
 	def, named := echoBackend(t, "D"), echoBackend(t, "N")
 	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=NONE\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-		"[[host]]\npattern=(.*)\\.named\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\npattern=*.named\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 		"[[host]]\npattern=.*\naction=deny\n", def, named))
 	noSNI := wrapRecords(buildClientHello(nil, 0), 16384)
 	for i := 0; i < 2; i++ { // the second round is served from the route cache
@@ -268,7 +269,7 @@ func TestHelloShapes(t *testing.T) {
 
 func TestCachedRoutesBehaveLikeUncached(t *testing.T) {
 	t.Parallel()
-	rules := fmt.Sprintf("[[host]]\npattern=(.*)\\.ok\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=.*\naction=deny\n", echoBackend(t, "A"))
+	rules := fmt.Sprintf("[[host]]\npattern=*.ok\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=.*\naction=deny\n", echoBackend(t, "A"))
 	for _, global := range []string{"allow_cache_size=2\ndeny_cache_size=2", "allow_cache_size=0\ndeny_cache_size=0"} {
 		p := startProxy(t, global, rules)
 		for round := 0; round < 3; round++ {
@@ -308,8 +309,8 @@ func TestLargeBidirectionalTransferIntegrity(t *testing.T) {
 func TestManyConcurrentConnections(t *testing.T) {
 	t.Parallel()
 	a, b := echoBackend(t, "A"), echoBackend(t, "B")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=a\\d+\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-		"[[host]]\npattern=b\\d+\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", a, b))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=a*.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\npattern=b*.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", a, b))
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)

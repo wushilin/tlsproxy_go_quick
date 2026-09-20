@@ -35,8 +35,8 @@ const acceptOK = "case \"$1\" in ok.*) echo welcome; exit 0;; *) echo 'not a cus
 func TestCertValidateScriptConfig(t *testing.T) {
 	auto := "[global]\nport=443\nacme_agree_tos=true\n"
 	// A regex pattern needs no cert_domains when a script decides; both together are fine.
-	c := mustParse(t, auto+"[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ncert_validate_script=./domains.sh\ntarget_host=x.lan\n"+
-		"[[host]]\npattern=(.*)\\.y\\.com\ncert=auto\ncert_domains=a.y.com\ncert_validate_script='/opt/d.sh'\ntarget_host=y.lan\n")
+	c := mustParse(t, auto+"[[host]]\npattern=*.x\\.com\ncert=auto\ncert_validate_script=./domains.sh\ntarget_host=x.lan\n"+
+		"[[host]]\npattern=*.y\\.com\ncert=auto\ncert_domains=a.y.com\ncert_validate_script='/opt/d.sh'\ntarget_host=y.lan\n")
 	if c.Rules[0].CertValidateScript != "./domains.sh" || len(c.Rules[0].CertDomains) != 0 || c.Rules[1].CertValidateScript != "/opt/d.sh" {
 		t.Fatalf("%+v", c.Rules)
 	}
@@ -46,7 +46,7 @@ func TestCertValidateScriptConfig(t *testing.T) {
 	for name, text := range map[string]string{
 		"without cert":     auto + "[[host]]\npattern=a\\.x\\.com\ncert_validate_script=./d.sh\ntarget_host=x.lan\n",
 		"with a directory": auto + "[[host]]\npattern=.*\ncert=/tmp\ncert_validate_script=./d.sh\ntarget_host=x.lan\n",
-		"empty":            auto + "[[host]]\npattern=(.*)\\.x\\.com\ncert=auto\ncert_validate_script=''\ntarget_host=x.lan\n",
+		"empty":            auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ncert_validate_script=''\ntarget_host=x.lan\n",
 	} {
 		if _, err := ParseConfig(text); err == nil {
 			t.Errorf("%s: should be rejected", name)
@@ -62,7 +62,7 @@ func TestCertValidateScriptDecidesIssuanceAndRenewal(t *testing.T) {
 	dir := t.TempDir()
 	script := validateScript(t, dir, acceptOK)
 	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n"+
-		"[[host]]\npattern=(.*)\\.s\\.test\ncert=auto\ncert_domains=listed.s.test\ncert_validate_script=%s\ntarget_host=x.lan\n", filepath.Join(dir, "certs"), script))
+		"[[host]]\npattern=*.s\\.test\ncert=auto\ncert_domains=listed.s.test\ncert_validate_script=%s\ntarget_host=x.lan\n", filepath.Join(dir, "certs"), script))
 	rule := &cfg.Rules[0]
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
@@ -179,7 +179,7 @@ func TestCertValidateScriptAdoptsCertificatesOnDisk(t *testing.T) {
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "cert.pem"), certPEM, 0o600)
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "key.pem"), keyPEM, 0o600)
 	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n"+
-		"[[host]]\npattern=(.*)\\.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\n", certPath, script))
+		"[[host]]\npattern=*.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\n", certPath, script))
 	m := NewCertManager()
 	m.issueFunc = func(context.Context, *Config, string) error { t.Error("nothing needs issuing"); return nil }
 	if err := m.Apply(cfg); err != nil {
@@ -221,7 +221,7 @@ func TestCertValidateScriptTimeoutCountsAsRefusal(t *testing.T) {
 func TestPlaceholderIsSharedForClientChosenNames(t *testing.T) {
 	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n"+
 		"[[host]]\npattern=*.s3.test\ncert=auto\ncert_domains=www.s3.test\ncert_validate_script=/nonexistent\ntarget_host=x.lan\n"+
-		"[[host]]\npattern=(.*)\\.re\\.test\ncert=auto\ncert_validate_script=/nonexistent\ntarget_host=y.lan\n")
+		"[[host]]\npattern=*.re\\.test\ncert=auto\ncert_validate_script=/nonexistent\ntarget_host=y.lan\n")
 	m := NewCertManager()
 	m.cfg = cfg // no worker: nothing is ever issued
 	var first *tls.Certificate

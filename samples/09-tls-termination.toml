@@ -20,16 +20,17 @@ public_ip_address = 203.0.113.7   # only ask the CA for names that really point 
 # A literal pattern: the certificate name is taken from it. The NAS speaks
 # HTTPS with a self-signed certificate, so don't verify it.
 [[host]]
-pattern = nas\.example\.com
+pattern = nas.example.com
 cert = auto
 target_host = 192.168.1.10
 target_port = 5001
 upstream_tls_verify = false
 
-# A regex pattern: certificates are per exact name, so list them. shop.* is
-# routed too, but gets a self-signed placeholder until it is added here.
+# A wildcard pattern: certificates are per exact name, so list them. shop (and
+# any other name under example.com) is routed too, but gets a self-signed
+# placeholder until it is added here. The literal rules around it still win.
 [[host]]
-pattern = (www|blog|shop)\.example\.com
+pattern = *.example.com
 cert = auto
 cert_domains = www.example.com, blog.example.com
 target_host = 192.168.1.30
@@ -38,9 +39,9 @@ upstream_tls = false              # plain HTTP backend
 
 # No cert: passed through untouched; the backend keeps its own certificate.
 [[host]]
-pattern = legacy\.example\.com
+pattern = legacy.example.com
 target_host = 192.168.1.40
 
 [[host]]
-pattern = .*
+pattern = ANY
 action = deny

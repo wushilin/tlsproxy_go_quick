@@ -38,56 +38,64 @@ bind = 0.0.0.0
 port = 443
 
 [[host]]
-pattern = (.*)\.wushilin\.net
+pattern = *.wushilin.net
 action = allow
 target_host = $1.wushilin.internal.net
 target_port = 443
 
 [[host]]
-pattern = .*
+pattern = ANY
 action = deny
 ```
 
 - **The most specific rule wins, wherever it stands in the file.** A hostname
-  that matches no rule is denied. `pattern` takes one of these forms, tried in
-  this order; all matching ignores case:
+  that matches no rule is denied. `pattern` is a host name, optionally with
+  `*` wildcards. There are no regular expressions. All matching ignores case:
 
   | | form | example | matches |
   |---|---|---|---|
   | 1 | `NONE` | `NONE` | only clients that send **no SNI** |
-  | 1 | literal name | `vq.example.com` | exactly that name. `vq\.example\.com` and `^vq.example.com$` mean the same. Looked up, not scanned |
-  | 2 | wildcard | `*.example.com`, `api-*.example.com`, `**.example.com` | `*` is one label or part of one, so `*.example.com` does **not** match `a.b.example.com`; `**` is one or more labels. The wildcard with more literal characters wins; `*` beats `**`; then file order |
-  | 3 | regular expression | `(www\|blog)\.example\.com`, `node(\d+)\.example\.com` | [RE2 syntax](https://pkg.go.dev/regexp/syntax), must match the **whole** SNI; linear time whatever the pattern. Among themselves regexes are tried in **file order** |
-  | 4 | catch-all | `.*` (or `*`) | everything, always last |
+  | 1 | literal name | `vq.example.com` | exactly that name. Looked up, not scanned |
+  | 2 | wildcard | `*.example.com` `api-*.example.com` `*.*.example.com` | a `*` **never crosses a dot**. As a whole label it is exactly one label: `*.example.com` matches `a.example.com`, not `a.b.example.com` and not `example.com`. Inside a label it is any run of characters, none included: `abc*.example.com` matches `abc1.example.com` and `abc.example.com`. The pattern with more literal characters wins; then file order |
+  | 3 | `ANY` | `ANY` | everything, with or without SNI; always last |
 
   So a literal `deny` beats a wildcard `allow`, a literal `allow` beats a
-  broader `deny`, and a `.*` in the middle of the file shadows nothing. A
-  wildcard contains only host-name characters and `*`; anything with `\ ( ) [
-  ] | + ? ^ $` is a regular expression. The same literal name twice, two
-  catch-alls or two `NONE` rules are start-up errors, since only one could ever
-  match. If the file reads differently top to bottom than it is evaluated, one
-  log line says which rules win over which. `--test` and the console's *Test
-  routing* show the winning rule and its kind.
-- `target_host` can use `$1` / `${1}` for capture groups (each `*` of a wildcard
-  is one); `$0` is the whole SNI. A reference to a group that doesn't exist is rejected at load time.
+  broader `deny`, and an `ANY` in the middle of the file shadows nothing.
+  There is no `**` and no "any depth": write one rule per depth you mean
+  (`example.com`, `*.example.com`, `*.*.example.com`), which also means one
+  more label never slips through an allowlist. There is no "a or b" either:
+  one rule per name. The same pattern twice, two `ANY` or two `NONE` rules are
+  start-up errors, since only one could ever match. If the file reads
+  differently top to bottom than it is evaluated, one log line says which rules
+  win over which. `--test` and the console's *Test routing* show the winning
+  rule and its kind.
+- **Coming from a version with regular expressions** (before v1.0.0): a regex
+  pattern is now a load error that names the line and says what to write
+  instead. `(.*)\.example\.com` becomes `*.example.com` (one label only),
+  `(www|blog)\.example\.com` becomes two rules, `node(\d+)\.example\.com`
+  becomes `node*.example.com`, `.*` becomes `ANY` (`.*` is still accepted as a
+  spelling of `ANY`), `^$` becomes `NONE`. Escaped dots and `^...$` around a
+  name are tolerated, so `vq\.example\.com` and `^vq.example.com$` keep working.
+- `target_host` can use what each `*` matched: `$1` is the first `*` from the
+  left, `$2` the second, and so on (`${1}` when a digit or letter follows);
+  `$0` is the whole SNI. A reference to a group that doesn't exist is rejected at load time.
 - The port is always separate: `target_host` is a name or an IP address (IPv6
   without brackets) and the port goes in `target_port`. `target_host =
   10.0.0.1:8080` is rejected at load time.
 - An SNI that is an IP address is refused (RFC 6066 forbids it), so a
-  `target_host = $0` rule cannot be pointed at arbitrary addresses. A catch-all
-  whose target follows the client (`pattern = .*` with `target_host = $0`)
+  `target_host = $0` rule cannot be pointed at arbitrary addresses. An `ANY` rule
+  whose target follows the client (`pattern = ANY` with `target_host = $0`)
   still connects to any *name* a client sends, internal ones included; that is
   logged as a warning at start-up.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
   `access_denied` alert. `target_port` defaults to 443.
 - `pattern = NONE` (any letter case) is explicit: it matches only clients that
   send no SNI, for example to send them to a default target; its `target_host`
-  must be a literal. Without such a rule a missing SNI is matched as the empty
-  string by regexes and the catch-all, so `.*` also catches it. A host
-  literally named `none` is matched with `^none$`.
+  must be a literal. Without such a rule only `ANY` takes them; a wildcard
+  never matches a missing SNI. Hosts literally named `none` or `any` are
+  matched with `^none$` / `^any$`.
 - Values need no quotes: everything after the `=` up to the end of the line (or
-  a ` #` comment) is the value, so `pattern = *.example.com` and `pattern =
-  (.*)\.example\.com` work as they are. `"double-quoted"` (with `\"`, `\\`,
+  a ` #` comment) is the value, so `pattern = *.example.com` works as it is. `"double-quoted"` (with `\"`, `\\`,
   `\t`, `\n`; any other backslash is kept, so `"\."` works) and
   `'single-quoted'` (nothing is special) are there for values that start with a
   quote, contain ` #`, or need leading or trailing spaces.
@@ -129,19 +137,19 @@ Samples, each with its expected routing checked by `go test`:
 
 | file | shows |
 |---|---|
-| [`01-basic`](samples/01-basic.toml) | map `*.wushilin.net` to internal names with a capture group |
+| [`01-basic`](samples/01-basic.toml) | map `*.wushilin.net` to internal names with `$1` |
 | [`02-home-lab`](samples/02-home-lab.toml) | several internal services behind one public IP; a literal deny that beats a broader allow |
-| [`03-egress-allowlist`](samples/03-egress-allowlist.toml) | outbound allowlist, connecting to the real host with `$0` |
+| [`03-egress-allowlist`](samples/03-egress-allowlist.toml) | outbound allowlist, one rule per name and depth, connecting to the real host with `$0` |
 | [`04-blocklist`](samples/04-blocklist.toml) | pass everything except blocked names |
-| [`05-default-backend`](samples/05-default-backend.toml) | specific routes, then a catch-all backend |
-| [`06-multi-capture-rewrite`](samples/06-multi-capture-rewrite.toml) | several capture groups, `${1}` form |
+| [`05-default-backend`](samples/05-default-backend.toml) | specific routes, then `ANY` as the default backend |
+| [`06-multi-capture-rewrite`](samples/06-multi-capture-rewrite.toml) | several `*` in one pattern (`$1`, `$2`), a `*` inside a label, `${1}` form |
 | [`07-ipv6-and-tuning`](samples/07-ipv6-and-tuning.toml) | IPv6 listener, timeouts, limits, buffers, quoted values |
 | [`08-no-sni`](samples/08-no-sni.toml) | `pattern = NONE` for clients without SNI |
 | [`09-tls-termination`](samples/09-tls-termination.toml) | `cert = auto`, `cert_domains`, plaintext and TLS upstreams, pass-through side by side |
 | [`10-logging`](samples/10-logging.toml) | rotating, compressed log files |
 | [`11-web-console`](samples/11-web-console.toml) | the console on loopback, published through a terminating rule |
 | [`12-everything`](samples/12-everything.toml) | every option, annotated |
-| [`13-rule-precedence`](samples/13-rule-precedence.toml) | literal, wildcard (`*`, `**`), regex and catch-all rules written broadest first, and which one wins |
+| [`13-rule-precedence`](samples/13-rule-precedence.toml) | literal, wildcard and `ANY` rules written broadest first, and which one wins |
 
 ## IPv6
 
@@ -185,14 +193,14 @@ acme_email = admin@example.com        # optional
 public_ip_address = 203.0.113.7       # only ask the CA for names that point here
 
 [[host]]
-pattern = nas\.example\.com           # literal pattern: the name comes from it
+pattern = nas.example.com             # literal pattern: the name comes from it
 cert = auto
 target_host = 192.168.1.10
 target_port = 5001
 upstream_tls_verify = false           # the NAS has a self-signed certificate
 
 [[host]]
-pattern = (www|blog)\.example\.com    # regex: list the exact names
+pattern = *.example.com               # wildcard: list the exact names
 cert = auto
 cert_domains = www.example.com, blog.example.com
 target_host = 192.168.1.30
@@ -208,7 +216,7 @@ target_host = 192.168.1.40
 | per rule | default | meaning |
 |---|---|---|
 | `cert` | (none) | `auto`: issue and renew via ACME. `<dir>`: use `cert.pem` + `key.pem` (+ `ca.pem`) from that directory; must exist at startup, re-read when the files change. None: pass through |
-| `cert_domains` | from a literal pattern | exact names to issue, separated by `,` or `;`. Required when `pattern` is a regex, unless a `cert_validate_script` decides (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
+| `cert_domains` | from a literal pattern | exact names to issue, separated by `,` or `;`. Required when `pattern` has a `*` or is `ANY`, unless a `cert_validate_script` decides (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
 | `cert_validate_script` | (none) | decides about names that match the pattern but are not in `cert_domains`; see below. Must exist and be executable at start-up and on reload |
 | `upstream_tls` | true | speak TLS to the target; `false` = plaintext |
 | `upstream_tls_verify` | true | verify the target's certificate against the system roots |

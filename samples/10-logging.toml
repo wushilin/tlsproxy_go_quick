@@ -31,9 +31,9 @@ compress_after = 3                 # .1-.3 stay plain text, .4.gz and older are 
 # destinations stay in use.
 
 [[host]]
-pattern = www\.example\.com
+pattern = www.example.com
 target_host = 10.0.0.10
 
 [[host]]
-pattern = .*
+pattern = ANY
 action = deny
