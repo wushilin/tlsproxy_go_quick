@@ -60,7 +60,8 @@ func TestAsyncLoggingNeverBlocksTheCaller(t *testing.T) {
 	if took := time.Since(start); took > time.Second {
 		t.Fatalf("logging waited %s for a stalled destination", took)
 	}
-	if got := RecentLog(4, ""); len(got) != 4 || !strings.HasSuffix(got[3], " fourth") {
+	// (Filtered: servers of earlier tests may still be logging in the background.)
+	if got := RecentLog(10, " fourth"); len(got) != 1 || !strings.HasSuffix(got[0], " fourth") {
 		t.Fatalf("the console's recent log is filled at once: %q", got)
 	}
 	logMu.Lock()

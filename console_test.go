@@ -335,6 +335,20 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 	}
 	tc.Write([]byte("hello"))
 	readN(t, tc, 5)
+	// The recent log holds 2,000 lines for the whole process, and other tests
+	// run in parallel: look for the line now, not at the end of this test.
+	for deadline := time.Now().Add(T); ; time.Sleep(20 * time.Millisecond) {
+		_, lg := c.get("/api/log?filter=TLS+terminated+here")
+		lines := lg["lines"].([]any)
+		// Lines of other tests' proxies are in there too (one process, one log):
+		// ours is the one served from this test's certificate directory.
+		if strings.Contains(fmt.Sprint(lines), "TestConsoleDashboardConnectionsCertsAndLog") && !strings.Contains(fmt.Sprint(lines), "pass.test") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("filtered log: %v", lines)
+		}
+	}
 	// Rates come from one sample per second: move data between two samples.
 	time.Sleep(1200 * time.Millisecond)
 	open.Write(make([]byte, 20000))
@@ -387,10 +401,9 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 		t.Fatal(code)
 	}
 
-	_, lg := c.get("/api/log?filter=TLS+terminated+here")
-	lines := lg["lines"].([]any)
-	if len(lines) == 0 || !strings.Contains(fmt.Sprint(lines), "TLS terminated here") || strings.Contains(fmt.Sprint(lines), "pass.test") {
-		t.Fatalf("filtered log: %v", lines)
+	// A filter that matches nothing is an empty list, not null.
+	if _, lg := c.get("/api/log?filter=no-such-line-anywhere-7f3a"); len(lg["lines"].([]any)) != 0 {
+		t.Fatalf("%v", lg)
 	}
 }
 

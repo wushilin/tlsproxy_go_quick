@@ -178,7 +178,7 @@ var (
 func RecentLog(n int, filter string) []string {
 	logMu.Lock()
 	defer logMu.Unlock()
-	var out []string
+	out := []string{} // never nil: the console's JSON says [] rather than null
 	start := max(0, recentNext-recentLogSize)
 	for i := recentNext - 1; i >= start && len(out) < n; i-- {
 		if line := recentLines[i%recentLogSize]; filter == "" || strings.Contains(line, filter) {

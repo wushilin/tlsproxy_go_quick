@@ -631,6 +631,14 @@ func TestStatsTrackConnectionsGoroutinesAndBytes(t *testing.T) {
 	if st.Active.Load() != 3 || st.OpenGoroutines() != 6 { // 2 goroutines per connection
 		t.Fatalf("active=%d goroutines=%d", st.Active.Load(), st.OpenGoroutines())
 	}
+	// Bytes are counted right after they are written: the client can have read
+	// everything a moment before the counters say so.
+	want := 3 * int64(len(hello)+1000)
+	for deadline := time.Now().Add(T); st.BytesUp.Load() != want || st.BytesDown.Load() != want; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("totals: up=%d down=%d, want %d each", st.BytesUp.Load(), st.BytesDown.Load(), want)
+		}
+	}
 	st.mu.Lock()
 	for _, c := range st.conns {
 		if sni, dst, _ := c.info(); sni != "ok.test" || dst == "" || c.BytesUp.Load() != int64(len(hello)+1000) || c.BytesDown.Load() != int64(len(hello)+1000) {
@@ -655,7 +663,6 @@ func TestStatsTrackConnectionsGoroutinesAndBytes(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	want := int64(3 * (len(hello) + 1000))
 	if st.Accepted.Load() != 4 || st.Completed.Load() != 3 || st.Denied.Load() != 1 ||
 		st.BytesUp.Load() != want || st.BytesDown.Load() != want ||
 		st.GoroutinesStarted.Load() != 7 || st.GoroutinesFinished.Load() != 7 {
