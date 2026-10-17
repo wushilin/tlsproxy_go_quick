@@ -619,7 +619,7 @@ func TestIssuanceRetriesAndLogging(t *testing.T) {
 	}
 	for want, c := range map[string]*tls.Certificate{
 		"no certificate yet, will be issued":        nil,
-		`(79 days left), issuer "R11", renews from`: leaf(10 * day),
+		`(79 days left), issuer "R11", renews from`: leaf(10*day + time.Hour),
 		"expiring: valid until":                     leaf(80 * day),
 		"EXPIRED on":                                leaf(91 * day),
 	} {

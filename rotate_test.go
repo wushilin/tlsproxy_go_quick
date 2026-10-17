@@ -59,6 +59,7 @@ func TestLogRotatesNumbersCompressesAndPrunes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 	var written strings.Builder
 	for i := 0; i < 600; i++ {
 		if err := l.WriteLine(logLine(i)); err != nil {
@@ -95,6 +96,7 @@ func TestCompressGuardLetsTheFileOutgrow(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "g.log")
 	l, _ := OpenFileLogger(path, LogConfig{MaxSize: 1000, MaxKeep: 4, CompressAfter: 0})
+	defer l.Close()
 	for i := 0; i < 13; i++ {
 		l.WriteLine(logLine(i)) // rotates once along the way
 	}
@@ -152,7 +154,8 @@ func TestLogEdgeSettings(t *testing.T) {
 	path := filepath.Join(dir, "p.log")
 	os.WriteFile(path, bytes.Repeat([]byte("x"), 900), 0o644)
 	l, _ := OpenFileLogger(path, LogConfig{MaxSize: 1000, MaxKeep: 2, CompressAfter: 2}) // never compress
-	l.WriteLine(strings.Repeat("y", 200))                                                // existing 900 bytes counted
+	defer l.Close()
+	l.WriteLine(strings.Repeat("y", 200)) // existing 900 bytes counted
 	if len(generations(path, 9)) != 0 {
 		t.Fatal("rotated too early")
 	}
@@ -165,6 +168,7 @@ func TestLogEdgeSettings(t *testing.T) {
 	}
 	k := filepath.Join(dir, "k.log") // max_keep = 0: rotation just starts the file over
 	l, _ = OpenFileLogger(k, LogConfig{MaxSize: 1000, MaxKeep: 0})
+	defer l.Close()
 	for i := 0; i < 3; i++ {
 		l.WriteLine(strings.Repeat("k", 1500))
 		l.waitIdle()

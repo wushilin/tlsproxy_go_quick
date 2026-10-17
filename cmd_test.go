@@ -259,11 +259,27 @@ func TestCmdReaderCloseWhileClientKeepsWriting(t *testing.T) {
 
 func TestCmdClientAbortsMidDownload(t *testing.T) {
 	t.Parallel()
-	p, log := cmdProxy(t, "")
+	log := &eventLog{}
+	port := backend(t, func(c *net.TCPConn) {
+		// Bound buffering so a large write cannot complete in the kernel
+		// before the client aborts, including on Windows.
+		if err := c.SetWriteBuffer(64 << 10); err != nil {
+			t.Error(err)
+			return
+		}
+		commandSession(c, log)
+	})
+	p := startProxy(t, "", allowAll(port))
 	c := cmdConnect(t, p, "abort-dl.test")
+	if err := c.SetReadBuffer(64 << 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
 	send(c, "SERVER_DATA 200000000 41\n")
 	readN(t, c, 1_000_000)
-	c.Close() // the proxy is holding back-pressured data right now
+	c.Close() // explicit TCP reset: an abort, rather than a graceful FIN
 	log.waitFor(t, "server_data_failed")
 	assertHealthy(t, p)
 }
