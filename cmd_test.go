@@ -259,28 +259,27 @@ func TestCmdReaderCloseWhileClientKeepsWriting(t *testing.T) {
 
 func TestCmdClientAbortsMidDownload(t *testing.T) {
 	t.Parallel()
-	log := &eventLog{}
-	port := backend(t, func(c *net.TCPConn) {
-		// Bound buffering so a large write cannot complete in the kernel
-		// before the client aborts, including on Windows.
-		if err := c.SetWriteBuffer(64 << 10); err != nil {
-			t.Error(err)
-			return
-		}
-		commandSession(c, log)
-	})
-	p := startProxy(t, "", allowAll(port))
+	p, log := cmdProxy(t, "")
 	c := cmdConnect(t, p, "abort-dl.test")
-	if err := c.SetReadBuffer(64 << 10); err != nil {
-		t.Fatal(err)
-	}
 	if err := c.SetLinger(0); err != nil {
 		t.Fatal(err)
 	}
 	send(c, "SERVER_DATA 200000000 41\n")
-	readN(t, c, 1_000_000)
+	if got := readN(t, c, 1_000_000); !bytes.Equal(got, pattern(1_000_000, 41)) {
+		t.Fatal("corrupt data before client abort")
+	}
 	c.Close() // explicit TCP reset: an abort, rather than a graceful FIN
-	log.waitFor(t, "server_data_failed")
+	st := p.srv.stats
+	for deadline := time.Now().Add(T); st.Active.Load() != 0 || st.OpenGoroutines() != 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("client abort leaked a connection: active=%d goroutines=%d", st.Active.Load(), st.OpenGoroutines())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Windows may report a large upstream write as successfully queued before
+	// the close is observed. Either write outcome is valid; proxy cleanup and
+	// continued service are the contract this test checks on every platform.
+	log.waitFor(t, "server_data_")
 	assertHealthy(t, p)
 }
 
