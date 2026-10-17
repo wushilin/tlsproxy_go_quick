@@ -368,10 +368,16 @@ func TestDirectoryCertificateIsReloadedAndRequiredAtStartup(t *testing.T) {
 	if served() != "old.test" {
 		t.Fatal("initial certificate")
 	}
+	oldStat, err := os.Stat(filepath.Join(dir, "cert.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	certPEM, keyPEM := ca.issue(t, time.Hour, "new.test")
 	os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0o600)
 	os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0o600)
-	os.Chtimes(filepath.Join(dir, "cert.pem"), time.Now(), time.Now().Add(time.Minute)) // make sure mtime differs
+	if err := os.Chtimes(filepath.Join(dir, "cert.pem"), oldStat.ModTime(), oldStat.ModTime()); err != nil {
+		t.Fatal(err)
+	}
 	p.srv.certs.refreshFileCerts()
 	if served() != "new.test" {
 		t.Fatal("changed files were not picked up")

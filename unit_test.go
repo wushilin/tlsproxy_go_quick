@@ -420,6 +420,7 @@ func TestDocumentedDefaultsMatchCode(t *testing.T) {
 	}
 	asIs, explicit := mustParse(t, string(text)), mustParse(t, strings.Join(lines, "\n"))
 	for _, c := range []*Config{asIs, explicit} {
+		c.sourceHash = "" // file bytes differ; this comparison is about parsed settings
 		for i := range c.Rules {
 			c.Rules[i].Pattern = nil // compiled regexps aren't comparable
 		}

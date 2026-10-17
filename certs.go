@@ -28,6 +28,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -40,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -84,10 +86,13 @@ func (e permanentError) Unwrap() error { return e.error }
 
 type fileCert struct {
 	cert    *tls.Certificate
-	modTime time.Time
+	digests [3][32]byte
 }
 
 type CertManager struct {
+	applyMu      sync.Mutex // serialises config changes with certificate file commits
+	cfgCtx       context.Context
+	cfgCancel    context.CancelFunc
 	mu           sync.RWMutex
 	cfg          *Config
 	auto         map[string]*tls.Certificate // by domain
@@ -116,7 +121,10 @@ type CertManager struct {
 }
 
 func NewCertManager() *CertManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &CertManager{
+		cfgCtx:        ctx,
+		cfgCancel:     cancel,
 		auto:          map[string]*tls.Certificate{},
 		files:         map[string]*fileCert{},
 		challenges:    map[string]*tls.Certificate{},
@@ -139,6 +147,8 @@ func NewCertManager() *CertManager {
 // reload). Automatic ones are picked up from disk if present; the rest is the
 // background worker's job.
 func (m *CertManager) Apply(cfg *Config) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 	loaded, err := loadDirCerts(cfg)
 	if err != nil {
 		return err
@@ -147,6 +157,10 @@ func (m *CertManager) Apply(cfg *Config) error {
 		return err
 	}
 	m.mu.Lock()
+	if m.cfgCancel != nil {
+		m.cfgCancel()
+	}
+	m.cfgCtx, m.cfgCancel = context.WithCancel(context.Background())
 	m.cfg, m.files = cfg, loaded
 	// The rules or the script may have changed: forget refusals, and let go of
 	// accepted names that no rule with a script covers any more.
@@ -199,7 +213,7 @@ func checkScripts(cfg *Config) error {
 			continue
 		}
 		st, err := os.Stat(script)
-		if err == nil && (st.IsDir() || st.Mode()&0o111 == 0) {
+		if err == nil && (st.IsDir() || !scriptExecutable(script, st.Mode())) {
 			err = errors.New("not an executable file")
 		}
 		if err != nil {
@@ -207,6 +221,16 @@ func checkScripts(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// Windows does not expose Unix executable mode bits. Admission programs there
+// must be native executables; no command shell is implicitly invoked.
+func scriptExecutable(path string, mode os.FileMode) bool {
+	if runtime.GOOS == "windows" {
+		ext := filepath.Ext(path)
+		return strings.EqualFold(ext, ".exe") || strings.EqualFold(ext, ".com")
+	}
+	return mode&0o111 != 0
 }
 
 // scriptFor returns the cert_validate_script in charge of a name: the name is
@@ -241,7 +265,11 @@ func (m *CertManager) managedLocked(cfg *Config) []string {
 // accepts it. detail describes the outcome for the log; err is set when the
 // script could not give an answer at all (which counts as a refusal).
 func runValidateScript(script, domain string) (accepted bool, detail string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), validateScriptTimeout)
+	return runValidateScriptContext(context.Background(), script, domain)
+}
+
+func runValidateScriptContext(parent context.Context, script, domain string) (accepted bool, detail string, err error) {
+	ctx, cancel := context.WithTimeout(parent, validateScriptTimeout)
 	defer cancel()
 	start := time.Now()
 	out := &cappedBuffer{max: 300}
@@ -306,27 +334,41 @@ func (m *CertManager) Start() {
 	}
 }
 
-func loadDirCert(dir string) (*fileCert, error) {
-	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
-	st, err := os.Stat(certFile)
+// Read and parse the same snapshot, so the recorded digests describe the
+// certificate actually installed. Missing ca.pem is allowed; other errors aren't.
+func readCertFiles(dir string) (files [3][]byte, digests [3][32]byte, err error) {
+	for i, name := range []string{"cert.pem", "key.pem", "ca.pem"} {
+		files[i], err = os.ReadFile(filepath.Join(dir, name))
+		if err != nil && !(i == 2 && errors.Is(err, os.ErrNotExist)) {
+			return files, digests, err
+		}
+		digests[i] = sha256.Sum256(files[i])
+	}
+	return files, digests, nil
+}
+
+func parseDirCert(files [3][]byte, digests [3][32]byte) (*fileCert, error) {
+	cert, err := tls.X509KeyPair(files[0], files[1])
 	if err != nil {
 		return nil, err
 	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, err
-	}
-	if ca, err := os.ReadFile(filepath.Join(dir, "ca.pem")); err == nil {
-		for block, rest := pem.Decode(ca); block != nil; block, rest = pem.Decode(rest) {
-			if block.Type == "CERTIFICATE" {
-				cert.Certificate = append(cert.Certificate, block.Bytes)
-			}
+	for block, rest := pem.Decode(files[2]); block != nil; block, rest = pem.Decode(rest) {
+		if block.Type == "CERTIFICATE" {
+			cert.Certificate = append(cert.Certificate, block.Bytes)
 		}
 	}
 	if cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0]); err != nil {
 		return nil, err
 	}
-	return &fileCert{cert: &cert, modTime: st.ModTime()}, nil
+	return &fileCert{cert: &cert, digests: digests}, nil
+}
+
+func loadDirCert(dir string) (*fileCert, error) {
+	files, digests, err := readCertFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	return parseDirCert(files, digests)
 }
 
 func autoDir(cfg *Config, domain string) string { return filepath.Join(cfg.CertPath, domain) }
@@ -487,6 +529,9 @@ type certJob struct {
 func (m *CertManager) adoptCandidates(cfg *Config) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.cfg != cfg {
+		return
+	}
 	for d := range m.candidates {
 		if scriptFor(cfg, d) == "" {
 			delete(m.candidates, d)
@@ -560,6 +605,9 @@ func certStatus(c *tls.Certificate, thresholdDays int, now time.Time) string {
 func (m *CertManager) announce(cfg *Config, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.cfg != cfg {
+		return
+	}
 	current := map[string]bool{}
 	for _, d := range m.managedLocked(cfg) {
 		current[d] = true
@@ -610,10 +658,11 @@ func (m *CertManager) worker() {
 // startJob runs a job in its own goroutine. False if every slot is taken.
 func (m *CertManager) startJob(cfg *Config, job certJob) bool {
 	m.mu.Lock()
-	if len(m.inFlight) >= maxParallelJobs {
+	if cfg == nil || m.cfg != cfg || m.inFlight[job.domain] || len(m.inFlight) >= maxParallelJobs {
 		m.mu.Unlock()
 		return false
 	}
+	ctx := m.cfgCtx
 	m.inFlight[job.domain] = true // pendingJobs skips it until the job is done
 	m.mu.Unlock()
 	go func() {
@@ -626,7 +675,7 @@ func (m *CertManager) startJob(cfg *Config, job certJob) bool {
 			default:
 			}
 		}()
-		m.runJob(cfg, job)
+		m.runJobContext(ctx, cfg, job)
 	}()
 	return true
 }
@@ -635,10 +684,21 @@ func (m *CertManager) startJob(cfg *Config, job certJob) bool {
 // apart, then the name waits for retryInterval.
 func (m *CertManager) runJob(cfg *Config, job certJob) {
 	m.mu.RLock()
+	ctx := m.cfgCtx
+	m.mu.RUnlock()
+	m.runJobContext(ctx, cfg, job)
+}
+
+func (m *CertManager) runJobContext(jobCtx context.Context, cfg *Config, job certJob) {
+	m.mu.RLock()
+	if cfg == nil || m.cfg != cfg || jobCtx.Err() != nil {
+		m.mu.RUnlock()
+		return
+	}
 	previous := m.lastError[job.domain]
 	current := m.auto[job.domain]
 	m.mu.RUnlock()
-	if !slices.Contains(cfg.AutoDomains(), job.domain) && !m.scriptAllows(cfg, job, current) {
+	if !slices.Contains(cfg.AutoDomains(), job.domain) && !m.scriptAllows(jobCtx, cfg, job, current) {
 		return
 	}
 	what := "issuing a new certificate"
@@ -654,13 +714,20 @@ func (m *CertManager) runJob(cfg *Config, job certJob) {
 	}
 	var err error
 	for attempt := 1; attempt <= certAttempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), certJobTimeout)
+		ctx, cancel := context.WithTimeout(jobCtx, certJobTimeout)
 		issue := m.issue
 		if m.issueFunc != nil {
 			issue = m.issueFunc
 		}
+		if jobCtx.Err() != nil {
+			cancel()
+			return
+		}
 		err = issue(ctx, cfg, job.domain)
 		cancel()
+		if jobCtx.Err() != nil {
+			return
+		}
 		if err == nil {
 			break
 		}
@@ -671,13 +738,18 @@ func (m *CertManager) runJob(cfg *Config, job certJob) {
 		}
 		if attempt < certAttempts {
 			errorf("cert: %s: attempt %d/%d failed: %v; trying again in %s", job.domain, attempt, certAttempts, err, humanDuration(certAttemptBackoff))
-			time.Sleep(certAttemptBackoff)
+			if !waitForRetry(jobCtx, certAttemptBackoff) {
+				return
+			}
 		} else {
 			errorf("cert: %s: attempt %d/%d failed: %v", job.domain, attempt, certAttempts, err)
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.cfg != cfg || jobCtx.Err() != nil {
+		return
+	}
 	if err == nil {
 		delete(m.nextTry, job.domain)
 		delete(m.lastError, job.domain)
@@ -693,9 +765,20 @@ func (m *CertManager) runJob(cfg *Config, job certJob) {
 		next.UTC().Format("2006-01-02T15:04Z"), humanDuration(m.retryInterval), serving)
 }
 
+func waitForRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 // scriptAllows asks the rule's cert_validate_script whether a name that is not
 // in cert_domains may get (or renew) its certificate, and logs the answer.
-func (m *CertManager) scriptAllows(cfg *Config, job certJob, current *tls.Certificate) bool {
+func (m *CertManager) scriptAllows(ctx context.Context, cfg *Config, job certJob, current *tls.Certificate) bool {
 	domain := job.domain
 	script := scriptFor(cfg, domain)
 	usable := current != nil && current.Leaf != nil && time.Now().Before(current.Leaf.NotAfter)
@@ -707,6 +790,10 @@ func (m *CertManager) scriptAllows(cfg *Config, job certJob, current *tls.Certif
 	}
 	if script == "" { // the config changed under us
 		m.mu.Lock()
+		if m.cfg != cfg || ctx.Err() != nil {
+			m.mu.Unlock()
+			return false
+		}
 		delete(m.candidates, domain)
 		delete(m.dynamic, domain)
 		m.mu.Unlock()
@@ -714,9 +801,12 @@ func (m *CertManager) scriptAllows(cfg *Config, job certJob, current *tls.Certif
 		return false
 	}
 	logf("cert: %s: %s; asking cert_validate_script: %s %s", domain, why, script, domain)
-	accepted, detail, err := runValidateScript(script, domain)
+	accepted, detail, err := runValidateScriptContext(ctx, script, domain)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.cfg != cfg || ctx.Err() != nil {
+		return false
+	}
 	if accepted {
 		delete(m.candidates, domain)
 		m.dynamic[domain] = true
@@ -752,22 +842,29 @@ func (m *CertManager) scriptAllows(cfg *Config, job certJob, current *tls.Certif
 // refreshFileCerts re-reads cert = <dir> certificates whose files changed.
 func (m *CertManager) refreshFileCerts() {
 	m.mu.RLock()
-	dirs := make(map[string]time.Time, len(m.files))
+	dirs := make(map[string]*fileCert, len(m.files))
 	for dir, fc := range m.files {
-		dirs[dir] = fc.modTime
+		dirs[dir] = fc
 	}
 	m.mu.RUnlock()
 	for dir, old := range dirs {
-		st, err := os.Stat(filepath.Join(dir, "cert.pem"))
-		if err != nil || st.ModTime().Equal(old) {
+		files, digests, err := readCertFiles(dir)
+		if err == nil && digests == old.digests {
 			continue
 		}
-		fc, err := loadDirCert(dir)
+		var fc *fileCert
+		if err == nil {
+			fc, err = parseDirCert(files, digests)
+		}
 		if err != nil {
 			errorf("cert: %s changed but cannot be loaded, keeping the previous one: %v", dir, err)
 			continue
 		}
 		m.mu.Lock()
+		if m.files[dir] != old { // a config reload already replaced or removed it
+			m.mu.Unlock()
+			continue
+		}
 		m.files[dir] = fc
 		m.mu.Unlock()
 		logf("cert: reloaded %s (expires %s)", dir, fc.cert.Leaf.NotAfter.UTC().Format("2006-01-02"))
@@ -899,6 +996,9 @@ func (f *orderLocationFixer) RoundTrip(req *http.Request) (*http.Response, error
 
 // issue obtains a certificate for one name and installs it.
 func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := checkDNS(ctx, cfg, domain); err != nil {
 		return err
 	}
@@ -947,6 +1047,10 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 			return err
 		}
 		m.mu.Lock()
+		if m.cfg != cfg || ctx.Err() != nil {
+			m.mu.Unlock()
+			return context.Canceled
+		}
 		m.challenges[domain] = &answer
 		m.mu.Unlock()
 		defer func() {
@@ -991,12 +1095,27 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 		certPEM = append(certPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
 	}
 	keyDER, _ := x509.MarshalECPrivateKey(key)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return m.installCertificate(ctx, cfg, domain, certPEM, keyPEM)
+}
+
+func (m *CertManager) installCertificate(ctx context.Context, cfg *Config, domain string, certPEM, keyPEM []byte) error {
+	// Config application and the on-disk/in-memory commit cannot cross. A CA
+	// response that arrives after cancellation must not install an old result.
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+	m.mu.RLock()
+	currentConfig := m.cfg == cfg && ctx.Err() == nil
+	m.mu.RUnlock()
+	if !currentConfig {
+		return context.Canceled
+	}
 	dir := autoDir(cfg, domain)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	// Key first: a cert.pem without its key would be unusable after a crash.
-	if err := writeFileAtomic(filepath.Join(dir, "key.pem"), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, "key.pem"), keyPEM); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(filepath.Join(dir, "cert.pem"), certPEM); err != nil {
@@ -1037,18 +1156,7 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	// fsync the directory as well as the new file. Without this, a power loss
-	// can lose the rename even though the temporary file's contents reached
-	// disk first.
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	err = dir.Sync()
-	if closeErr := dir.Close(); err == nil {
-		err = closeErr
-	}
-	return err
+	return syncDirectory(filepath.Dir(path))
 }
 
 // CertInfo describes one certificate for the console.
@@ -1123,7 +1231,7 @@ func (m *CertManager) Snapshot() []CertInfo {
 			info.Source, info.Dir, info.Name = "directory", dir, dir
 			if fc := m.files[dir]; fc != nil {
 				fill(&info, fc.cert)
-				info.Detail = "loaded from " + dir + "; re-read when cert.pem changes (you renew this one)"
+				info.Detail = "loaded from " + dir + "; re-read when certificate files change (you renew this one)"
 				if len(info.Names) > 0 {
 					info.Name = strings.Join(info.Names, ", ")
 				}

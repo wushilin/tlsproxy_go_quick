@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -201,6 +202,9 @@ func TestBinaryLogsToRotatingFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "tlsproxy")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}

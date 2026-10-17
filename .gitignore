@@ -3,3 +3,5 @@
 /tlsproxy_go_quick
 *.swp
 .DS_Store
+
+/tlsproxy.exe

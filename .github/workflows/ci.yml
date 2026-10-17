@@ -1,6 +1,6 @@
-# Tests on Linux (race detector, live sites, a Pebble ACME CA) and on a real
-# FreeBSD VM; cross-builds static binaries; for tags "v*" publishes them as a
-# GitHub Release, but only when both test jobs passed.
+# Tests on Linux (race detector, live sites, a Pebble ACME CA), Windows, and
+# a real FreeBSD VM. Builds amd64 and arm64 binaries for all three operating
+# systems; tags publish a GitHub Release only after all checks pass.
 name: ci
 
 on:
@@ -37,8 +37,18 @@ jobs:
           TLSPROXY_LIVE: "1"
           TLSPROXY_PEBBLE: "1"
         run: go test -race -count=1 ./...
-      - name: Test on Windows' code path (compile only)
-        run: GOOS=windows go vet ./...
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - name: Test on Windows
+        run: go test -count=1 ./...
 
   freebsd:
     runs-on: ubuntu-latest
@@ -65,9 +75,11 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -77,9 +89,11 @@ jobs:
         run: |
           version=$(git describe --tags --always --dirty)
           if [ "$GITHUB_REF_TYPE" = tag ]; then version=$GITHUB_REF_NAME; fi
-          for target in freebsd/amd64 freebsd/arm64 linux/amd64 linux/arm64; do
+          for target in freebsd/amd64 freebsd/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            suffix=""
+            if [ "${target%/*}" = windows ]; then suffix=".exe"; fi
             GOOS=${target%/*} GOARCH=${target#*/} go build -trimpath -ldflags="-s -w -X main.version=$version" \
-              -o "tlsproxy-${target%/*}-${target#*/}" .
+              -o "tlsproxy-${target%/*}-${target#*/}${suffix}" .
           done
           sha256sum tlsproxy-* > SHA256SUMS
           ls -l tlsproxy-*
@@ -94,7 +108,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, freebsd, build] # nothing is published unless everything passed
+    needs: [test, windows, freebsd, build] # nothing is published unless everything passed
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

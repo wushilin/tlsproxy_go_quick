@@ -27,6 +27,7 @@ import (
 const MinReloadInterval = 5
 
 type Config struct {
+	sourceHash         string   // exact parsed bytes, for password rewrites and reload change detection
 	Bind               string   // as configured, normalised: "0.0.0.0", or "192.0.2.1; 2001:db8::1"
 	Binds              []string // the addresses in Bind
 	Port               int
@@ -74,6 +75,7 @@ type Config struct {
 // Plain HTTP by design: bind it to loopback and publish it through a
 // terminating rule of this proxy if it must be reachable from elsewhere.
 type ConsoleConfig struct {
+	SecureCookie bool // require HTTPS for session cookies when published through TLS termination
 	Listen       string
 	Port         int
 	Password     string   // plaintext, only until the proxy replaces it with PasswordHash
@@ -418,6 +420,7 @@ type rawRule struct {
 
 func ParseConfig(text string) (*Config, error) {
 	cfg := &Config{
+		sourceHash:         fileHash([]byte(text)),
 		Bind:               "0.0.0.0",
 		Binds:              []string{"0.0.0.0"},
 		HandshakeTimeout:   10 * time.Second,
@@ -626,6 +629,10 @@ func ParseConfig(text string) (*Config, error) {
 					return nil, fail("password_hash: %v", herr)
 				}
 				cfg.Console.PasswordHash = value
+			case "secure_cookie":
+				if cfg.Console.SecureCookie, err = parseBool(value); err != nil {
+					return nil, fail("secure_cookie: %v", err)
+				}
 			case "hostnames":
 				cfg.Console.Hostnames = splitList(strings.ToLower(value))
 			default:

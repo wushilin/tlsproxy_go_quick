@@ -23,12 +23,33 @@ or linker, so anything that needs one cannot be built on it, while Go can:
 
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(git describe --tags --always)" -o tlsproxy .
-./tlsproxy --version                                   # tlsproxy v0.3.0
+./tlsproxy --version                                   # tlsproxy v1.1.1
 ./tlsproxy config.toml                                 # run (logs to stderr)
 ./tlsproxy config.toml --test foo.wushilin.net x.com   # dry run: show routing only
 ./tlsproxy config.toml --test ""                       # dry run for a client without SNI
 go test ./...                                          # ~25 s
 ```
+
+## Platforms
+
+Release builds cover **Windows, Linux and FreeBSD**, each on **amd64 and
+arm64**. Windows binaries end in `.exe`. The core proxy, TLS, ACME, console,
+PROXY protocol and log rotation have no Linux-only dependency.
+
+- Linux and FreeBSD support `SIGUSR1` to dump connection state and
+  `SIGTERM`/`SIGINT` to flush logs before exiting. Windows supports Ctrl+C
+  log flushing; it has no `SIGUSR1` dump.
+- On Windows, `cert_validate_script` must name a native `.exe` or `.com`
+  admission program. Unix uses executable mode bits and can run scripts with
+  a shebang. The supplied shell examples require Unix tools.
+- Certificate and config writes flush file contents on every platform.
+  Directory metadata is additionally synced on Unix; Windows skips that
+  unsupported step. Unix mode `0600` does not set Windows ACLs: use the
+  account's directory permissions to protect keys and configuration.
+
+GitHub Actions tests on Linux and Windows and in a FreeBSD VM, cross-builds
+all six release binaries with `CGO_ENABLED=0`, and attaches them with
+`SHA256SUMS` and `config.toml` to a tagged release after all checks pass.
 
 ## Configuration
 
@@ -132,7 +153,7 @@ option is missing from it, from `config.toml` or from this README):
 | `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
 | `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
-| `[console]` | `listen` `port` `password` `password_hash` `hostnames` |
+| `[console]` | `listen` `port` `password` `password_hash` `hostnames` `secure_cookie` |
 
 Samples, each with its expected routing checked by `go test`:
 
@@ -377,6 +398,9 @@ How it works:
 - **ALPN end to end.** The upstream is contacted first and the client is
   offered exactly the protocol the upstream agreed to, so HTTP/2 works across
   the proxy. With a plaintext upstream only `http/1.1` is offered.
+- Reload cancels certificate jobs from the previous config, including scripts
+  and retry waits; obsolete results are discarded. Pending names are retried
+  under the new settings. A rejected config leaves current jobs running.
 - Reload applies certificate settings too; a config whose `cert = <dir>`
   cannot be loaded is rejected and the running config stays.
 - Terminated connections are still plain TCP relaying: no HTTP parsing, no
@@ -422,6 +446,7 @@ listen = 127.0.0.1                 # default
 port = 9443                        # required
 password = change-me               # replaced by password_hash on start (see below)
 hostnames = console.example.com    # names it may be addressed by, besides IPs and localhost
+secure_cookie = true               # require HTTPS for browser sessions
 
 # Publish it through the proxy itself, with a real certificate:
 [[host]]
@@ -438,10 +463,11 @@ target_port = 9443
 | `port` | (required) | listen port |
 | `password` | | plain text, for convenience. At start-up and on every reload the proxy replaces this line with `password_hash` and logs it, so the secret is on disk only briefly. To change the password, put a `password =` line back |
 | `password_hash` | | `pbkdf2-sha256$<iterations>$<salt>$<hash>` (PBKDF2-HMAC-SHA256, 600,000 iterations). Generate one with `tlsproxy --hash-password`. One of the two is required |
+| `secure_cookie` | false | set true when publishing through HTTPS: session cookies are only sent over HTTPS. Leave false for direct local HTTP; direct TLS requests always get Secure cookies |
 | `hostnames` | (none) | `;` or `,` separated names the console answers to, besides IP addresses and `localhost`. Any other `Host` is refused: that defeats DNS rebinding |
 
-`listen` and `port` need a restart; `password` and `hostnames` follow hot
-reload (a changed password signs everyone out).
+`listen` and `port` need a restart; `password`, `secure_cookie` and `hostnames` follow hot
+reload (a changed password or cookie policy signs everyone out).
 
 **Pages**
 

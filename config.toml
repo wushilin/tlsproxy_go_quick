@@ -91,9 +91,10 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 # port = 9443                   # required
 # password = change-me          # plain text; the proxy replaces this line with password_hash on start
 # password_hash = "pbkdf2-sha256$..."   # or generate it yourself: tlsproxy --hash-password
+# secure_cookie = false         # set true when publishing the console through HTTPS
 # hostnames = console.example.com       # extra names the console answers to (DNS rebinding protection)
 #
-# listen and port need a restart; password and hostnames follow hot reload. The
+# listen and port need a restart; password, secure_cookie and hostnames follow hot reload. The
 # section is hidden from the console's editor and cannot be changed there.
 
 # --- Rules -------------------------------------------------------------------

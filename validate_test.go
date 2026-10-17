@@ -264,3 +264,64 @@ func TestPlaceholderIsSharedForClientChosenNames(t *testing.T) {
 		t.Fatal("placeholder not renewed")
 	}
 }
+
+func TestCertificateReloadDiscardsScriptDecision(t *testing.T) {
+	for _, sameConfig := range []bool{false, true} {
+		t.Run(fmt.Sprintf("same-config=%v", sameConfig), func(t *testing.T) {
+			dir := t.TempDir()
+			entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
+			script := validateScript(t, dir, fmt.Sprintf("touch '%s'\nwhile [ ! -f '%s' ]; do sleep 0.01; done\nexit 0\n", entered, release))
+			cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=*.example.com\ncert=auto\ncert_validate_script=%s\ntarget_host=127.0.0.1\n", filepath.Join(dir, "certs"), script))
+			m := NewCertManager()
+			if err := m.Apply(cfg); err != nil {
+				t.Fatal(err)
+			}
+			domain := "removed.example.com"
+			m.candidates[domain] = true
+			issued := make(chan struct{}, 1)
+			m.issueFunc = func(context.Context, *Config, string) error { issued <- struct{}{}; return nil }
+			done := make(chan struct{})
+			go func() { m.runJob(cfg, certJob{domain: domain, urgent: true}); close(done) }()
+			defer os.WriteFile(release, nil, 0600)
+			for deadline := time.Now().Add(T); ; {
+				if _, err := os.Stat(entered); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("script did not start")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			newCfg := mustParse(t, "[global]\nport=443\n[[host]]\npattern=ANY\naction=deny\n")
+			if sameConfig {
+				newCfg = cfg
+			}
+			if err := m.Apply(newCfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(release, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+			case <-time.After(T):
+				t.Fatal("obsolete script job was not canceled")
+			}
+			select {
+			case <-issued:
+				t.Fatal("obsolete script approval started issuance")
+			default:
+			}
+			m.mu.RLock()
+			managed, candidate := m.dynamic[domain], m.candidates[domain]
+			failed := len(m.nextTry) + len(m.lastError) + len(m.rejected)
+			m.mu.RUnlock()
+			if managed || failed != 0 {
+				t.Fatal("obsolete script result modified current state")
+			}
+			if candidate != sameConfig {
+				t.Fatal("obsolete script removed a current candidate or restored a removed one")
+			}
+		})
+	}
+}

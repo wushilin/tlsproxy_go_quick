@@ -294,8 +294,8 @@ func (s *Server) reportStats() {
 // new Runtime when its content changes. Comparing content (not mtime) means
 // the newest version always wins and reloads happen at most once per interval.
 func (s *Server) watchConfig(path string) {
-	last, _ := os.ReadFile(path)
-	haveLast := last != nil
+	lastHash := s.runtime.Load().cfg.sourceHash
+	haveLast := lastHash != ""
 	for {
 		// Wake up every reload_interval, or at once when the console saved.
 		// With reload_interval = 0 only the console triggers reloads.
@@ -315,10 +315,11 @@ func (s *Server) watchConfig(path string) {
 			}
 			continue
 		}
-		if haveLast && string(text) == string(last) {
+		hash := fileHash(text)
+		if haveLast && hash == lastHash {
 			continue
 		}
-		last, haveLast = text, true
+		lastHash, haveLast = hash, true
 		cfg, err := ParseConfig(string(text))
 		if err != nil {
 			errorf("config reload: %s is invalid, keeping current config: %v", path, err)
@@ -334,7 +335,7 @@ func (s *Server) watchConfig(path string) {
 			continue
 		}
 		if s.securePassword(path, cfg) {
-			last, _ = os.ReadFile(path) // our own rewrite is not a change to reload
+			lastHash = cfg.sourceHash // only our exact rewrite, never a subsequent editor save
 		}
 		if s.console != nil {
 			s.console.update(cfg.Console)
@@ -660,16 +661,20 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 		if cfg.IdleTimeout > 0 {
 			up.SetWriteDeadline(time.Now().Add(cfg.IdleTimeout))
 		}
-		_, err = up.Write(hello)
+		written, writeErr := up.Write(hello)
+		c.BytesUp.Add(int64(written))
+		c.host.BytesUp.Add(int64(written))
+		s.stats.BytesUp.Add(int64(written))
+		err = writeErr
+		if err == nil && written != len(hello) {
+			err = io.ErrShortWrite
+		}
 		rt.pool.Put(helloBuf) // back to the pool before the (possibly long) relay
 		if err != nil {
 			s.stats.Failed.Add(1)
 			logf("[#%d] closed src=%s sni=%s dst=%s: upstream write error: %v", id, src, sniDisp, destDisp, err)
 			return
 		}
-		c.BytesUp.Add(int64(len(hello)))
-		c.host.BytesUp.Add(int64(len(hello)))
-		s.stats.BytesUp.Add(int64(len(hello)))
 	}
 	c.touch()
 
@@ -875,7 +880,17 @@ func (r *relay) pump(d direction) {
 			if idle > 0 {
 				to.SetWriteDeadline(time.Now().Add(idle))
 			}
-			if _, werr := to.Write(buf[:n]); werr != nil {
+			written, werr := to.Write(buf[:n])
+			if written > 0 {
+				bytes.Add(int64(written))
+				perHost.Add(int64(written))
+				total.Add(int64(written))
+				r.c.touch()
+			}
+			if werr == nil && written != n {
+				werr = io.ErrShortWrite
+			}
+			if werr != nil {
 				if isTimeout(werr) {
 					// Blocked for a whole idle period: nothing is moving.
 					r.closeAll(fmt.Sprintf("%s error: write timed out", dirName[d]))
@@ -886,10 +901,6 @@ func (r *relay) pump(d direction) {
 				}
 				return
 			}
-			bytes.Add(int64(n))
-			perHost.Add(int64(n))
-			total.Add(int64(n))
-			r.c.touch()
 			// Optional coalescing: after a short read the socket is drained;
 			// pausing lets more data queue, so the next read is bigger (fewer
 			// syscalls and goroutine wake-ups per byte).
@@ -1027,6 +1038,10 @@ func (s *Server) securePassword(path string, cfg *Config) bool {
 		errorf("console: cannot read %s to remove the plaintext password: %v", path, err)
 		return false
 	}
+	if cfg.sourceHash == "" || fileHash(data) != cfg.sourceHash {
+		logf("console: config changed since it was parsed; leaving the newer file intact for the next reload")
+		return false
+	}
 	lines := strings.Split(string(data), "\n")
 	section, done := "", false
 	for i, line := range lines {
@@ -1050,10 +1065,12 @@ func (s *Server) securePassword(path string, cfg *Config) bool {
 	if !done {
 		return false
 	}
-	if err := writeFileAtomic(path, []byte(strings.Join(lines, "\n"))); err != nil {
+	rewritten := []byte(strings.Join(lines, "\n"))
+	if err := writeFileAtomic(path, rewritten); err != nil {
 		errorf("console: cannot rewrite %s, THE PLAINTEXT PASSWORD IS STILL IN THE FILE: %v", path, err)
 		return false
 	}
+	cfg.sourceHash = fileHash(rewritten)
 	logf("console: replaced the plaintext password in %s with its hash", path)
 	return true
 }

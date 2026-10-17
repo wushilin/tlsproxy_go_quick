@@ -69,13 +69,14 @@ type Console struct {
 	srv  *Server
 	addr string // actual listen address
 
-	mu          sync.Mutex
-	verifyMu    sync.Mutex // serialises deliberately expensive password checks
-	hash        string
-	hostnames   map[string]bool
-	sessions    map[string]*session
-	failures    int
-	lockedUntil time.Time
+	mu           sync.Mutex
+	verifyMu     sync.Mutex // serialises deliberately expensive password checks
+	hash         string
+	secureCookie bool
+	hostnames    map[string]bool
+	sessions     map[string]*session
+	failures     int
+	lockedUntil  time.Time
 }
 
 func (s *Server) startConsole(cfg *ConsoleConfig) error {
@@ -121,6 +122,9 @@ func (c *Console) update(cfg *ConsoleConfig) {
 	if cfg == nil {
 		return
 	}
+	// A password change must also wait for any login using the old hash.
+	c.verifyMu.Lock()
+	defer c.verifyMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if cfg.PasswordHash != "" && cfg.PasswordHash != c.hash {
@@ -130,6 +134,11 @@ func (c *Console) update(cfg *ConsoleConfig) {
 		c.hash = cfg.PasswordHash
 		c.sessions = map[string]*session{}
 	}
+	if c.secureCookie != cfg.SecureCookie {
+		// Existing browsers must sign in again to receive the new cookie policy.
+		c.sessions = map[string]*session{}
+	}
+	c.secureCookie = cfg.SecureCookie
 	c.hostnames = map[string]bool{"localhost": true}
 	for _, h := range cfg.Hostnames {
 		c.hostnames[h] = true
@@ -272,7 +281,7 @@ func (c *Console) login(w http.ResponseWriter, r *http.Request) {
 	}
 	s := &session{csrf: csrf, expires: time.Now().Add(sessionLifetime)}
 	c.sessions[id] = s
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: "/", HttpOnly: true,
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, Secure: c.secureCookie || r.TLS != nil,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionLifetime.Seconds())})
 	logf("console: sign-in from %s", r.RemoteAddr)
 	writeJSON(w, 200, map[string]any{"ok": true, "csrf": s.csrf})
@@ -289,7 +298,12 @@ func (c *Console) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Console) sessionInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "csrf": c.session(r).csrf})
+	s := c.session(r)
+	if s == nil { // password reload or logout may revoke it after authed checked
+		fail(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "csrf": s.csrf})
 }
 
 // ---------------------------------------------------------------- read-only pages

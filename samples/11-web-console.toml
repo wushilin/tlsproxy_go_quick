@@ -23,6 +23,7 @@ password = change-me-then-restart  # typed as plain text; at start-up (and on re
                                    #   this line with  password_hash = "pbkdf2-sha256$..."  and logs it.
                                    #   To change the password later, put a  password =  line back.
                                    #   Or generate the hash yourself:  tlsproxy --hash-password
+secure_cookie = true              # browser sessions require HTTPS through the terminating rule
 hostnames = console.example.com    # names the console may be addressed by, besides IP addresses and
                                    #   "localhost". Requests for any other name are refused
                                    #   (protection against DNS rebinding). ; or , separated
@@ -30,7 +31,7 @@ hostnames = console.example.com    # names the console may be addressed by, besi
 # A password is always required. Sign-ins are rate limited (5 failures, then
 # 30 s doubling up to 15 min), sessions last 12 hours, every change needs the
 # session's CSRF token. The [console] section itself is hidden from the editor
-# and cannot be changed there; listen and port need a restart, password and
+# and cannot be changed there; listen and port need a restart; password, secure_cookie and
 # hostnames follow hot reload.
 #
 # Saving from the editor: the text is validated first (an invalid config is
