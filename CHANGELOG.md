@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.2.1
 
 Breaking:
 - `dns_resolvers` has no default any more: `cert = auto` with
