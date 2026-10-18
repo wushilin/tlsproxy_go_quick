@@ -511,7 +511,7 @@ target_host = 192.168.1.40
 | `acme_directory` | Let's Encrypt production | use `https://acme-staging-v02.api.letsencrypt.org/directory` while testing |
 | `acme_ca_file` | (none) | extra root for the ACME server's own HTTPS (private CA, Pebble) |
 | `public_ip_address` | (none) | `;`-separated, IPv4 and IPv6. A name is only sent to the CA if **all** its public addresses (A and AAAA) are among these; without it the check is skipped (with a warning) |
-| `dns_resolvers` | (required with `cert = auto` and `public_ip_address`) | public DNS servers for that check, IP or IP:port, asked in order until one answers, e.g. `1.1.1.1; 8.8.8.8; 2606:4700:4700::1111`; deliberately not the local one, which may return LAN addresses |
+| `dns_resolvers` | (required with `cert = auto` and `public_ip_address`) | public DNS servers for that check, IP or IP:port: three attempts, each the next server in turn and given 3 s (not configurable); no answer is a no. E.g. `1.1.1.1; 8.8.8.8; 2606:4700:4700::1111`; deliberately not the local one, which may return LAN addresses |
 
 ### Your own CA (`cert = local-ca`)
 

@@ -17,8 +17,10 @@ Breaking:
 - A local CA's certificate in memory is checked again (once) whenever its CA
   changes, and served with the CA's current chain; one the CA did not sign is
   archived and replaced. Serving still reads no file.
-- DNS pre-check errors name the resolver actually asked (not the system one),
-  stop at a definite "no such host", and list every resolver that failed.
+- DNS pre-check: at most three attempts, each the next resolver in turn and
+  each given 3 seconds (not configurable); no answer at all is a no. Errors
+  name the resolver actually asked (not the system one), stop at a definite
+  "no such host", and list every attempt that failed.
 - Releases also push the image to `ghcr.io/wushilin/tlsproxy_go_quick`
   (listed under the repository's Packages); v1.2.0 is copied there as is.
 - Release binaries no longer include FreeBSD arm64 (build it with

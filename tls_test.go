@@ -620,17 +620,53 @@ func TestDNSPreCheckUsesTheConfiguredResolvers(t *testing.T) {
 	if err := checkDNS(ctx, cfg("203.0.113.7; 2001:DB8::BAD"), "www.example.test"); err != nil {
 		t.Fatalf("both addresses listed (in any spelling): %v", err)
 	}
-	// Resolvers are asked in order until one answers; when none does, the
-	// error names each one asked and what went wrong there.
+	// Three attempts, round robin over the resolvers, each with its own
+	// deadline: a dead first resolver costs one attempt (on Windows a UDP
+	// query to a closed port times out instead of being refused).
 	dead := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	both := mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s; %s\npublic_ip_address=203.0.113.7; 2001:db8::bad\n", dead, dns))
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0") // reads every query, never answers
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	both := mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s; %s\npublic_ip_address=203.0.113.7; 2001:db8::bad\n", silent.LocalAddr(), dns))
+	start := time.Now()
 	if err := checkDNS(ctx, both, "www.example.test"); err != nil {
 		t.Fatalf("the second resolver answers: %v", err)
 	}
-	none := mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s; %s\npublic_ip_address=203.0.113.7\n", dead, dead))
-	err = checkDNS(ctx, none, "www.example.test")
-	if err == nil || !strings.Contains(err.Error(), "("+dead+": ") || !strings.Contains(err.Error(), "; "+dead+": ") || !strings.Contains(err.Error(), "no resolver answered") {
-		t.Fatalf("every resolver's failure must be named: %v", err)
+	if took := time.Since(start); took < dnsAttemptTimeout || took > dnsAttemptTimeout+time.Second {
+		t.Fatalf("a silent resolver must cost exactly one attempt (%s), took %s", dnsAttemptTimeout, took)
+	}
+	// SERVFAIL is the resolver failing, not an answer: the next one is asked.
+	servfail, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer servfail.Close()
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, addr, err := servfail.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n >= 12 {
+				resp := append([]byte(nil), buf[:n]...)
+				resp[2], resp[3] = 0x81, 0x82 // response, recursion available, SERVFAIL
+				servfail.WriteTo(resp, addr)
+			}
+		}
+	}()
+	afterServfail := mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s; %s\npublic_ip_address=203.0.113.7; 2001:db8::bad\n", servfail.LocalAddr(), dns))
+	if err := checkDNS(ctx, afterServfail, "www.example.test"); err != nil {
+		t.Fatalf("SERVFAIL must be tried again elsewhere: %v", err)
+	}
+	// None answers: a no, after exactly three attempts, each one named.
+	none := mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s\npublic_ip_address=203.0.113.7\n", dead))
+	err = checkDNS(context.Background(), none, "www.example.test")
+	if err == nil || strings.Count(err.Error(), "; "+dead+": ")+strings.Count(err.Error(), "("+dead+": ") != dnsAttempts ||
+		!strings.Contains(err.Error(), "no answer in 3 attempts") {
+		t.Fatalf("every attempt's failure must be named: %v", err)
 	}
 }
 
