@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Releases also push the image to `ghcr.io/wushilin/tlsproxy_go_quick`
+  (listed under the repository's Packages); v1.2.0 is copied there as is.
+
 ## v1.2.0
 
 Breaking:
