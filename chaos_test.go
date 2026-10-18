@@ -460,7 +460,9 @@ func TestChaosCombinations(t *testing.T) {
 			rnd.Shuffle(len(cases), func(i, j int) { cases[i], cases[j] = cases[j], cases[i] })
 
 			// Refused ones, on the first listener.
-			down := freePort(t)
+			// Refused, always: a port from freePort could be taken by a parallel
+			// test before it is used, and then the connection would succeed.
+			down := 1
 			verifyFails := chaosEchoBackend(t, "never", backendTLS)
 			second := freePort(t)
 			var rules strings.Builder

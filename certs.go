@@ -1040,32 +1040,66 @@ func (m *CertManager) scriptAllows(ctx context.Context, cfg *Config, job certJob
 	return false
 }
 
+// The DNS pre-check asks at most dnsAttempts times, each time the next
+// resolver in dns_resolvers (round robin, so a single one is asked three
+// times), and gives each attempt dnsAttemptTimeout to answer. A record
+// that points here (yes), and no such record or one that points elsewhere
+// (no), are final; anything else (no response, a timeout, refused, SERVFAIL)
+// is tried again. No answer in all attempts is a no: the CA is not asked.
+// Neither number is configurable.
+const (
+	dnsAttempts       = 3
+	dnsAttemptTimeout = 3 * time.Second
+)
+
+// dnsErrText is a lookup error without the resolver's address, which names
+// the system's resolver (Dial ignores the address it is given), not the one
+// asked.
+func dnsErrText(err error) string {
+	var oe *net.OpError
+	if errors.As(err, &oe) {
+		return oe.Err.Error()
+	}
+	var de *net.DNSError
+	if errors.As(err, &de) {
+		return de.Err
+	}
+	return err.Error()
+}
+
 // checkDNS makes sure domain publicly resolves to one of our addresses.
 func checkDNS(ctx context.Context, cfg *Config, domain string) error {
 	if len(cfg.PublicIPs) == 0 {
 		return nil
 	}
 	var errs []string
-	for _, server := range cfg.DNSResolvers {
+	for attempt := range dnsAttempts {
+		if ctx.Err() != nil {
+			break
+		}
+		server := cfg.DNSResolvers[attempt%len(cfg.DNSResolvers)]
 		if _, _, err := net.SplitHostPort(server); err != nil {
 			server = net.JoinHostPort(server, "53")
 		}
 		r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, server)
+			var d net.Dialer
+			return d.DialContext(ctx, network, server)
 		}}
-		addrs, err := r.LookupNetIP(ctx, "ip", domain)
+		one, cancel := context.WithTimeout(ctx, dnsAttemptTimeout)
+		addrs, err := r.LookupNetIP(one, "ip", domain)
+		cancel()
 		if err != nil {
-			// The error names the system's resolver (Dial ignores the address
-			// it is given), not the one asked.
+			// "No such record" is an answer, and final. Anything else (no
+			// response, a timeout, refused, the resolver failing) is tried
+			// again with the next resolver.
 			var de *net.DNSError
-			var oe *net.OpError
 			switch {
-			case errors.As(err, &de) && de.IsNotFound: // an answer, not a failure: another resolver won't change it
-				return fmt.Errorf("DNS pre-check: %s does not exist (resolver %s: %s)", domain, server, de.Err)
-			case errors.As(err, &oe):
-				err = oe.Err // "read: connection refused", without the addresses again
-			case de != nil:
-				err = errors.New(de.Err)
+			case errors.As(err, &de) && de.IsNotFound:
+				return fmt.Errorf("DNS pre-check: %s has no address record (resolver %s: %s); not asking the CA", domain, server, de.Err)
+			case de != nil && de.IsTimeout:
+				err = fmt.Errorf("no answer within %s", dnsAttemptTimeout)
+			default:
+				err = errors.New(dnsErrText(err))
 			}
 			errs = append(errs, fmt.Sprintf("%s: %v", server, err))
 			continue
@@ -1092,7 +1126,7 @@ func checkDNS(ctx context.Context, cfg *Config, domain string) error {
 		return permanentError{fmt.Errorf("DNS pre-check: %s resolves to %s, of which %s is not in public_ip_address (%s)%s; not asking the CA",
 			domain, strings.Join(got, ", "), strings.Join(foreign, ", "), strings.Join(cfg.PublicIPs, ", "), hint)}
 	}
-	return fmt.Errorf("DNS pre-check: cannot resolve %s; no resolver answered (%s)", domain, strings.Join(errs, "; "))
+	return fmt.Errorf("DNS pre-check: cannot resolve %s; no answer in %d attempts (%s); not asking the CA", domain, len(errs), strings.Join(errs, "; "))
 }
 
 func (m *CertManager) acmeClient(cfg *Config) (*acme.Client, error) {
