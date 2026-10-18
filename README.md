@@ -32,7 +32,7 @@ go test ./...                                          # ~50 s; needs no network
 
 ### Docker
 
-Each release is also an image, `docker.io/wushilin/tlsproxy:<version>` (and
+Each release is also an image, `docker.io/wushilin/tlsproxy_go_quick:<version>` (and
 `:latest`), for `linux/amd64` and `linux/arm64`: the static binary on a
 distroless base (CA certificates, nothing else), running as uid 65532.
 
@@ -43,7 +43,7 @@ chown -R 65532:65532 /srv/tlsproxy                      # the container's user w
 docker run -d --name tlsproxy --restart unless-stopped \
   -p 443:443 -p 127.0.0.1:9443:9443 \
   -v /srv/tlsproxy/etc:/etc/tlsproxy -v /srv/tlsproxy/data:/var/lib/tlsproxy \
-  docker.io/wushilin/tlsproxy:latest
+  docker.io/wushilin/tlsproxy_go_quick:latest
 ```
 
 - `/etc/tlsproxy/config.toml` is the configuration. It must be writable: the

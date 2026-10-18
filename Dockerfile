@@ -3,7 +3,7 @@
 #
 #   docker run -d --name tlsproxy -p 443:443 -p 127.0.0.1:9443:9443 \
 #     -v /srv/tlsproxy/etc:/etc/tlsproxy -v /srv/tlsproxy/data:/var/lib/tlsproxy \
-#     docker.io/wushilin/tlsproxy:latest
+#     docker.io/wushilin/tlsproxy_go_quick:latest
 #
 # /etc/tlsproxy/config.toml is the configuration (it must be writable: the
 # proxy replaces a plain password with its hash, and the console saves

@@ -1,7 +1,7 @@
 # Tests on Linux (race detector, live sites; Pebble, the ACME test CA, runs in
 # every test run, in-process and offline), Windows, and a real FreeBSD VM.
 # Builds amd64 and arm64 binaries for all three operating systems and the
-# container image; tags push the image to docker.io/wushilin/tlsproxy and
+# container image; tags push the image to docker.io/wushilin/tlsproxy_go_quick and
 # publish a GitHub Release, only after all checks pass.
 name: ci
 
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      IMAGE: docker.io/wushilin/tlsproxy
+      IMAGE: docker.io/wushilin/tlsproxy_go_quick
     steps:
       - uses: actions/checkout@v4
         with:
