@@ -795,7 +795,8 @@ func TestConfigReference(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, _ := os.ReadFile("console/reference.json"); string(got) != string(want) {
+	// Line endings aside: a Windows checkout may turn them into CRLF.
+	if got, _ := os.ReadFile("console/reference.json"); strings.ReplaceAll(string(got), "\r\n", "\n") != string(want) {
 		t.Fatal("console/reference.json is out of date: run UPDATE_REFERENCE=1 go test -run TestConfigReference")
 	}
 	documented := map[string]map[string]bool{}

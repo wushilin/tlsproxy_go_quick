@@ -1,0 +1,6 @@
+# The same bytes on every platform: the console's files are embedded in the
+# binary (and reference.json is compared with what the code generates), so a
+# Windows checkout must not turn LF into CRLF.
+* text=auto eol=lf
+*.png binary
+*.ico binary

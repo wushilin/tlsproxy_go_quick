@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,7 +185,9 @@ func TestPebbleIssuesOverTLSALPN01(t *testing.T) {
 		tc.Close()
 		for _, f := range []string{"cert.pem", "key.pem"} { // persisted, private
 			st, err := os.Stat(filepath.Join(certPath, name, f))
-			if err != nil || st.Mode().Perm() != 0o600 {
+			// Mode 0600 is Unix's notion of private; Windows has no mode bits
+			// (its ACLs come from the directory), so there only presence counts.
+			if err != nil || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o600) {
 				t.Fatalf("%s/%s: %v %v", name, f, err, st)
 			}
 		}
