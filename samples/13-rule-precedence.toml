@@ -9,7 +9,7 @@
 #   3. ANY                         ANY                   everything; always last
 #
 # There are no regular expressions and no **. Matching ignores case throughout.
-# $1, $2 ... are the *s from the left; $0 is the whole name.
+# ${1}, ${2} ... are the *s from the left; ${host} is the whole name.
 #
 #> vq.example.com          => 10.0.0.1:443
 #> VQ.Example.COM          => 10.0.0.1:443
@@ -35,7 +35,7 @@ target_host = 10.0.9.9
 # Exactly two labels under example.com: two *, two captures.
 [[host]]
 pattern = *.*.example.com
-target_host = $2-$1.deep.lan
+target_host = ${2}-${1}.deep.lan
 
 # Exactly one label under example.com. example.com itself and a.b.c.example.com
 # match none of the wildcards and fall through to ANY.

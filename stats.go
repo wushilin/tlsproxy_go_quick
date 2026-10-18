@@ -23,23 +23,73 @@ const (
 type ConnState struct {
 	ID    uint64
 	Src   string
+	Local string // where the client connected (as the PROXY header says, if any)
 	Start time.Time
 
 	// Set once routing/connecting is done; read by the stats dump.
 	mu             sync.Mutex
 	SNI, Dst, Peer string
+	routed         bool      // SNI is set: routing has decided
+	UpLocal        string    // our end of the upstream connection
 	firstClosed    string    // how the first direction ended, "" if none has
 	firstClosedAt  time.Time // when, to report how long the other side took to follow
 	closeReason    string
 	closed         bool
+	result         string // how it ended, for the flow log: flowClosed, flowDenied...
+	endReason      string
+	how            flowHow // how it is handled, for the flow log; filled in as it is learned
 	halfCloseTimer *time.Timer
 
-	Mode string     // "" = passed through, otherwise how TLS was terminated
-	host *HostStats // per-host counters this connection feeds
+	Mode        string         // "" = passed through, otherwise how TLS was terminated
+	host        *HostStats     // per-host counters this connection feeds
+	Listener    string         // the listener it came in on
+	lstats      *ListenerStats // whose counters it feeds
+	RuleKey     string         // the rule that routed it ("" until routed)
+	rulePattern string         // its pattern, for the console once the rule is gone
+	rule        *RuleStats     // per-rule counters this connection feeds
+	// kill ends the connection once it relays; until then a stop request is
+	// remembered in killReason and applied when the relay starts.
+	kill       func(reason string)
+	killReason string
 
-	CToS, SToC           atomic.Int32 // dirOpen / dirHalfClosed
+	CToS, SToC           atomic.Int32               // dirOpen / dirHalfClosed
+	relaying, spliced    atomic.Int32               // directions relaying, and how many of them with splice(2)
+	slot                 *atomic.Pointer[ConnState] // its place in Stats.conns
 	BytesUp, BytesDown   atomic.Int64
 	lastActivityUnixNano atomic.Int64
+}
+
+// stop ends the connection from outside (the console), now or as soon as it
+// starts relaying.
+func (c *ConnState) stop(reason string) {
+	c.mu.Lock()
+	kill := c.kill
+	if kill == nil && c.killReason == "" {
+		c.killReason = reason
+	}
+	c.mu.Unlock()
+	if kill != nil {
+		kill(reason)
+	}
+}
+
+// setKill registers how to end the relaying connection, applying a stop
+// requested earlier.
+func (c *ConnState) setKill(kill func(string)) {
+	c.mu.Lock()
+	c.kill = kill
+	reason := c.killReason
+	c.mu.Unlock()
+	if reason != "" {
+		kill(reason)
+	}
+}
+
+// setEnd records how the connection ended, for the flow log.
+func (c *ConnState) setEnd(result, reason string) {
+	c.mu.Lock()
+	c.result, c.endReason = result, reason
+	c.mu.Unlock()
 }
 
 func (c *ConnState) info() (sni, dst, peer string) {
@@ -58,14 +108,51 @@ type Stats struct {
 	BytesUp, BytesDown     atomic.Int64
 	CacheHits, CacheMisses atomic.Int64
 
-	mu    sync.Mutex
-	conns map[uint64]*ConnState
-	hosts map[string]*HostStats
+	// Registries: no lock on the serving path (see syncMap).
+	conns connTable
+	hosts *hostTable
+	rules syncMap[string, *RuleStats] // by Rule.Key
+	lists syncMap[string, *ListenerStats]
+	flows *flowLog
 
 	Started time.Time
 	rateMu  sync.Mutex
 	samples [rateWindow + 1]rateSample // one per second, ring
 	sampleN int
+}
+
+// ListenerStats are the counters for one listener (by name), kept across
+// reloads.
+type ListenerStats struct {
+	Active, Accepted, Rejected atomic.Int64
+	BytesUp, BytesDown         atomic.Int64
+}
+
+func (s *Stats) listener(name string) *ListenerStats {
+	return s.lists.LoadOrMake(name, func() *ListenerStats { return &ListenerStats{} })
+}
+
+// listenerSnapshot returns a listener's counters, nil if it never had a connection.
+func (s *Stats) listenerSnapshot(name string) *ListenerStats {
+	l, _ := s.lists.Load(name)
+	return l
+}
+
+// RuleStats are the counters for one rule (by Rule.Key), kept across reloads.
+type RuleStats struct {
+	Active, Total      atomic.Int64
+	BytesUp, BytesDown atomic.Int64
+}
+
+// rule returns the counters for a rule key.
+func (s *Stats) rule(key string) *RuleStats {
+	return s.rules.LoadOrMake(key, func() *RuleStats { return &RuleStats{} })
+}
+
+// ruleSnapshot returns the counters of a rule, nil if it never had a connection.
+func (s *Stats) ruleSnapshot(key string) *RuleStats {
+	r, _ := s.rules.Load(key)
+	return r
 }
 
 // HostStats are the counters for one requested host name (SNI).
@@ -86,21 +173,20 @@ type rateSample struct {
 }
 
 // host returns the counters for an allowed name.
-func (s *Stats) host(name string) *HostStats {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if h := s.hosts[name]; h != nil {
-		return h
+// The cap is approximate: racing first connections of new names may each
+// get in before the count says full.
+func (s *Stats) host(name string) *HostStats { return s.hosts.get(name) }
+
+// prepare makes the counters of every rule and listener of cfg before it
+// goes live, so connections only ever read them (a read never locks; adding
+// a key to a sync.Map does).
+func (s *Stats) prepare(cfg *Config) {
+	for i := range cfg.Rules {
+		s.rule(cfg.Rules[i].Key())
 	}
-	if len(s.hosts) >= maxHostStats {
-		name = "(other)"
-		if h := s.hosts[name]; h != nil {
-			return h
-		}
+	for i := range cfg.Listeners {
+		s.listener(cfg.Listeners[i].Name)
 	}
-	h := &HostStats{}
-	s.hosts[name] = h
-	return h
 }
 
 // sample records the totals once a second for the rate display.
@@ -129,19 +215,37 @@ func (s *Stats) Rates() (up, down, conns float64) {
 }
 
 func NewStats() *Stats {
-	return &Stats{conns: make(map[uint64]*ConnState), hosts: make(map[string]*HostStats), Started: time.Now()}
+	s := &Stats{flows: newFlowLog(), hosts: newHostTable(), Started: time.Now()}
+	// A sync.Map sets itself up under a lock on first use: do it now, not in
+	// the first burst of connections.
+	s.rules.init()
+	s.lists.init()
+	return s
 }
 
 func (s *Stats) register(c *ConnState) {
-	s.mu.Lock()
-	s.conns[c.ID] = c
-	s.mu.Unlock()
+	c.slot = s.conns.add(c)
+	s.flows.emit("open", c)
 }
 
 func (s *Stats) unregister(c *ConnState) {
-	s.mu.Lock()
-	delete(s.conns, c.ID)
-	s.mu.Unlock()
+	s.conns.remove(c.slot)
+	s.flows.end(c)
+}
+
+// connList is the open connections, at most limit of them (0: all), and
+// whether there were more.
+func (s *Stats) connList(limit int) (out []*ConnState, truncated bool) {
+	out = make([]*ConnState, 0, s.conns.Len())
+	s.conns.Range(func(c *ConnState) bool {
+		if limit > 0 && len(out) == limit {
+			truncated = true
+			return false
+		}
+		out = append(out, c)
+		return true
+	})
+	return out, truncated
 }
 
 // OpenGoroutines is how many proxy goroutines are running right now.
@@ -163,12 +267,7 @@ func (s *Stats) Summary(rt *Runtime) string {
 
 // Dump logs the summary and one line per open connection (SIGUSR1 / SIGINFO).
 func (s *Stats) Dump(rt *Runtime) {
-	s.mu.Lock()
-	conns := make([]*ConnState, 0, len(s.conns))
-	for _, c := range s.conns {
-		conns = append(conns, c)
-	}
-	s.mu.Unlock()
+	conns, _ := s.connList(0)
 	sort.Slice(conns, func(i, j int) bool { return conns[i].ID < conns[j].ID })
 	logf("%s", s.Summary(rt))
 	state := func(v int32) string {

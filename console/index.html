@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>tlsproxy console</title>
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-inner">
+    <div class="brand">
+      <img class="mark" src="logo.svg" alt="" width="28" height="28">
+      <span class="name">tlsproxy</span>
+      <span class="host mono" id="host" hidden></span>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Console pages" hidden>
+      <button class="tab" type="button" role="tab" data-tab="rules" aria-selected="true" aria-controls="tab-rules">Listeners</button>
+      <button class="tab" type="button" role="tab" data-tab="flows" aria-selected="false" aria-controls="tab-flows">Flow log</button>
+      <button class="tab" type="button" role="tab" data-tab="certs" aria-selected="false" aria-controls="tab-certs">Certificates</button>
+      <button class="tab" type="button" role="tab" data-tab="ca" aria-selected="false" aria-controls="tab-ca">CAs</button>
+      <button class="tab" type="button" role="tab" data-tab="log" aria-selected="false" aria-controls="tab-log">Log</button>
+      <button class="tab" type="button" role="tab" data-tab="config" aria-selected="false" aria-controls="tab-config">Config file</button>
+    </nav>
+    <div class="bar-right">
+      <span class="status" id="status" data-state="connecting" role="status"><span class="dot"></span><span id="status-text">Connecting</span></span>
+      <button class="btn btn-quiet" id="logout" type="button" hidden>Sign out</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="login-card" autocomplete="off">
+      <img class="login-mark" src="logo.svg" alt="" width="72" height="72">
+      <h1>Sign in to the console</h1>
+      <p>Enter the console password from the <code>[console]</code> section of the config file.</p>
+      <label class="field-label" for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <button class="btn btn-primary" type="submit" id="login-submit">Sign in</button>
+      <p class="login-error" id="login-error" role="alert"></p>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <!-- ================= Rules ================= -->
+    <section id="tab-rules" role="tabpanel" aria-label="Listeners">
+      <section class="overview" aria-label="Overview">
+        <dl class="kpis">
+          <div class="kpi"><dt>Listeners</dt><dd class="num" id="k-listeners">0</dd></div>
+          <div class="kpi"><dt>Active connections</dt><dd class="num" id="k-active">0</dd></div>
+          <div class="kpi"><dt>Accepted</dt><dd class="num" id="k-accepted">0</dd></div>
+          <div class="kpi"><dt>Uptime</dt><dd class="num" id="k-uptime">—</dd></div>
+          <div class="kpi tx"><dt><svg class="arrow-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>To upstream</dt><dd class="num" id="k-tx">0 b/s</dd></div>
+          <div class="kpi rx"><dt><svg class="arrow-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>To clients</dt><dd class="num" id="k-rx">0 b/s</dd></div>
+          <div class="kpi tx"><dt><svg class="arrow-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>Sent upstream</dt><dd class="num" id="k-total-up">0 B</dd></div>
+          <div class="kpi rx"><dt><svg class="arrow-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>Sent to clients</dt><dd class="num" id="k-total-down">0 B</dd></div>
+        </dl>
+        <figure class="trace">
+          <figcaption>
+            <span class="trace-title">Throughput, last 2 minutes</span>
+            <span class="legend"><span class="key tx">to upstream</span><span class="key rx">to clients</span></span>
+          </figcaption>
+          <canvas id="trace" height="120" aria-label="Throughput chart"></canvas>
+        </figure>
+      </section>
+
+      <p class="banner bad" id="file-banner" role="alert" hidden></p>
+
+      <div class="toolbar">
+        <div class="search">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <input id="filter" type="search" placeholder="Filter by listener, host name, address or #id" aria-label="Filter listeners, rules and connections">
+        </div>
+        <span class="toolbar-note" id="filter-note"></span>
+        <div class="toolbar-actions">
+          <button class="btn btn-add" type="button" id="add-listener" hidden><span aria-hidden="true">+</span> Add listener</button>
+          <button class="btn btn-quiet" type="button" id="expand-all">Expand all</button>
+          <button class="btn btn-quiet" type="button" id="collapse-all">Collapse all</button>
+        </div>
+      </div>
+
+      <div id="listeners" class="listeners"></div>
+    </section>
+
+    <!-- ================= Flow log ================= -->
+    <section id="tab-flows" class="page" role="tabpanel" aria-label="Flow log" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Flow log</h2>
+          <span class="sub" id="flow-meta"></span>
+          <div class="search">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <input id="flow-filter" type="search" placeholder="Filter by listener, name, address, rule, result or #id" aria-label="Filter connections">
+          </div>
+          <label class="check" title="Off: a closed connection fades out after 30 seconds. On: every closed connection the proxy still remembers (the last 2000) stays listed."><input type="checkbox" id="flow-closed" autocomplete="off"> Show all closed</label>
+        </div>
+        <div class="flow-list" id="flows"></div>
+        <p class="page-note flow-empty" id="flow-empty">No connections yet. New ones show here as they open, and stay for 30 seconds after they close.</p>
+      </div>
+    </section>
+
+    <!-- ================= Certificates ================= -->
+    <section id="tab-certs" class="page" role="tabpanel" aria-label="Certificates" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Certificates</h2>
+          <span class="sub mono" id="cert-meta"></span>
+        </div>
+        <div class="scroll">
+          <table class="grid">
+            <thead><tr><th>Name</th><th>Managed by</th><th>Status</th><th>Issuer</th><th>Valid until</th><th class="r">Days left</th><th>Renews from</th><th>Rules</th><th>Details</th><th></th></tr></thead>
+            <tbody id="certs"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= Certificate authorities ================= -->
+    <section id="tab-ca" class="page" role="tabpanel" aria-label="Certificate authorities" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Certificate authorities</h2>
+          <span class="sub mono" id="ca-meta"></span>
+          <div class="toolbar-actions">
+            <button class="btn btn-add" type="button" id="ca-generate"><span aria-hidden="true">+</span> Generate CA</button>
+            <button class="btn" type="button" id="ca-import">Import CA…</button>
+          </div>
+        </div>
+        <div class="ca-list" id="cas"></div>
+      </div>
+      <p class="page-note">A rule terminates TLS with one of these by <code>cert = local-ca:ca002</code> (plain <code>cert = local-ca</code> is ca001). Certificates are issued the first time a client asks for a name, kept in the CA's folder, and renewed automatically; anything in a folder that the CA did not issue is moved to its <code>_archive</code> and deleted after 14 days. A self-signed CA is renewed with the same key, so what it issued stays valid. Clients must trust the CA: download its certificate here. Private keys never leave the proxy.</p>
+    </section>
+
+    <!-- ================= Log ================= -->
+    <section id="tab-log" class="page" role="tabpanel" aria-label="Log" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Recent log</h2>
+          <div class="search">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <input id="log-filter" type="search" placeholder="Filter, e.g. [#42] or a host name" aria-label="Filter log lines">
+          </div>
+          <label class="check"><input type="checkbox" id="log-follow" checked> Follow</label>
+        </div>
+        <pre class="log" id="log-lines"></pre>
+      </div>
+    </section>
+
+    <!-- ================= Config file ================= -->
+    <section id="tab-config" class="page" role="tabpanel" aria-label="Config file" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Config file</h2>
+          <span class="sub mono" id="cfg-path"></span>
+          <span class="chip warn" id="cfg-dirty" hidden>unsaved changes</span>
+          <button class="btn btn-quiet ref-btn" type="button" id="cfg-ref" title="Every config key, by section, with its default"><span class="ref-i" aria-hidden="true">i</span> Reference</button>
+        </div>
+        <div class="code"><div class="gutter" id="gutter">1</div><textarea id="cfg" spellcheck="false" wrap="off" aria-label="Config file text"></textarea></div>
+        <div class="panel-bar">
+          <button class="btn btn-primary" type="button" id="cfg-save">Save &amp; apply</button>
+          <button class="btn" type="button" id="cfg-validate">Validate</button>
+          <button class="btn btn-quiet" type="button" id="cfg-reload">Discard &amp; reload from disk</button>
+          <select class="input" id="cfg-backups" aria-label="Load a backup"><option value="">Load a backup…</option></select>
+        </div>
+        <div class="panel-bar">
+          <input class="input grow" type="text" id="cfg-snis" placeholder="Test routing: host names separated by spaces, <none> for no SNI" aria-label="Host names to test">
+          <button class="btn" type="button" id="cfg-test">Test against the text above</button>
+        </div>
+        <p class="msg" id="cfg-msg" role="status" hidden></p>
+        <div class="vresult" id="cfg-result" role="status" hidden></div>
+      </div>
+      <p class="page-note">The <code>[console]</code> section is hidden and cannot be changed here. Saving validates first, refuses if the file was changed by anyone else since you opened it, keeps the previous file as a backup (last 10) and applies at once: listeners open, move and close to match, rules apply to new connections. Only <code>[console]</code> <code>listen</code> and <code>port</code> need a restart.</p>
+    </section>
+  </div>
+</main>
+
+<dialog id="ca-gen" class="wizard" aria-labelledby="ca-gen-title">
+  <form id="ca-gen-form" method="dialog" class="editor" autocomplete="off">
+    <h2 id="ca-gen-title">Generate a CA</h2>
+    <p class="editor-hint" id="ca-gen-hint"></p>
+    <div class="fields">
+      <label class="field wide"><span>Common name <em>optional, shown to people who inspect a certificate</em></span><input id="ca-gen-name" spellcheck="false" maxlength="64" placeholder="e.g. Home lab CA"></label>
+      <label class="field wide"><span>Organization <em>optional</em></span><input id="ca-gen-org" spellcheck="false" maxlength="64" placeholder="tlsproxy"></label>
+      <label class="field"><span>Key</span><select id="ca-gen-key">
+        <option value="ecdsa:256">ECDSA P-256 (default)</option><option value="ecdsa:384">ECDSA P-384</option><option value="ecdsa:521">ECDSA P-521</option>
+        <option value="rsa:2048">RSA 2048</option><option value="rsa:3072">RSA 3072</option><option value="rsa:4096">RSA 4096</option>
+        <option value="ed25519:0">Ed25519</option></select></label>
+      <label class="field"><span>Signature hash</span><select id="ca-gen-hash"><option value="sha256">SHA-256 (default)</option><option value="sha384">SHA-384</option><option value="sha512">SHA-512</option></select></label>
+      <label class="field"><span>Valid for <em>years</em></span><input id="ca-gen-years" type="number" min="1" max="100" value="10"></label>
+    </div>
+    <p class="editor-note">These are fixed once the CA exists (they are written to its config.toml, whose [ca] section can't change them). It is renewed with the same key before it expires. What it issues is set in [certificates], editable later with Settings.</p>
+    <p class="editor-error" id="ca-gen-error" role="alert"></p>
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="ca-gen-cancel">Cancel</button>
+      <button class="btn btn-primary" type="submit" id="ca-gen-save">Generate</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ca-imp" class="wizard" aria-labelledby="ca-imp-title">
+  <form id="ca-imp-form" method="dialog" class="editor" autocomplete="off">
+    <h2 id="ca-imp-title">Import a CA</h2>
+    <p class="editor-hint" id="ca-imp-hint"></p>
+    <label class="field wide"><span>CA certificate <em>PEM; for an intermediate, its issuers after it, in order</em></span><textarea id="ca-imp-cert" class="pem" spellcheck="false" rows="7" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+    <label class="field wide"><span>Private key <em>PEM, not encrypted: PKCS#8, EC or RSA</em></span><textarea id="ca-imp-key" class="pem" spellcheck="false" rows="5" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+    <p class="editor-note">Checked before anything is stored: it must be a CA allowed to sign certificates, the key must be its own, and a chain must be in order. Certificates it issues are sent with its chain (without the root), so clients that trust your root accept them.</p>
+    <p class="editor-error" id="ca-imp-error" role="alert"></p>
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="ca-imp-cancel">Cancel</button>
+      <button class="btn btn-primary" type="submit" id="ca-imp-save">Import</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ca-set" class="wizard ref" aria-labelledby="ca-set-title">
+  <form id="ca-set-form" method="dialog" class="editor" autocomplete="off">
+    <div class="ref-head">
+      <h2 id="ca-set-title">CA settings</h2>
+      <span class="sub mono" id="ca-set-path"></span>
+    </div>
+    <p class="editor-hint">[certificates] says what this CA issues, and is read again as soon as it is saved: new certificates and renewals follow it; existing ones keep theirs until renewed. [ca] describes how the CA was made and can't be changed.</p>
+    <textarea id="ca-set-text" class="pem ca-set-text" spellcheck="false" wrap="off"></textarea>
+    <p class="editor-error" id="ca-set-error" role="alert"></p>
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="ca-set-cancel">Cancel</button>
+      <button class="btn btn-primary" type="submit" id="ca-set-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ref" class="wizard ref" aria-labelledby="ref-title">
+  <div class="editor">
+    <div class="ref-head">
+      <h2 id="ref-title">Config reference</h2>
+      <button class="btn btn-quiet" type="button" id="ref-close" aria-label="Close">Close</button>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <input id="ref-filter" type="search" placeholder="Filter keys, e.g. timeout or speed" aria-label="Filter keys">
+    </div>
+    <nav class="ref-jump" id="ref-jump" aria-label="Sections"></nav>
+    <div class="ref-body" id="ref-body"></div>
+  </div>
+</dialog>
+
+<dialog id="editor" class="wizard" aria-labelledby="editor-title">
+  <form id="editor-form" method="dialog" class="editor" autocomplete="off" novalidate>
+    <h2 id="editor-title">Add rule</h2>
+    <p class="editor-hint" id="editor-hint"></p>
+
+    <ol class="steps" role="tablist" aria-label="Rule editor steps">
+      <li><button type="button" class="step-btn" data-step="0" role="tab"><span class="n">1</span>What to match</button></li>
+      <li><button type="button" class="step-btn" data-step="1" role="tab"><span class="n">2</span>Where to send it</button></li>
+      <li><button type="button" class="step-btn" data-step="2" role="tab"><span class="n">3</span>Options</button></li>
+    </ol>
+
+    <!-- Step 1: the pattern -->
+    <div class="step" data-step="0">
+      <div class="fields">
+        <label class="field wide"><span>Listener</span><select id="f-listener"></select></label>
+        <label class="field wide"><span>Pattern</span><input id="f-pattern" required spellcheck="false" placeholder="www.example.com, *.example.com, ANY or NONE"></label>
+      </div>
+      <div class="examples" id="pattern-examples">
+        <span class="examples-label">Examples</span>
+        <button type="button" class="chip pick" data-example="www.example.com">www.example.com</button>
+        <button type="button" class="chip pick" data-example="*.example.com">*.example.com</button>
+        <button type="button" class="chip pick" data-example="api-*.example.com">api-*.example.com</button>
+        <button type="button" class="chip pick" data-example="ANY">ANY</button>
+        <button type="button" class="chip pick" data-example="NONE">NONE</button>
+      </div>
+      <p class="field-help" id="pattern-help"><span class="chip" id="pattern-kind" hidden></span><span id="pattern-text"></span></p>
+    </div>
+
+    <!-- Step 2: allow / deny and the target -->
+    <div class="step" data-step="1" hidden>
+      <div class="seg" role="radiogroup" aria-label="Action">
+        <label><input type="radio" name="f-action" value="allow" checked><span>Forward it <em>allow</em></span></label>
+        <label><input type="radio" name="f-action" value="deny"><span>Refuse it <em>deny</em></span></label>
+      </div>
+      <div class="fields" id="target-fields">
+        <label class="field"><span>Target host</span><input id="f-target-host" spellcheck="false" placeholder="10.0.0.6 or backend-${1}.lan"></label>
+        <label class="field"><span>Target port <em>optional</em></span><input id="f-target-port" inputmode="numeric" placeholder="443"></label>
+      </div>
+      <p class="field-help" id="capture-help" hidden></p>
+      <p class="field-help" id="deny-help" hidden>Clients asking for a matching name are disconnected during the handshake. Nothing else to set.</p>
+    </div>
+
+    <!-- Step 3: TLS, PROXY protocol, speed limits -->
+    <div class="step" data-step="2" hidden>
+      <p class="field-help" id="options-deny" hidden>A deny rule has no options.</p>
+      <div id="options-allow">
+        <div class="group">
+          <h3 class="group-title">TLS</h3>
+          <div class="seg" role="radiogroup" aria-label="TLS handling">
+            <label><input type="radio" name="f-tls" value="pass" checked><span>Pass through <em>default</em></span></label>
+            <label><input type="radio" name="f-tls" value="terminate"><span>Terminate here</span></label>
+          </div>
+          <p class="field-help" id="tls-help"></p>
+          <div id="tls-fields" hidden>
+            <div class="seg small" role="radiogroup" aria-label="Certificate">
+              <label><input type="radio" name="f-certsrc" value="auto" checked><span>Automatic <em>ACME</em></span></label>
+              <label><input type="radio" name="f-certsrc" value="local"><span>Local CA <em>yours</em></span></label>
+            </div>
+            <div class="fields">
+              <label class="field wide" id="cert-ca-field" hidden><span>Certificate authority <em>certificates are issued on first use, one per name</em></span><select id="f-cert-ca"></select></label>
+              <label class="field wide names-field"><span>Certificate names <em id="cert-names-hint">optional</em></span><input id="f-cert-domains" spellcheck="false" placeholder="default: the literal pattern; e.g. www.example.com, blog.example.com"></label>
+              <label class="field wide auto-only"><span>Validate script <em>optional, for names not known in advance</em></span><input id="f-cert-script" spellcheck="false" placeholder="/usr/local/etc/tlsproxy/domains.sh"></label>
+              <label class="field wide auto-only"><span>Script arguments <em>optional, a TOML array; default ["${host}"]</em></span><input id="f-cert-args" spellcheck="false" placeholder='["${host}"]  or  ["--customer", "aaa-${1}", "${host}"]'></label>
+              <label class="field"><span>Upstream speaks TLS <em>optional</em></span><select id="f-upstream-tls"><option value="">default (yes)</option><option value="true">yes</option><option value="false">no, plaintext</option></select></label>
+              <label class="field upstream-tls-only"><span>Verify upstream certificate <em>optional</em></span><select id="f-upstream-verify"><option value="">default (yes)</option><option value="true">yes</option><option value="false">no</option></select></label>
+              <label class="field wide upstream-tls-only"><span>Upstream SNI <em>optional</em></span><input id="f-upstream-sni" spellcheck="false" placeholder="default: the name the client asked for"></label>
+            </div>
+          </div>
+        </div>
+
+        <p class="common-note">For both passed-through and terminated connections:</p>
+        <div class="group">
+          <h3 class="group-title">PROXY protocol</h3>
+          <div class="fields">
+            <label class="check wide-check"><input type="checkbox" id="f-proxy"> Tell the target the client's address (PROXY header)</label>
+            <label class="field" id="proxy-version-field" hidden><span>Version</span><select id="f-proxy-version"><option value="2">2 (default)</option><option value="1">1</option></select></label>
+          </div>
+        </div>
+
+        <div class="group">
+          <h3 class="group-title">Speed limits</h3>
+          <div class="fields">
+            <label class="field"><span>Aggregated <em>optional</em></span><input id="f-agg" spellcheck="false" placeholder="unlimited, e.g. 1Gbit"></label>
+            <label class="field"><span>Per connection <em>optional</em></span><input id="f-conn" spellcheck="false" placeholder="unlimited, e.g. 15MiB/s"></label>
+          </div>
+          <p class="editor-note">Each direction separately. Units: B, KB, MB, GB, KiB, MiB, GiB, or bit, Kbit, Mbit, Gbit (bps, Kbps…), optionally with /s. Aggregated is shared by every connection the rule matches.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Always visible: what the server says about the result -->
+    <div class="check-box">
+      <p class="editor-error" id="editor-error" role="alert"></p>
+      <ul class="editor-warnings" id="editor-warnings" hidden></ul>
+      <div class="try">
+        <label class="field"><span>Try a name <em>separate several with spaces; &lt;none&gt; for no SNI</em></span><input id="f-try" spellcheck="false" placeholder="www.example.com"></label>
+        <ul class="routes" id="try-results"></ul>
+      </div>
+      <div class="preview">
+        <div class="preview-head"><span id="preview-title">Will be written to the config file</span><span class="preview-state" id="preview-state"></span></div>
+        <pre class="block" id="editor-block"></pre>
+      </div>
+    </div>
+
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="editor-reload" hidden>Reload from file</button>
+      <button class="btn btn-quiet" type="button" id="editor-cancel">Cancel</button>
+      <button class="btn" type="button" id="editor-back">Back</button>
+      <button class="btn" type="button" id="editor-next">Next</button>
+      <button class="btn btn-primary" type="submit" id="editor-save">Add rule</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="lst-editor" class="wizard" aria-labelledby="lst-title">
+  <form id="lst-form" method="dialog" class="editor" autocomplete="off" novalidate>
+    <h2 id="lst-title">Add listener</h2>
+    <p class="editor-hint" id="lst-hint"></p>
+
+    <ol class="steps" role="tablist" aria-label="Listener editor steps">
+      <li><button type="button" class="step-btn" data-step="0" role="tab"><span class="n">1</span>Name and address</button></li>
+      <li><button type="button" class="step-btn" data-step="1" role="tab"><span class="n">2</span>Overrides <em class="opt">optional</em></button></li>
+    </ol>
+
+    <div class="step" data-step="0">
+      <div class="fields">
+        <label class="field"><span>Name <em>letters, digits, spaces, - _ @ # ~ ( ) [ ] &lt; &gt; " '</em></span><input id="l-name" spellcheck="false" placeholder="public"></label>
+        <label class="field"><span>Port</span><input id="l-port" inputmode="numeric" placeholder="443"></label>
+        <label class="field wide"><span>Bind <em>optional</em></span><input id="l-bind" spellcheck="false" placeholder="0.0.0.0"></label>
+      </div>
+      <p class="field-help">0.0.0.0 all IPv4, :: all IPv6 and IPv4, or addresses separated by ;</p>
+    </div>
+
+    <div class="step" data-step="1" hidden>
+      <p class="field-help">Each one is optional: leave it empty to use the value from <code>[global]</code>.</p>
+      <div class="fields">
+        <label class="field wide"><span>Accept PROXY headers from <em>proxy_protocol_from</em></span><input id="l-ppf" spellcheck="false" placeholder="global; e.g. 10.0.0.0/8, 192.168.1.5"></label>
+        <label class="field"><span>Max connections</span><input id="l-maxconn" inputmode="numeric" placeholder="global"></label>
+        <label class="field"><span>Handshake timeout <em>seconds</em></span><input id="l-hs" inputmode="numeric" placeholder="global"></label>
+        <label class="field"><span>Idle timeout <em>seconds</em></span><input id="l-idle" inputmode="numeric" placeholder="global"></label>
+        <label class="field"><span>Half-close timeout <em>seconds</em></span><input id="l-half" inputmode="numeric" placeholder="global"></label>
+        <label class="field"><span>Aggregated speed</span><input id="l-agg" spellcheck="false" placeholder="unlimited, e.g. 1Gbit"></label>
+        <label class="field"><span>Per-connection speed</span><input id="l-conn" spellcheck="false" placeholder="unlimited, e.g. 15MiB/s"></label>
+      </div>
+      <p class="editor-note">Speeds are for the whole listener, on top of each rule's limits, each direction separately. Units: B, KB, MB, GB, KiB, MiB, GiB, or bit, Kbit, Mbit, Gbit (bps, Kbps…), optionally with /s.</p>
+    </div>
+
+    <div class="check-box">
+      <p class="editor-error" id="lst-error" role="alert"></p>
+      <ul class="editor-warnings" id="lst-warnings" hidden></ul>
+      <ul class="editor-notes" id="lst-notes" hidden></ul>
+      <div class="preview">
+        <div class="preview-head"><span id="lst-preview-title">Will be written to the config file</span><span class="preview-state" id="lst-preview-state"></span></div>
+        <pre class="block" id="lst-block"></pre>
+      </div>
+    </div>
+
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="lst-reload" hidden>Reload from file</button>
+      <button class="btn btn-quiet" type="button" id="lst-cancel">Cancel</button>
+      <button class="btn" type="button" id="lst-back">Back</button>
+      <button class="btn" type="button" id="lst-next">Next</button>
+      <button class="btn btn-primary" type="submit" id="lst-save">Add listener</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

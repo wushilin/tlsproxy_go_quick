@@ -26,6 +26,11 @@ type consoleClient struct {
 	host string // overrides the Host header when set
 }
 
+// hostPort is the console's address, as in a Host header.
+func (c *consoleClient) hostPort() string {
+	return strings.TrimPrefix(strings.TrimSuffix(c.base, consolePath), "http://")
+}
+
 func (c *consoleClient) do(method, path string, body any, contentType string) (int, map[string]any) {
 	c.t.Helper()
 	var rd io.Reader
@@ -74,16 +79,22 @@ func (c *consoleClient) login(password string) int {
 // between [global] and the rules, and starts the proxy from it.
 func startConsoleProxy(t *testing.T, consoleLines, rules string) (*proxyUnderTest, *consoleClient, string) {
 	t.Helper()
+	return startConsoleProxyGlobal(t, "", consoleLines, rules)
+}
+
+// startConsoleProxyGlobal is startConsoleProxy with extra [global] lines.
+func startConsoleProxyGlobal(t *testing.T, globalLines, consoleLines, rules string) (*proxyUnderTest, *consoleClient, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
 	port := freePort(t)
-	text := fmt.Sprintf("# top comment\n[global]\nport=1\nstats_interval=0\nreload_interval=0\n\n[console]\n# console comment\nport = %d\n%s\n\n%s", port, consoleLines, rules)
+	text := fmt.Sprintf("# top comment\n[global]\nport=1\nstats_interval=0\nreload_interval=0\n%s\n\n[console]\n# console comment\nport = %d\n%s\n\n%s", globalLines, port, consoleLines, rules)
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	p := startProxyText(t, text, path)
 	waitForPort(t, fmt.Sprintf("127.0.0.1:%d", port))
 	jar, _ := cookiejar.New(nil)
-	return p, &consoleClient{t: t, base: fmt.Sprintf("http://127.0.0.1:%d", port), http: &http.Client{Jar: jar, Timeout: T}}, path
+	return p, &consoleClient{t: t, base: fmt.Sprintf("http://127.0.0.1:%d%s", port, consolePath), http: &http.Client{Jar: jar, Timeout: T}}, path
 }
 
 func TestConsoleAuthAndRequestGuards(t *testing.T) {
@@ -192,6 +203,33 @@ func TestConsoleConfigEditing(t *testing.T) {
 	wantLine := fmt.Sprintf("line %d", strings.Count(text, "\n")+2)
 	if _, out := c.post("/api/config/validate", map[string]string{"text": broken}); out["ok"] == true || !strings.Contains(out["error"].(string), wantLine) {
 		t.Fatalf("want an error at %s: %v", wantLine, out)
+	}
+	if _, out := c.post("/api/config/validate", map[string]string{"text": broken}); out["line"] != float64(strings.Count(text, "\n")+2) {
+		t.Fatalf("want the error's line as a number: %v", out["line"])
+	}
+	// Valid text: a tree of the settings, rule lines in the editor's numbering.
+	_, valid := c.post("/api/config/validate", map[string]string{"text": text})
+	if valid["ok"] != true {
+		t.Fatal(valid)
+	}
+	editorLines := strings.Split(text, "\n")
+	rulesSeen := 0
+	for _, n := range valid["tree"].([]any) {
+		if n.(map[string]any)["title"] != "Listeners" {
+			continue
+		}
+		for _, l := range n.(map[string]any)["children"].([]any) {
+			for _, r := range l.(map[string]any)["children"].([]any) {
+				line := int(r.(map[string]any)["line"].(float64))
+				if strings.TrimSpace(editorLines[line-1]) != "[[host]]" {
+					t.Errorf("rule %v: editor line %d is %q", r.(map[string]any)["title"], line, editorLines[line-1])
+				}
+				rulesSeen++
+			}
+		}
+	}
+	if rulesSeen == 0 {
+		t.Fatalf("no rules in the tree: %v", valid["tree"])
 	}
 	before, _ := os.ReadFile(path)
 	if _, out := save(broken, cfg); out["ok"] == true {
@@ -311,7 +349,7 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 	rules := fmt.Sprintf("[[host]]\npattern=term\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 		"[[host]]\npattern=auto\\.test\ncert=auto\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 		"[[host]]\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n",
-		ca.certDir(t, "term.test"), echoBackend(t, ""), echoBackend(t, ""), echoBackend(t, ""))
+		ca.localCA(t), echoBackend(t, ""), echoBackend(t, ""), echoBackend(t, ""))
 	path := filepath.Join(t.TempDir(), "config.toml")
 	port := freePort(t)
 	text := fmt.Sprintf("[global]\nport=1\nstats_interval=0\ncert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir\n[console]\nport=%d\npassword=pw\n%s", certPath, dead, port, rules)
@@ -319,7 +357,7 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 	p := startProxyText(t, text, path)
 	waitForPort(t, fmt.Sprintf("127.0.0.1:%d", port))
 	jar, _ := cookiejar.New(nil)
-	c := &consoleClient{t: t, base: fmt.Sprintf("http://127.0.0.1:%d", port), http: &http.Client{Jar: jar, Timeout: T}}
+	c := &consoleClient{t: t, base: fmt.Sprintf("http://127.0.0.1:%d%s", port, consolePath), http: &http.Client{Jar: jar, Timeout: T}}
 	c.login("pw")
 
 	// Traffic: two passed-through connections (one stays open) and one terminated.
@@ -341,8 +379,8 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 		_, lg := c.get("/api/log?filter=TLS+terminated+here")
 		lines := lg["lines"].([]any)
 		// Lines of other tests' proxies are in there too (one process, one log):
-		// ours is the one served from this test's certificate directory.
-		if strings.Contains(fmt.Sprint(lines), "TestConsoleDashboardConnectionsCertsAndLog") && !strings.Contains(fmt.Sprint(lines), "pass.test") {
+		// ours is the one terminated with this test's CA.
+		if strings.Contains(fmt.Sprint(lines), "cert="+ca.localCA(t)+" ") && !strings.Contains(fmt.Sprint(lines), "pass.test") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -377,22 +415,29 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 		t.Fatalf("connections: %v", rows)
 	}
 
-	// Certificates: the directory one (managed by you) and the automatic one (failing: the CA is unreachable).
-	var certs []any
+	// Certificates: the one the local CA issued and the automatic one (failing: the CA is unreachable).
+	var local, auto map[string]any
 	for deadline := time.Now().Add(T); ; time.Sleep(100 * time.Millisecond) {
 		_, out := c.get("/api/certs")
-		certs = out["certs"].([]any)
-		if len(certs) == 2 && certs[1].(map[string]any)["Status"] == "failing" {
+		local, auto = nil, nil
+		for _, row := range out["certs"].([]any) {
+			switch r := row.(map[string]any); r["Source"] {
+			case "local-ca":
+				local = r
+			case "auto":
+				auto = r
+			}
+		}
+		if local != nil && auto != nil && auto["Status"] == "failing" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("certs: %v", certs)
+			t.Fatalf("certs: %v", out["certs"])
 		}
 	}
-	dir, auto := certs[0].(map[string]any), certs[1].(map[string]any)
-	if dir["Source"] != "directory" || dir["Status"] != "ok" || dir["Issuer"] != "test CA" || dir["Name"] != "term.test" || dir["DaysLeft"].(float64) != 0 ||
-		auto["Source"] != "auto" || auto["Name"] != "auto.test" || auto["LastError"] == "" || auto["NextAttempt"] == "" {
-		t.Fatalf("dir=%v\nauto=%v", dir, auto)
+	if local["Status"] != "ok" || local["Issuer"] != "test CA" || local["Name"] != "term.test" ||
+		auto["Name"] != "auto.test" || auto["LastError"] == "" || auto["NextAttempt"] == "" {
+		t.Fatalf("local=%v\nauto=%v", local, auto)
 	}
 	if code, _ := c.post("/api/certs/retry", map[string]string{"domain": "auto.test"}); code != 200 {
 		t.Fatal(code)

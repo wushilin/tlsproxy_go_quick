@@ -102,9 +102,10 @@ func proxyProtocolHeader(version int, src, dst net.Addr) ([]byte, error) {
 // half-close handling.
 type proxyConn struct {
 	net.Conn
-	prefix []byte
-	remote net.Addr
-	local  net.Addr // the destination the header states: where the client really connected
+	prefix  []byte
+	remote  net.Addr
+	local   net.Addr // the destination the header states: where the client really connected
+	version int      // the PROXY header's version, 0 = there was none
 }
 
 func (c *proxyConn) Read(p []byte) (int, error) {
@@ -182,6 +183,10 @@ func detectProxyProtocol(conn net.Conn) (*proxyConn, error) {
 	}
 	if parseErr != nil {
 		return nil, parseErr
+	}
+	c.version = 1
+	if signature == proxyV2Sig {
+		c.version = 2
 	}
 	// Both nil means v1 UNKNOWN or v2 LOCAL/UNSPEC: the socket's own addresses apply.
 	return c, nil

@@ -224,8 +224,8 @@ seconds) would take the load off it at high connection rates.
   (`proxy.go:207`); it needs a restart. Fix: log that.
 - *(fixed `29fe7a8`)* **Answered ACME challenges are not counted** (`proxy.go:313`): neither
   completed nor failed, so `accepted` drifts from the sum of the others.
-- *(fixed: an SNI that is an IP address is refused, as RFC 6066 requires; a catch-all whose target follows the client is warned about at start-up)* **`$0` / `$1` targets follow the client's SNI.** With a broad pattern and
-  `target_host = $0`, an SNI such as `10.0.0.1` makes the proxy connect to that
+- *(fixed: an SNI that is an IP address is refused, as RFC 6066 requires; a catch-all whose target follows the client is warned about at start-up)* **`${host}` / `${1}` targets follow the client's SNI.** With a broad pattern and
+  `target_host = ${host}`, an SNI such as `10.0.0.1` makes the proxy connect to that
   address on `target_port`. The samples use explicit names; the README should
   warn, or such rules could refuse SNIs that are IP addresses.
 - *(fixed: `max_handshakes_per_ip`, default 64, counted per IPv4 address or IPv6 /64)* **Slow handshakes hold slots cheaply.** `max_connections` slots can be held

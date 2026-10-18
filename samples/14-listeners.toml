@@ -1,0 +1,52 @@
+# Several listeners, each with its own rules: the public port 443, and a lab
+# port 9092 reachable only on the VPN address. Every rule names its listener.
+# A file without [[listener]] sections has one implicit listener, "default",
+# made from [global] bind and port (the other samples).
+#
+#> public: www.example.com   => 192.168.1.30:443
+#> public: kafka.example.com => DENY
+#> lab: kafka.example.com    => 10.11.12.50:9092
+#> lab: www.example.com      => 10.11.12.60:443
+
+[global]
+idle_timeout = 600                 # applies to every listener unless it overrides it
+
+[[listener]]
+name = public                      # required: a-z 0-9 - _, unique
+bind = 0.0.0.0                     # default 0.0.0.0; several separated by ;
+port = 443                         # required
+
+[[listener]]
+name = lab
+bind = 10.11.12.212
+port = 9092
+# Optional overrides of [global] for this listener:
+proxy_protocol_from = 10.11.12.1   # who may send a PROXY header to this port
+max_connections = 200              # on top of [global] max_connections
+handshake_timeout = 5              # seconds
+idle_timeout = 3600                # seconds
+half_close_timeout = 10            # seconds
+max_aggregated_speed = 200Mbit     # all connections on this listener together, each direction
+max_single_connection_speed = 20MiB/s # each connection on it, each direction
+
+[[host]]
+listener = public
+pattern = www.example.com
+target_host = 192.168.1.30
+
+[[host]]
+listener = public
+pattern = ANY
+action = deny
+
+[[host]]
+listener = lab
+pattern = kafka.example.com
+target_host = 10.11.12.50
+target_port = 9092
+
+# The same pattern may appear on several listeners: each has its own rules.
+[[host]]
+listener = lab
+pattern = ANY
+target_host = 10.11.12.60

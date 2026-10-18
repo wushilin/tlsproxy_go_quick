@@ -13,10 +13,12 @@ package main
 // are host names with optional * wildcards; there are no regular expressions.
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,10 +50,12 @@ type Config struct {
 	ReloadInterval    time.Duration // 0 = never
 	StatsInterval     time.Duration // 0 = never
 	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
+	Splice            bool          // relay passed-through connections with splice(2) (Linux only)
 	Log               LogConfig     // the [logging] section
 
 	// Certificates (only used by rules with cert = ...).
 	CertPath            string   // where automatic certificates and the ACME account live
+	CARoot              string   // where the local CAs (caNNN) and what they issued live
 	ExpiryThresholdDays int      // renew this many days before expiry
 	PublicIPs           []string // auto-issue only if the name resolves to one of these
 	DNSResolvers        []string // public resolvers for that check (host or host:port)
@@ -61,14 +65,71 @@ type Config struct {
 	AcmeCAFile          string   // extra root CA for the ACME server's HTTPS (private CAs, Pebble)
 	Warnings            []string // non-fatal findings, logged at startup / reload
 
-	Console *ConsoleConfig // the [console] section; nil = no web console
-	Rules   []Rule         // in file order
-	// How Route evaluates them: literal names by lookup, everything else in
-	// order of specificity.
-	literals   map[string]*Rule
-	byPriority []*Rule
+	Console   *ConsoleConfig // the [console] section; nil = no web console
+	Rules     []Rule         // in file order
+	Listeners []Listener     // in file order; one implicit "default" from [global] when the file has none
+	// listener is set in the per-listener copies the proxy runs with (see
+	// ForListener): whose rules Route uses and whose overrides apply.
+	listener *Listener
 	// Legacy settings that no longer apply and were ignored.
 	Ignored []string
+}
+
+// Listener is one [[listener]] section: a port with its own rules. Zero or
+// nil overrides mean the [global] value applies.
+type Listener struct {
+	Name  string
+	Line  int // 0 = implicit, made from [global] bind and port
+	Bind  string
+	Binds []string
+	Port  int
+
+	ProxyProtocolFrom                               *[]netip.Prefix
+	MaxConnections                                  int // on top of [global] max_connections
+	HandshakeTimeout, IdleTimeout, HalfCloseTimeout *time.Duration
+	MaxAggregatedSpeed, MaxSingleConnectionSpeed    float64 // bytes per second, each direction
+
+	// How Route evaluates its rules: literal names by lookup, everything else
+	// in order of specificity.
+	literals   map[string]*Rule
+	byPriority []*Rule
+}
+
+// Addrs is every address the listener binds, for display and listening.
+func (l *Listener) Addrs() []string {
+	var out []string
+	for _, b := range l.Binds {
+		out = append(out, net.JoinHostPort(b, strconv.Itoa(l.Port)))
+	}
+	return out
+}
+
+// ForListener returns the configuration a connection on l runs with: this
+// one, with l's overrides applied. Rules and listeners are shared, so rule
+// pointers stay the same.
+func (c *Config) ForListener(l *Listener) *Config {
+	eff := *c
+	eff.listener = l
+	eff.Bind, eff.Binds, eff.Port = l.Bind, l.Binds, l.Port
+	if l.ProxyProtocolFrom != nil {
+		eff.ProxyProtocolFrom = *l.ProxyProtocolFrom
+	}
+	for _, o := range []struct{ dst, v *time.Duration }{{&eff.HandshakeTimeout, l.HandshakeTimeout}, {&eff.IdleTimeout, l.IdleTimeout}, {&eff.HalfCloseTimeout, l.HalfCloseTimeout}} {
+		if o.v != nil {
+			*o.dst = *o.v
+		}
+	}
+	return &eff
+}
+
+// Listener returns the listener named name, nil if there is none.
+func (c *Config) Listener(name string) *Listener {
+	for i := range c.Listeners {
+		if c.Listeners[i].Name == name {
+			return &c.Listeners[i]
+		}
+	}
+	return nil
 }
 
 // ConsoleConfig is the [console] section: a web console on its own port.
@@ -99,6 +160,7 @@ func (k ruleKind) String() string {
 }
 
 type Rule struct {
+	Listener     string // the listener's name
 	Line         int
 	Source       string
 	Kind         ruleKind
@@ -113,17 +175,40 @@ type Rule struct {
 
 	// TLS termination: set when the rule has cert = auto | <dir>. Without it
 	// the rule passes TLS through untouched.
-	Cert        string   // "", "auto", or a directory holding cert.pem + key.pem (+ ca.pem)
-	CertDomains []string // names to issue for when Cert is "auto"
+	Cert        string           // "", "auto", or a directory holding cert.pem + key.pem (+ ca.pem)
+	CertDomains []string         // auto: names to issue for; local-ca: the glob patterns that may get one
+	certNames   []*regexp.Regexp // local-ca: CertDomains compiled, anchored
 	// CertValidateScript decides about names that match the pattern but are
 	// not in CertDomains: run as `<script> <name>` only when a certificate has
 	// to be issued or renewed; exit status 0 accepts the name.
 	CertValidateScript string
-	UpstreamTLS        bool   // connect to the target with TLS (default true)
-	UpstreamTLSVerify  bool   // verify the target's certificate (default true)
-	UpstreamSNI        string // SNI sent to (and verified against) the target; "" = the client's SNI
-	Proxy              bool   // send a PROXY protocol header to the target
-	ProxyVersion       int    // PROXY protocol version (1 or 2; default 2)
+	// CertValidateArgs are the script's arguments, each expanded like
+	// target_host (${1}, ${host}). Default: the name alone.
+	CertValidateArgs  []string
+	UpstreamTLS       bool   // connect to the target with TLS (default true)
+	UpstreamTLSVerify bool   // verify the target's certificate (default true)
+	UpstreamSNI       string // SNI sent to (and verified against) the target; "" = the client's SNI
+	Proxy             bool   // send a PROXY protocol header to the target
+	ProxyVersion      int    // PROXY protocol version (1 or 2; default 2)
+
+	// Speed limits in bytes per second, each direction separately; 0 = none.
+	MaxAggregatedSpeed       float64 // shared by every connection of this rule
+	MaxSingleConnectionSpeed float64 // for each connection
+}
+
+// Key identifies a rule across reloads and edits: two rules with the same key
+// cannot both exist (the same pattern twice is a load error).
+func (r *Rule) Key() string {
+	pattern := ""
+	switch {
+	case r.NoSNI:
+		pattern = "NONE"
+	case r.Kind == kindCatchAll:
+		pattern = "ANY"
+	default:
+		pattern = r.Pattern.String()
+	}
+	return r.Listener + "\x00" + pattern
 }
 
 // Terminates reports whether the proxy terminates TLS for this rule.
@@ -146,11 +231,24 @@ func isHostChar(b byte) bool {
 
 // Route evaluates the rules for a lowercased SNI, most specific first. No SNI
 // is matched by NONE, else by ANY; never by a literal or a wildcard.
-func (c *Config) Route(sni string) Decision {
-	if r := c.literals[sni]; r != nil {
+func (c *Config) Route(sni string) Decision { return c.RouteExcept(sni, nil) }
+
+// RouteExcept routes with the rules of this copy's listener (the first one
+// for the configuration as parsed), as if the rules whose Key is in stopped
+// were not configured: a name they would match falls through to the next
+// rule.
+func (c *Config) RouteExcept(sni string, stopped map[string]bool) Decision {
+	l := c.listener
+	if l == nil {
+		l = &c.Listeners[0]
+	}
+	if r := l.literals[sni]; r != nil && !stopped[r.Key()] {
 		return r.decide(sni, []int{0, len(sni)})
 	}
-	for _, r := range c.byPriority {
+	for _, r := range l.byPriority {
+		if stopped[r.Key()] {
+			continue
+		}
 		var m []int
 		if r.NoSNI {
 			if sni != "" {
@@ -200,7 +298,7 @@ func (r *Rule) decide(sni string, m []int) Decision {
 //	api-*.example.com               *.example.com does not match a.b.example.com (nor example.com);
 //	*.*.example.com                 a * inside a label is any run of characters, none included:
 //	                                api-*.x.com matches api-1.x.com and api-.x.com, abc*.x.com
-//	                                matches abc.x.com. Each * is a capture: $1, $2, ... left to right
+//	                                matches abc.x.com. Each * is a capture: ${1}, ${2}, ... left to right
 //	ANY                           everything, with or without SNI (".*" is accepted as an old spelling)
 //
 // Nothing else is a pattern: there are no regular expressions and no **.
@@ -250,7 +348,7 @@ func classify(pattern string) (kind ruleKind, expr string, literalChars int, err
 // patternHelp says what to write instead of a pattern that is not one: most
 // often a regular expression from a configuration written for an older version.
 func patternHelp(pattern string) string {
-	help := "Use a host name, with * for one label or part of one (*.example.com, api-*.example.com; each * is $1, $2, ... in target_host), NONE for clients without SNI, or ANY for everything"
+	help := "Use a host name, with * for one label or part of one (*.example.com, api-*.example.com; each * is ${1}, ${2}, ... in target_host), NONE for clients without SNI, or ANY for everything"
 	switch {
 	case strings.Contains(pattern, "|"):
 		return "regular expressions are no longer supported; write one rule per alternative. " + help
@@ -270,33 +368,48 @@ func literalName(pattern string) string {
 // prioritise builds the lookup structures Route uses and reports rules that
 // can never match. Called once all rules are parsed (Rules no longer moves).
 func (c *Config) prioritise() error {
-	c.literals = map[string]*Rule{}
-	var first [kindCatchAll + 1]*Rule // the first NONE and catch-all rule
+	for i := range c.Listeners {
+		if err := c.prioritiseListener(&c.Listeners[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// prioritiseListener orders one listener's rules.
+func (c *Config) prioritiseListener(l *Listener) error {
+	l.literals = map[string]*Rule{}
+	var rules []*Rule
 	for i := range c.Rules {
-		r := &c.Rules[i]
+		if c.Rules[i].Listener == l.Name {
+			rules = append(rules, &c.Rules[i])
+		}
+	}
+	var first [kindCatchAll + 1]*Rule // the first NONE and catch-all rule
+	for _, r := range rules {
 		switch r.Kind {
 		case kindLiteral:
 			name := literalName(r.Source)
-			if prev := c.literals[name]; prev != nil {
+			if prev := l.literals[name]; prev != nil {
 				return fmt.Errorf("[[host]] at line %d: %s already has a rule at line %d; only one of them could ever match", r.Line, name, prev.Line)
 			}
-			c.literals[name] = r
+			l.literals[name] = r
 			continue
 		case kindWildcard:
-			if prev := c.literals["\x00"+literalName(r.Source)]; prev != nil {
+			if prev := l.literals["\x00"+literalName(r.Source)]; prev != nil {
 				return fmt.Errorf("[[host]] at line %d: pattern %s already has a rule at line %d; only one of them could ever match", r.Line, literalName(r.Source), prev.Line)
 			}
-			c.literals["\x00"+literalName(r.Source)] = r // never equals an SNI: only remembers the pattern
+			l.literals["\x00"+literalName(r.Source)] = r // never equals an SNI: only remembers the pattern
 		case kindNone, kindCatchAll:
 			if prev := first[r.Kind]; prev != nil {
 				return fmt.Errorf("[[host]] at line %d: pattern = %s can never match, the rule at line %d (%s) already matches the same clients", r.Line, r.Source, prev.Line, prev.Source)
 			}
 			first[r.Kind] = r
 		}
-		c.byPriority = append(c.byPriority, r)
+		l.byPriority = append(l.byPriority, r)
 	}
-	sort.SliceStable(c.byPriority, func(i, j int) bool {
-		a, b := c.byPriority[i], c.byPriority[j]
+	sort.SliceStable(l.byPriority, func(i, j int) bool {
+		a, b := l.byPriority[i], l.byPriority[j]
 		if a.Kind != b.Kind {
 			return a.Kind < b.Kind
 		}
@@ -305,10 +418,8 @@ func (c *Config) prioritise() error {
 	// Say so once when that differs from a top-to-bottom reading of the file:
 	// a rule that an earlier, broader rule would have caught.
 	var later []string
-	for i := range c.Rules {
-		r := &c.Rules[i]
-		for k := 0; k < i; k++ {
-			prev := &c.Rules[k]
+	for i, r := range rules {
+		for _, prev := range rules[:i] {
 			name := literalName(r.Source)
 			if prev.Kind > r.Kind && (prev.Kind == kindCatchAll || r.Kind == kindLiteral && prev.Pattern.MatchString(name)) {
 				later = append(later, fmt.Sprintf("line %d (%s, %s) wins over line %d (%s, %s)", r.Line, r.Source, r.Kind, prev.Line, prev.Source, prev.Kind))
@@ -322,8 +433,10 @@ func (c *Config) prioritise() error {
 	return nil
 }
 
-// expand replaces $N / ${N} in template with capture groups ($0 = whole
-// match, $$ = literal $). Groups that did not participate expand to "".
+// expand replaces ${N} in template with what the Nth * of the pattern
+// matched, and ${host} (or ${0}) with the whole name. Captures that matched
+// nothing expand to "". Nothing else may follow a $: a host name has no $,
+// and a bare $1 is refused so that ${1}hello can never be misread.
 func expand(template, input string, m []int) (string, error) {
 	var out strings.Builder
 	for i := 0; i < len(template); {
@@ -336,34 +449,31 @@ func expand(template, input string, m []int) (string, error) {
 			i += j
 			continue
 		}
-		i++
-		var digits string
-		switch {
-		case i < len(template) && template[i] == '$':
-			out.WriteByte('$')
-			i++
-			continue
-		case i < len(template) && template[i] == '{':
-			end := strings.IndexByte(template[i:], '}')
-			if end < 0 {
-				return "", fmt.Errorf("unterminated ${ in target")
+		if i+1 >= len(template) || template[i+1] != '{' {
+			bare := template[i+1:]
+			if k := strings.IndexFunc(bare, func(r rune) bool { return r < '0' || r > '9' }); k >= 0 {
+				bare = bare[:k]
 			}
-			digits = template[i+1 : i+end]
-			i += end + 1
-		default:
-			j := i
-			for j < len(template) && template[j] >= '0' && template[j] <= '9' {
-				j++
+			if bare != "" {
+				return "", fmt.Errorf("write ${%s}, not $%s: captures are always in braces", bare, bare)
 			}
-			digits = template[i:j]
-			i = j
+			return "", fmt.Errorf("a $ must start ${1}, ${2}, ... or ${host}")
 		}
-		n, err := strconv.Atoi(digits)
-		if err != nil || n < 0 {
-			return "", fmt.Errorf("bad group reference in %q", template)
+		end := strings.IndexByte(template[i:], '}')
+		if end < 0 {
+			return "", fmt.Errorf("unterminated ${ in %q", template)
+		}
+		name := template[i+2 : i+end]
+		i += end + 1
+		if name == "host" {
+			name = "0"
+		}
+		n, err := strconv.Atoi(name)
+		if err != nil || n < 0 || strconv.Itoa(n) != name {
+			return "", fmt.Errorf("unknown reference ${%s}: use ${1}, ${2}, ... for the *s, ${host} for the whole name", name)
 		}
 		if 2*n+1 >= len(m) {
-			return "", fmt.Errorf("group $%d does not exist in pattern", n)
+			return "", fmt.Errorf("${%d} does not exist: the pattern has only %d capture(s)", n, len(m)/2-1)
 		}
 		if m[2*n] >= 0 {
 			out.WriteString(input[m[2*n]:m[2*n+1]])
@@ -399,11 +509,14 @@ func (c *Config) trustsProxyProtocolFrom(peer net.Addr) bool {
 	return false
 }
 
-// listenAddrs is every address the proxy listens on, for display.
+// listenAddrs is every address the proxy listens on, for display: the
+// listener's for a per-listener copy, all of them otherwise.
 func listenAddrs(c *Config) string {
 	var out []string
-	for _, b := range c.Binds {
-		out = append(out, net.JoinHostPort(b, strconv.Itoa(c.Port)))
+	for i := range c.Listeners {
+		if l := &c.Listeners[i]; c.listener == nil || c.listener == l {
+			out = append(out, l.Addrs()...)
+		}
 	}
 	return strings.Join(out, ", ")
 }
@@ -412,11 +525,18 @@ func listenAddrs(c *Config) string {
 const LetsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 
 type rawRule struct {
-	cert, certDomains, certScript, upstreamTLS, upstreamVerify, upstreamSNI *string
-	proxy, proxyVersion                                                     *string
-	line                                                                    int
-	pattern, action, targetHost, tport                                      *string
+	cert, certDomains, certScript, certArgs, upstreamTLS, upstreamVerify, upstreamSNI *string
+	proxy, proxyVersion                                                               *string
+	aggSpeed, connSpeed, listener                                                     *string
+	line                                                                              int
+	pattern, action, targetHost, tport                                                *string
 }
+
+// buffer_size is clamped to this range.
+const (
+	minBufferSize = 4 << 10
+	maxBufferSize = 128 << 10
+)
 
 func ParseConfig(text string) (*Config, error) {
 	cfg := &Config{
@@ -434,14 +554,17 @@ func ParseConfig(text string) (*Config, error) {
 		DenyCacheSize:      4096,
 		ReloadInterval:     5 * time.Second,
 		StatsInterval:      60 * time.Second,
+		Splice:             true,
 		Log:                defaultLogConfig(),
 
 		CertPath:            "./certs",
+		CARoot:              "./ca",
 		ExpiryThresholdDays: 15,
 		DNSResolvers:        []string{"1.1.1.1", "8.8.8.8"},
 		AcmeDirectory:       LetsEncryptDirectory,
 	}
 	poolMaxIdle := -1
+	globalListenLine := 0 // where [global] sets bind or port
 	var raws []rawRule
 	section := ""
 
@@ -459,10 +582,14 @@ func ParseConfig(text string) (*Config, error) {
 				return nil, fail("bad section header")
 			}
 			section = strings.TrimSpace(line[2 : len(line)-2])
-			if section != "host" {
+			switch section {
+			case "host":
+				raws = append(raws, rawRule{line: lineno})
+			case "listener":
+				cfg.Listeners = append(cfg.Listeners, Listener{Line: lineno, Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}})
+			default:
 				return nil, fail("unknown section [[%s]]", section)
 			}
-			raws = append(raws, rawRule{line: lineno})
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
@@ -486,7 +613,12 @@ func ParseConfig(text string) (*Config, error) {
 			return nil, fail("expected key = value")
 		}
 		key := strings.TrimSpace(line[:eq])
-		value, err := parseValue(line[eq+1:])
+		value, err := "", error(nil)
+		if key == "cert_validate_args" {
+			value, err = arrayValue(line[eq+1:]) // a TOML array of strings, kept as JSON
+		} else {
+			value, err = parseValue(line[eq+1:])
+		}
 		if err != nil {
 			return nil, fail("%v", err)
 		}
@@ -512,24 +644,15 @@ func ParseConfig(text string) (*Config, error) {
 		case "global":
 			switch key {
 			case "bind":
-				cfg.Binds = nil
-				for _, b := range splitList(value) {
-					b = strings.Trim(b, "[]") // [::] and :: are the same thing
-					for _, seen := range cfg.Binds {
-						if seen == b {
-							return nil, fail("bind lists %s twice", b)
-						}
-					}
-					cfg.Binds = append(cfg.Binds, b)
+				if cfg.Binds, err = parseBinds(value); err != nil {
+					return nil, fail("%v", err)
 				}
-				if len(cfg.Binds) == 0 {
-					return nil, fail("bind must not be empty")
-				}
-				cfg.Bind = strings.Join(cfg.Binds, "; ")
+				cfg.Bind, globalListenLine = strings.Join(cfg.Binds, "; "), lineno
 			case "port":
 				if cfg.Port, err = parsePort(value); err != nil {
 					return nil, fail("%v", err)
 				}
+				globalListenLine = lineno
 			case "handshake_timeout":
 				err = secs(&cfg.HandshakeTimeout)
 			case "connect_timeout":
@@ -551,16 +674,8 @@ func ParseConfig(text string) (*Config, error) {
 			case "max_handshakes_per_ip":
 				err = count(&cfg.MaxHandshakesPerIP)
 			case "proxy_protocol_from":
-				cfg.ProxyProtocolFrom = nil
-				for _, item := range splitList(value) {
-					prefix, perr := netip.ParsePrefix(item)
-					if addr, aerr := netip.ParseAddr(item); aerr == nil {
-						prefix, perr = netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()), nil
-					}
-					if perr != nil {
-						return nil, fail("proxy_protocol_from: %q is not an IP address or a network (10.0.0.0/8)", item)
-					}
-					cfg.ProxyProtocolFrom = append(cfg.ProxyProtocolFrom, prefix.Masked())
+				if cfg.ProxyProtocolFrom, err = parsePrefixes(value); err != nil {
+					return nil, fail("%v", err)
 				}
 			case "allow_cache_size":
 				err = count(&cfg.AllowCacheSize)
@@ -569,15 +684,28 @@ func ParseConfig(text string) (*Config, error) {
 			case "buffer_pool_max_idle":
 				err = count(&poolMaxIdle)
 			case "buffer_size":
-				if err = count(&cfg.BufferSize); err == nil && (cfg.BufferSize < 512 || cfg.BufferSize > 1048576) {
-					err = fail("buffer_size must be 512..=1048576, got %d", cfg.BufferSize)
+				// Below 4 KiB costs syscalls; past 128 KiB a step moves no more,
+				// since a socket rarely holds more than that at once.
+				if err = count(&cfg.BufferSize); err == nil && (cfg.BufferSize < minBufferSize || cfg.BufferSize > maxBufferSize) {
+					clamped := max(minBufferSize, min(cfg.BufferSize, maxBufferSize))
+					cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("line %d: buffer_size = %d is outside %d..%d; using %d", lineno, cfg.BufferSize, minBufferSize, maxBufferSize, clamped))
+					cfg.BufferSize = clamped
 				}
 			case "short_read_delay_us":
 				var us int
 				err = count(&us)
 				cfg.ShortReadDelay = time.Duration(us) * time.Microsecond
+			case "splice":
+				if cfg.Splice, err = parseBool(value); err != nil {
+					err = fail("splice: %v", err)
+				}
 			case "cert_path":
 				cfg.CertPath = value
+			case "ca_root":
+				if value == "" {
+					return nil, fail("ca_root must not be empty")
+				}
+				cfg.CARoot = value
 			case "expiry_threshold_days":
 				if err = count(&cfg.ExpiryThresholdDays); err == nil && cfg.ExpiryThresholdDays < 1 {
 					err = fail("expiry_threshold_days must be at least 1")
@@ -658,10 +786,16 @@ func ParseConfig(text string) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
+		case "listener":
+			if err := listenerOption(&cfg.Listeners[len(cfg.Listeners)-1], key, value); err != nil {
+				return nil, fail("%v", err)
+			}
 		case "host":
 			r := &raws[len(raws)-1]
 			v := value
 			switch key {
+			case "listener":
+				r.listener = &v
 			case "pattern":
 				r.pattern = &v
 			case "action":
@@ -676,6 +810,8 @@ func ParseConfig(text string) (*Config, error) {
 				r.certDomains = &v
 			case "cert_validate_script":
 				r.certScript = &v
+			case "cert_validate_args":
+				r.certArgs = &v
 			case "upstream_tls":
 				r.upstreamTLS = &v
 			case "upstream_tls_verify":
@@ -686,6 +822,10 @@ func ParseConfig(text string) (*Config, error) {
 				r.proxy = &v
 			case "proxy_version":
 				r.proxyVersion = &v
+			case "max_aggregated_speed":
+				r.aggSpeed = &v
+			case "max_single_connection_speed":
+				r.connSpeed = &v
 			default:
 				return nil, fail("unknown key %q in [[host]]", key)
 			}
@@ -698,8 +838,8 @@ func ParseConfig(text string) (*Config, error) {
 		poolMaxIdle = 2 * cfg.MaxConnections
 	}
 	cfg.BufferPoolMaxIdle = poolMaxIdle
-	if cfg.Port == 0 {
-		return nil, fmt.Errorf("[global] port is required")
+	if err := cfg.resolveListeners(globalListenLine); err != nil {
+		return nil, err
 	}
 	for _, r := range raws {
 		fail := func(format string, a ...any) error {
@@ -709,6 +849,17 @@ func ParseConfig(text string) (*Config, error) {
 			return nil, fail("pattern is required")
 		}
 		rule := Rule{Line: r.line, Source: *r.pattern}
+		switch {
+		case r.listener != nil:
+			if cfg.Listener(*r.listener) == nil {
+				return nil, fail("listener = %s: there is no [[listener]] named %s (listeners: %s)", *r.listener, *r.listener, cfg.listenerNames())
+			}
+			rule.Listener = *r.listener
+		case len(cfg.Listeners) == 1:
+			rule.Listener = cfg.Listeners[0].Name
+		default:
+			return nil, fail("listener = <name> is required: this file has %d listeners (%s)", len(cfg.Listeners), cfg.listenerNames())
+		}
 		groups := 0
 		expr := ""
 		var err error
@@ -764,6 +915,9 @@ func ParseConfig(text string) (*Config, error) {
 		if err := proxySettings(&rule, r); err != nil {
 			return nil, fail("%v", err)
 		}
+		if err := speedSettings(&rule, r); err != nil {
+			return nil, fail("%v", err)
+		}
 		cfg.Rules = append(cfg.Rules, rule)
 	}
 	if err := cfg.prioritise(); err != nil {
@@ -786,13 +940,19 @@ func ParseConfig(text string) (*Config, error) {
 		}
 	}
 	if auto := cfg.AutoDomains(); len(auto) > 0 {
-		if cfg.Port != 443 {
-			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: the CA validates on public port 443, but this proxy listens on %d; make sure 443 is forwarded here", cfg.Port))
+		on443 := false
+		for _, l := range cfg.Listeners {
+			on443 = on443 || l.Port == 443
+		}
+		if !on443 {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: the CA validates on public port 443, but this proxy listens on %s; make sure 443 is forwarded here", listenAddrs(cfg)))
 		}
 		v4Only := true
-		for _, b := range cfg.Binds {
-			if bind, err := netip.ParseAddr(b); err != nil || !bind.Unmap().Is4() {
-				v4Only = false
+		for _, l := range cfg.Listeners {
+			for _, b := range l.Binds {
+				if bind, err := netip.ParseAddr(b); err != nil || !bind.Unmap().Is4() {
+					v4Only = false
+				}
 			}
 		}
 		if v4Only {
@@ -808,6 +968,155 @@ func ParseConfig(text string) (*Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// parseBinds reads a bind list: addresses separated by ; or ,.
+func parseBinds(value string) ([]string, error) {
+	var binds []string
+	for _, b := range splitList(value) {
+		b = strings.Trim(b, "[]") // [::] and :: are the same thing
+		if slices.Contains(binds, b) {
+			return nil, fmt.Errorf("bind lists %s twice", b)
+		}
+		binds = append(binds, b)
+	}
+	if len(binds) == 0 {
+		return nil, fmt.Errorf("bind must not be empty")
+	}
+	return binds, nil
+}
+
+// parsePrefixes reads proxy_protocol_from: addresses or networks.
+func parsePrefixes(value string) ([]netip.Prefix, error) {
+	out := []netip.Prefix{}
+	for _, item := range splitList(value) {
+		prefix, perr := netip.ParsePrefix(item)
+		if addr, aerr := netip.ParseAddr(item); aerr == nil {
+			prefix, perr = netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()), nil
+		}
+		if perr != nil {
+			return nil, fmt.Errorf("proxy_protocol_from: %q is not an IP address or a network (10.0.0.0/8)", item)
+		}
+		out = append(out, prefix.Masked())
+	}
+	return out, nil
+}
+
+// listenerName: letters, digits, space and -_@#~()[]<>"' (1-64, no space at
+// either end). The console quotes names that need it when it writes them.
+var listenerName = regexp.MustCompile(`^[A-Za-z0-9_@#~()\[\]<>"'-]([A-Za-z0-9 _@#~()\[\]<>"'-]{0,62}[A-Za-z0-9_@#~()\[\]<>"'-])?$`)
+
+// listenerOption applies one key of a [[listener]] section.
+func listenerOption(l *Listener, key, value string) error {
+	secs := func(dst **time.Duration) error {
+		n, err := strconv.ParseUint(value, 10, 31)
+		if err != nil {
+			return fmt.Errorf("%s: expected a number of seconds, got %q", key, value)
+		}
+		d := time.Duration(n) * time.Second
+		*dst = &d
+		return nil
+	}
+	var err error
+	switch key {
+	case "name":
+		if !listenerName.MatchString(value) {
+			return fmt.Errorf("name must be 1-64 letters, digits, spaces or -_@#~()[]<>\"' (no space at either end), got %q", value)
+		}
+		l.Name = value
+	case "bind":
+		if l.Binds, err = parseBinds(value); err == nil {
+			l.Bind = strings.Join(l.Binds, "; ")
+		}
+	case "port":
+		l.Port, err = parsePort(value)
+	case "proxy_protocol_from":
+		var p []netip.Prefix
+		if p, err = parsePrefixes(value); err == nil {
+			l.ProxyProtocolFrom = &p
+		}
+	case "max_connections":
+		var n uint64
+		if n, err = strconv.ParseUint(value, 10, 31); err != nil {
+			err = fmt.Errorf("max_connections: expected a number, got %q", value)
+		}
+		l.MaxConnections = int(n)
+	case "handshake_timeout":
+		err = secs(&l.HandshakeTimeout)
+	case "idle_timeout":
+		err = secs(&l.IdleTimeout)
+	case "half_close_timeout":
+		err = secs(&l.HalfCloseTimeout)
+	case "max_aggregated_speed", "max_single_connection_speed":
+		dst := &l.MaxAggregatedSpeed
+		if key == "max_single_connection_speed" {
+			dst = &l.MaxSingleConnectionSpeed
+		}
+		if *dst, err = parseRate(value); err != nil {
+			err = fmt.Errorf("%s: %v", key, err)
+		}
+	default:
+		return fmt.Errorf("unknown key %q in [[listener]]", key)
+	}
+	return err
+}
+
+func (c *Config) listenerNames() string {
+	var names []string
+	for _, l := range c.Listeners {
+		names = append(names, l.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// resolveListeners checks the [[listener]] sections, or makes the implicit
+// one from [global] bind and port when there are none.
+func (c *Config) resolveListeners(globalListenLine int) error {
+	if len(c.Listeners) == 0 {
+		if c.Port == 0 {
+			return fmt.Errorf("[global] port is required (or define [[listener]] sections)")
+		}
+		c.Listeners = []Listener{{Name: "default", Bind: c.Bind, Binds: c.Binds, Port: c.Port}}
+		return nil
+	}
+	if globalListenLine != 0 {
+		return fmt.Errorf("line %d: with [[listener]] sections, bind and port belong in them, not in [global]", globalListenLine)
+	}
+	for i := range c.Listeners {
+		l := &c.Listeners[i]
+		fail := func(format string, a ...any) error {
+			return fmt.Errorf("[[listener]] at line %d: %s", l.Line, fmt.Sprintf(format, a...))
+		}
+		if l.Name == "" {
+			return fail("name is required")
+		}
+		if l.Port == 0 {
+			return fail("port is required")
+		}
+		for _, prev := range c.Listeners[:i] {
+			if strings.EqualFold(prev.Name, l.Name) {
+				return fail("the name %s is already used at line %d (names are compared ignoring case)", l.Name, prev.Line)
+			}
+			if prev.Port != l.Port {
+				continue
+			}
+			for _, a := range l.Binds {
+				for _, b := range prev.Binds {
+					if a == b || isWildcard(a) || isWildcard(b) {
+						return fail("%s port %d overlaps %s (line %d) on %s", a, l.Port, prev.Name, prev.Line, b)
+					}
+				}
+			}
+		}
+	}
+	// The first listener's values stand for "the" bind and port in messages.
+	c.Bind, c.Binds, c.Port = c.Listeners[0].Bind, c.Listeners[0].Binds, c.Listeners[0].Port
+	return nil
+}
+
+func isWildcard(bind string) bool {
+	a, err := netip.ParseAddr(bind)
+	return err == nil && a.IsUnspecified()
 }
 
 // parseSize reads a byte count: plain, or with a K/M/G suffix (powers of
@@ -858,15 +1167,38 @@ func proxySettings(rule *Rule, r rawRule) error {
 	return nil
 }
 
+// speedSettings validates and applies max_aggregated_speed and
+// max_single_connection_speed.
+func speedSettings(rule *Rule, r rawRule) error {
+	for _, kv := range []struct {
+		name string
+		v    *string
+		dst  *float64
+	}{{"max_aggregated_speed", r.aggSpeed, &rule.MaxAggregatedSpeed}, {"max_single_connection_speed", r.connSpeed, &rule.MaxSingleConnectionSpeed}} {
+		if kv.v == nil {
+			continue
+		}
+		if !rule.Allow {
+			return fmt.Errorf("%s makes no sense on a deny rule", kv.name)
+		}
+		rate, err := parseRate(*kv.v)
+		if err != nil {
+			return fmt.Errorf("%s: %v", kv.name, err)
+		}
+		*kv.dst = rate
+	}
+	return nil
+}
+
 // tlsSettings validates and applies cert / cert_domains / upstream_tls*.
 func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 	if r.cert == nil || *r.cert == "" {
 		for _, kv := range []struct {
 			name string
 			v    *string
-		}{{"cert_domains", r.certDomains}, {"cert_validate_script", r.certScript}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify}, {"upstream_sni", r.upstreamSNI}} {
+		}{{"cert_domains", r.certDomains}, {"cert_validate_script", r.certScript}, {"cert_validate_args", r.certArgs}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify}, {"upstream_sni", r.upstreamSNI}} {
 			if kv.v != nil {
-				return fmt.Errorf("%s only applies when the rule terminates TLS (set cert = auto or a directory)", kv.name)
+				return fmt.Errorf("%s only applies when the rule terminates TLS (set cert = auto or cert = local-ca)", kv.name)
 			}
 		}
 		return nil
@@ -875,6 +1207,10 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 		return fmt.Errorf("cert makes no sense on a deny rule")
 	}
 	rule.Cert = *r.cert
+	if _, local := localCARef(rule.Cert); !local && !strings.EqualFold(rule.Cert, "auto") {
+		return fmt.Errorf("cert = %s: a certificate directory is no longer supported. Use cert = auto (ACME), or cert = local-ca: "+
+			"import the CA that issued your certificate (its certificate and key) on the console's CAs page, and the proxy issues per name", rule.Cert)
+	}
 	rule.UpstreamTLS, rule.UpstreamTLSVerify = true, true
 	var err error
 	if r.upstreamTLS != nil {
@@ -895,12 +1231,18 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 			return fmt.Errorf("upstream_sni only applies with upstream_tls = true")
 		}
 	}
+	if id, ok := localCARef(rule.Cert); ok {
+		return localCASettings(rule, id, &r)
+	}
 	if !strings.EqualFold(rule.Cert, "auto") {
 		if r.certDomains != nil {
 			return fmt.Errorf("cert_domains only applies to cert = auto")
 		}
 		if r.certScript != nil {
 			return fmt.Errorf("cert_validate_script only applies to cert = auto")
+		}
+		if r.certArgs != nil {
+			return fmt.Errorf("cert_validate_args only applies to cert = auto")
 		}
 		return nil
 	}
@@ -919,6 +1261,26 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 	if r.certScript != nil {
 		if rule.CertValidateScript = *r.certScript; rule.CertValidateScript == "" {
 			return fmt.Errorf("cert_validate_script must not be empty")
+		}
+	}
+	rule.CertValidateArgs = []string{"${host}"}
+	if r.certArgs != nil {
+		if r.certScript == nil {
+			return fmt.Errorf("cert_validate_args needs a cert_validate_script")
+		}
+		json.Unmarshal([]byte(*r.certArgs), &rule.CertValidateArgs) // arrayValue made it
+		if len(rule.CertValidateArgs) == 0 {
+			return fmt.Errorf("cert_validate_args needs at least one argument, e.g. [\"${host}\"]: the script must be told the name")
+		}
+		groups := 0
+		if rule.Pattern != nil {
+			groups = rule.Pattern.NumSubexp()
+		}
+		probe := make([]int, 2*(groups+1))
+		for _, a := range rule.CertValidateArgs {
+			if _, err := expand(a, "", probe); err != nil {
+				return fmt.Errorf("cert_validate_args: %q: %v", a, err)
+			}
 		}
 	}
 	if len(rule.CertDomains) == 0 && rule.CertValidateScript == "" {
@@ -1040,11 +1402,141 @@ func parseValue(v string) (string, error) {
 	return strings.TrimSpace(v), nil
 }
 
+// localCARef reads cert = local-ca or local-ca:caNNN, giving the CA's id.
+func localCARef(cert string) (id string, ok bool) {
+	rest, ok := strings.CutPrefix(strings.ToLower(cert), "local-ca")
+	switch {
+	case !ok:
+		return "", false
+	case rest == "":
+		return "ca001", true
+	case strings.HasPrefix(rest, ":"):
+		return rest[1:], true
+	}
+	return "", false
+}
+
+// localCASettings checks a cert = local-ca rule. cert_domains, if given,
+// limits which names get a certificate; otherwise any name the rule routes
+// does.
+func localCASettings(rule *Rule, id string, r *rawRule) error {
+	if !caIDPattern.MatchString(id) {
+		return fmt.Errorf("cert = local-ca:%s: a CA is named ca001, ca002, ... (three digits)", id)
+	}
+	rule.Cert = "local-ca:" + id
+	if rule.NoSNI {
+		return fmt.Errorf("cert = local-ca needs a host name to issue for; a pattern = NONE rule can only use cert = <directory>")
+	}
+	if r.certScript != nil || r.certArgs != nil {
+		return fmt.Errorf("cert_validate_script only applies to cert = auto; with local-ca, cert_domains limits the names")
+	}
+	if r.certDomains != nil {
+		// Host names or globs, the way patterns are written: *.dev.abc.com
+		// (a * never crosses a dot), several separated by , or ;.
+		rule.CertDomains = splitList(strings.ToLower(*r.certDomains))
+		if len(rule.CertDomains) == 0 {
+			return fmt.Errorf("cert_domains is empty: leave it out to issue for every name the rule matches")
+		}
+		for _, d := range rule.CertDomains {
+			kind, expr, _, err := classify(d)
+			if err != nil || (kind != kindLiteral && kind != kindWildcard) {
+				return fmt.Errorf("cert_domains: %q is not a host name or a glob like *.dev.example.com", d)
+			}
+			if kind == kindLiteral && !rule.Pattern.MatchString(d) {
+				return fmt.Errorf("cert_domains: %q does not match this rule's pattern %q", d, rule.Source)
+			}
+			rule.certNames = append(rule.certNames, regexp.MustCompile("^(?:"+expr+")$"))
+		}
+	}
+	return nil
+}
+
+// LocalCAIssues reports whether a cert = local-ca rule issues for name: any
+// name the rule routes, or only those cert_domains matches when it is set.
+func (r *Rule) LocalCAIssues(name string) bool {
+	if len(r.certNames) == 0 {
+		return true
+	}
+	for _, re := range r.certNames {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// LocalCA is the CA id of a cert = local-ca rule, "" for any other rule.
+func (r *Rule) LocalCA() string {
+	id, _ := strings.CutPrefix(r.Cert, "local-ca:")
+	if id == r.Cert {
+		return ""
+	}
+	return id
+}
+
+// arrayValue reads a TOML array of strings, ["a", 'b'], with an optional
+// comment after it, and returns it as a JSON array.
+func arrayValue(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(v, "[") {
+		return "", fmt.Errorf(`expected an array of strings, like ["${host}"] or ["--name", "${1}"]`)
+	}
+	var out []string
+	rest := strings.TrimSpace(v[1:])
+	for {
+		if strings.HasPrefix(rest, "]") {
+			rest = strings.TrimSpace(rest[1:])
+			break
+		}
+		if rest == "" || (rest[0] != '"' && rest[0] != '\'') {
+			return "", fmt.Errorf(`expected an array of quoted strings, like ["${host}"] or ["--name", "${1}"]`)
+		}
+		// One string: find its end the way parseValue reads it.
+		end := -1
+		if rest[0] == '\'' {
+			if k := strings.IndexByte(rest[1:], '\''); k >= 0 {
+				end = k + 2
+			}
+		} else {
+			for i := 1; i < len(rest); i++ {
+				if rest[i] == '\\' {
+					i++
+				} else if rest[i] == '"' {
+					end = i + 1
+					break
+				}
+			}
+		}
+		if end < 0 {
+			return "", fmt.Errorf("unterminated string in array")
+		}
+		s, err := parseValue(rest[:end])
+		if err != nil {
+			return "", err
+		}
+		out = append(out, s)
+		rest = strings.TrimSpace(rest[end:])
+		if strings.HasPrefix(rest, ",") {
+			rest = strings.TrimSpace(rest[1:])
+		} else if !strings.HasPrefix(rest, "]") {
+			return "", fmt.Errorf("expected , or ] in array")
+		}
+	}
+	if rest != "" && !strings.HasPrefix(rest, "#") {
+		return "", fmt.Errorf("unexpected text after array: %q", rest)
+	}
+	if out == nil {
+		out = []string{}
+	}
+	data, _ := json.Marshal(out)
+	return string(data), nil
+}
+
 // Describe summarises the settings for the startup / reload log line.
 func (c *Config) Describe() string {
-	return fmt.Sprintf("%d rules (max_connections=%d, idle_timeout=%ds, half_close_timeout=%ds, buffer_size=%d, buffer_pool_max_idle=%d, allow_cache_size=%d, deny_cache_size=%d, short_read_delay_us=%d)",
-		len(c.Rules), c.MaxConnections, int(c.IdleTimeout.Seconds()), int(c.HalfCloseTimeout.Seconds()),
-		c.BufferSize, c.BufferPoolMaxIdle, c.AllowCacheSize, c.DenyCacheSize, c.ShortReadDelay.Microseconds())
+	return fmt.Sprintf("%d listener(s), %d rules (max_connections=%d, idle_timeout=%ds, half_close_timeout=%ds, buffer_size=%d, buffer_pool_max_idle=%d, allow_cache_size=%d, deny_cache_size=%d, short_read_delay_us=%d, splice=%t)",
+		len(c.Listeners), len(c.Rules), c.MaxConnections, int(c.IdleTimeout.Seconds()), int(c.HalfCloseTimeout.Seconds()),
+		c.BufferSize, c.BufferPoolMaxIdle, c.AllowCacheSize, c.DenyCacheSize, c.ShortReadDelay.Microseconds(), c.Splice)
 }
 
 // AutoDomains lists every name that needs an automatic certificate.

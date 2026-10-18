@@ -19,7 +19,7 @@ import (
 
 const (
 	dnsCacheTTL      = 5 * time.Second // short: a changed record is picked up almost at once
-	dnsCacheSize     = 1024            // names can come from clients ($1 in target_host)
+	dnsCacheSize     = 1024            // names can come from clients (${1} in target_host)
 	happyEyeballsLag = 300 * time.Millisecond
 )
 
@@ -30,7 +30,7 @@ type dnsEntry struct {
 
 // targetDialer resolves (with the cache) and connects.
 type targetDialer struct {
-	cache *lru[dnsEntry]
+	cache *clock[dnsEntry]
 	// Overridable in tests.
 	lookup func(ctx context.Context, host string) ([]netip.Addr, error)
 	dial   func(ctx context.Context, addr string) (net.Conn, error)
@@ -38,7 +38,7 @@ type targetDialer struct {
 
 func newTargetDialer() *targetDialer {
 	return &targetDialer{
-		cache: newLRU[dnsEntry](dnsCacheSize),
+		cache: newClock[dnsEntry](dnsCacheSize),
 		lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},

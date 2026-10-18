@@ -35,6 +35,12 @@ type Runtime struct {
 	pool             *BufferPool
 	cache            *RouteCache
 	upstreamSessions map[*Rule]tls.ClientSessionCache
+	limits           map[*Rule]*ruleLimits  // max_aggregated_speed buckets
+	limitsBySource   map[string]*ruleLimits // the same, for the next reload to keep
+	// Per listener: the configuration its connections run with, and its
+	// max_aggregated_speed buckets.
+	byListener     map[string]*Config
+	listenerLimits map[string]*ruleLimits
 }
 
 func newRuntime(cfg *Config, prev *Runtime) *Runtime {
@@ -43,6 +49,30 @@ func newRuntime(cfg *Config, prev *Runtime) *Runtime {
 		if cfg.Rules[i].Terminates() && cfg.Rules[i].UpstreamTLS {
 			rt.upstreamSessions[&cfg.Rules[i]] = tls.NewLRUClientSessionCache(64)
 		}
+	}
+	var prevLimits map[string]*ruleLimits
+	if prev != nil {
+		prevLimits = prev.limitsBySource
+	}
+	rt.limits, rt.limitsBySource = newRuleLimits(cfg, prevLimits)
+	rt.byListener, rt.listenerLimits = map[string]*Config{}, map[string]*ruleLimits{}
+	for i := range cfg.Listeners {
+		l := &cfg.Listeners[i]
+		rt.byListener[l.Name] = cfg.ForListener(l)
+		if l.MaxAggregatedSpeed == 0 {
+			continue
+		}
+		var keep *ruleLimits
+		if prev != nil {
+			keep = prev.listenerLimits[l.Name]
+		}
+		if keep == nil || keep.rate != l.MaxAggregatedSpeed {
+			keep = &ruleLimits{rate: l.MaxAggregatedSpeed}
+			for d := range keep.dir {
+				keep.dir[d] = newLimiter(l.MaxAggregatedSpeed, cfg.BufferSize)
+			}
+		}
+		rt.listenerLimits[l.Name] = keep
 	}
 	if prev != nil && prev.cfg.BufferSize == cfg.BufferSize && prev.cfg.BufferPoolMaxIdle == cfg.BufferPoolMaxIdle {
 		rt.pool = prev.pool
@@ -63,49 +93,118 @@ type Server struct {
 	certs   *CertManager
 	nextID  atomic.Uint64
 
-	configPath string        // "" when the config did not come from a file
-	reloadNow  chan struct{} // poked by the console after a save
+	configPath string               // "" when the config did not come from a file
+	reloadNow  chan chan<- []string // poked by the console after a save; the reply says what failed
 	console    *Console
+
+	// Rules stopped from the console, by Rule.Key: routed as if absent. Kept
+	// in memory only, across reloads; a restart starts them all again.
+	stoppedMu sync.Mutex
+	stopped   atomic.Pointer[map[string]bool]
+
+	// The ports, by listener name (see listeners.go).
+	listenersMu      sync.Mutex
+	listeners        map[string]*liveListener
+	stoppedListeners map[string]bool // stopped from the console, in memory only
+	serving          bool            // start-up is over: log each listener that opens
 
 	dialer *targetDialer // resolves targets (cached) and connects
 
 	// Connections per source address that have not sent their ClientHello yet.
-	handshakeMu sync.Mutex
-	handshakes  map[netip.Addr]int
+	handshakes *sourceCounts // per source, still sending a ClientHello
 
 	rejectLog, handshakeLog rateLimitedLog
 
-	ticketMu      sync.Mutex
-	ticketKeys    [][32]byte
-	ticketRotated time.Time
+	tickets atomic.Pointer[ticketKeys] // replaced whole when rotated
 }
 
 // sessionTicketKeys returns a stable current key and yesterday's key.  TLS
 // configs are deliberately built per connection (ALPN differs), so without
 // this shared server state every ticket would be unusable on the next one.
+// stoppedRules is the current set of stopped rule keys (never modified).
+func (s *Server) stoppedRules() map[string]bool {
+	if m := s.stopped.Load(); m != nil {
+		return *m
+	}
+	return nil
+}
+
+// setRuleStopped stops or starts a rule. Stopping closes its connections.
+// Either way the route cache starts empty, so no decision made under the
+// old set survives.
+func (s *Server) setRuleStopped(key string, stop bool) {
+	s.stoppedMu.Lock()
+	next := map[string]bool{}
+	for k := range s.stoppedRules() {
+		next[k] = true
+	}
+	if stop {
+		next[key] = true
+	} else {
+		delete(next, key)
+	}
+	s.stopped.Store(&next)
+	s.stoppedMu.Unlock()
+	for {
+		rt := s.runtime.Load()
+		fresh := *rt
+		fresh.cache = NewRouteCache(rt.cfg.AllowCacheSize, rt.cfg.DenyCacheSize)
+		if s.runtime.CompareAndSwap(rt, &fresh) {
+			break // else a reload just swapped in a runtime (with empty caches); redo on that one
+		}
+	}
+	if !stop {
+		return
+	}
+	var victims []*ConnState
+	s.stats.conns.Range(func(c *ConnState) bool {
+		c.mu.Lock()
+		if c.RuleKey == key {
+			victims = append(victims, c)
+		}
+		c.mu.Unlock()
+		return true
+	})
+	for _, c := range victims {
+		c.stop("rule stopped from the console; closed by proxy")
+	}
+}
+
+// ticketKeys are the TLS session ticket keys, newest first: never changed
+// once published, so handshakes read them without a lock.
+type ticketKeys struct {
+	keys    [][32]byte
+	rotated time.Time
+}
+
 func (s *Server) sessionTicketKeys() [][32]byte {
-	s.ticketMu.Lock()
-	defer s.ticketMu.Unlock()
-	if len(s.ticketKeys) == 0 || time.Since(s.ticketRotated) >= 24*time.Hour {
+	for {
+		old := s.tickets.Load()
+		if old != nil && time.Since(old.rotated) < 24*time.Hour {
+			return old.keys
+		}
 		var key [32]byte
 		if _, err := rand.Read(key[:]); err != nil {
 			panic(fmt.Sprintf("TLS ticket key randomness: %v", err))
 		}
-		s.ticketKeys = append([][32]byte{key}, s.ticketKeys...)
-		if len(s.ticketKeys) > 2 {
-			s.ticketKeys = s.ticketKeys[:2]
+		next := &ticketKeys{keys: [][32]byte{key}, rotated: time.Now()}
+		if old != nil {
+			next.keys = append(next.keys, old.keys[0]) // the previous key still decrypts
 		}
-		s.ticketRotated = time.Now()
+		if s.tickets.CompareAndSwap(old, next) {
+			return next.keys
+		}
+		// Another handshake rotated first: use its keys.
 	}
-	return append([][32]byte(nil), s.ticketKeys...)
 }
 
 // NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan struct{}, 1), dialer: newTargetDialer()}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts()}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}
+	s.stats.prepare(cfg)
 	s.runtime.Store(newRuntime(cfg, nil))
 	return s, nil
 }
@@ -113,21 +212,18 @@ func NewServer(cfg *Config) (*Server, error) {
 // rateLimitedLog writes at most one line a second and says how many it left
 // out, so a flood cannot fill the log or slow down whoever is logging.
 type rateLimitedLog struct {
-	mu         sync.Mutex
-	last       time.Time
-	suppressed int
+	last       atomic.Int64 // unix nanoseconds of the last line written
+	suppressed atomic.Int64
 }
 
 func (r *rateLimitedLog) logf(format string, args ...any) {
-	r.mu.Lock()
-	if time.Since(r.last) < time.Second {
-		r.suppressed++
-		r.mu.Unlock()
+	now := time.Now().UnixNano()
+	last := r.last.Load()
+	if now-last < int64(time.Second) || !r.last.CompareAndSwap(last, now) {
+		r.suppressed.Add(1) // within the second, or another caller just took it
 		return
 	}
-	n := r.suppressed
-	r.last, r.suppressed = time.Now(), 0
-	r.mu.Unlock()
+	n := r.suppressed.Swap(0)
 	if n > 0 {
 		format += fmt.Sprintf(" (and %d more like this in the last second, not logged)", n)
 	}
@@ -153,26 +249,19 @@ func sourceKey(addr net.Addr) netip.Addr {
 // reports false when its source already has max_handshakes_per_ip of them:
 // slots cost a client nothing to hold for handshake_timeout, so without this
 // one address could occupy all of max_connections with idle sockets.
-func (s *Server) beginHandshake(key netip.Addr, limit int) bool {
-	s.handshakeMu.Lock()
-	defer s.handshakeMu.Unlock()
-	if limit > 0 && s.handshakes[key] >= limit {
-		return false
+//
+// It takes no lock: the count is an atomic per source (see sourceCounts). It
+// returns the counter to hand to endHandshake, nil when refused.
+func (s *Server) beginHandshake(key netip.Addr, limit int) *atomic.Int32 {
+	n := s.handshakes.counter(key)
+	if v := n.Add(1); limit > 0 && int(v) > limit {
+		n.Add(-1)
+		return nil
 	}
-	if s.handshakes == nil {
-		s.handshakes = map[netip.Addr]int{}
-	}
-	s.handshakes[key]++
-	return true
+	return n
 }
 
-func (s *Server) endHandshake(key netip.Addr) {
-	s.handshakeMu.Lock()
-	defer s.handshakeMu.Unlock()
-	if s.handshakes[key]--; s.handshakes[key] <= 0 {
-		delete(s.handshakes, key)
-	}
-}
+func (s *Server) endHandshake(n *atomic.Int32) { n.Add(-1) }
 
 // Run binds to the configured address and serves forever.
 func Run(cfg *Config, path string) error {
@@ -180,20 +269,11 @@ func Run(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	var listeners []net.Listener
-	for _, bind := range cfg.Binds {
-		network := listenNetwork(bind)
-		if len(cfg.Binds) > 1 && network == "tcp" {
-			network = "tcp6" // several addresses: each listens for its own family only
-		}
-		l, err := net.Listen(network, net.JoinHostPort(bind, strconv.Itoa(cfg.Port)))
-		if err != nil {
-			for _, open := range listeners {
-				open.Close()
-			}
-			return err
-		}
-		listeners = append(listeners, l)
+	// A listener whose port cannot be opened is reported (and shown in the
+	// console, where Start retries it); the proxy refuses to start only when
+	// none can open.
+	if failed := srv.syncListeners(cfg); len(failed) == len(cfg.Listeners) {
+		return errors.New(strings.Join(failed, "; "))
 	}
 	// From here on the streams go to their log files, if configured.
 	if err := ConfigureLogging(cfg.Log); err != nil {
@@ -201,19 +281,46 @@ func Run(cfg *Config, path string) error {
 	}
 	StartAsyncLogging() // from here on nobody waits for the log to be written
 	defer FlushLogs()
-	return srv.Serve(listeners[0], path, listeners[1:]...)
+	return srv.Serve(nil, path)
 }
 
-// Serve accepts connections on l (and on any further listeners: one per bind
-// address). If path is non-empty the config file is watched and reloaded when
-// it changes.
+// Serve runs the proxy on the listeners Run opened, or, when l is given, on
+// l (and more) as the first configured listener, whatever its bind and port
+// say (tests listen on a free port). If path is non-empty the config file is
+// watched and reloaded when it changes. With l, it returns when l is closed.
 func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error {
 	rt := s.runtime.Load()
-	addrs := l.Addr().String()
-	for _, extra := range more {
-		addrs += ", " + extra.Addr().String()
+	if l != nil {
+		first := &rt.cfg.Listeners[0]
+		live := &liveListener{name: first.Name, lns: append([]net.Listener{l}, more...), adopted: true}
+		for _, ln := range live.lns {
+			live.addrs = append(live.addrs, ln.Addr().String())
+		}
+		s.listenersMu.Lock()
+		s.listeners = map[string]*liveListener{first.Name: live}
+		s.listenersMu.Unlock()
+		if len(rt.cfg.Listeners) > 1 {
+			if failed := s.syncListeners(rt.cfg); failed != nil {
+				return errors.New(failed[0])
+			}
+		}
 	}
-	logf("listening on %s with %s", addrs, rt.cfg.Describe())
+	s.listenersMu.Lock()
+	var addrs, closed []string
+	for _, lc := range rt.cfg.Listeners {
+		if live := s.listeners[lc.Name]; live != nil && live.open() {
+			addrs = append(addrs, lc.Name+" "+strings.Join(live.addrs, ", "))
+		} else {
+			closed = append(closed, lc.Name)
+		}
+	}
+	s.serving = true
+	s.listenersMu.Unlock()
+	notOpen := ""
+	if closed != nil {
+		notOpen = " (not open: " + strings.Join(closed, ", ") + ")"
+	}
+	logf("listening on %s%s with %s", strings.Join(addrs, "; "), notOpen, rt.cfg.Describe())
 	for _, w := range rt.cfg.Warnings {
 		errorf("config: %s", w)
 	}
@@ -241,14 +348,18 @@ func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error 
 		}
 	}
 	watchSignals(s)
-	for _, extra := range more {
-		go s.acceptLoop(extra)
+	if l == nil {
+		select {} // the listeners' accept loops do the work
 	}
-	return s.acceptLoop(l)
+	name := rt.cfg.Listeners[0].Name
+	for _, extra := range more {
+		go s.acceptLoop(extra, name)
+	}
+	return s.acceptLoop(l, name)
 }
 
-// acceptLoop serves one listener until it is closed.
-func (s *Server) acceptLoop(l net.Listener) error {
+// acceptLoop serves one socket of the named listener until it is closed.
+func (s *Server) acceptLoop(l net.Listener, name string) error {
 	for {
 		sock, err := l.Accept()
 		if err != nil {
@@ -260,20 +371,39 @@ func (s *Server) acceptLoop(l net.Listener) error {
 			continue
 		}
 		rt := s.runtime.Load()
+		cfg := rt.byListener[name]
+		if cfg == nil {
+			sock.Close() // removed by a reload an instant ago; its socket is closing
+			continue
+		}
+		ls := s.stats.listener(name)
 		id := s.nextID.Add(1)
 		active := s.stats.Active.Add(1)
-		if int(active) > rt.cfg.MaxConnections {
-			s.rejectLog.logf("[#%d] rejected %s: too many connections (%d > %d)", id, sock.RemoteAddr(), active, rt.cfg.MaxConnections)
+		mine := ls.Active.Add(1)
+		reject := ""
+		switch lim := cfg.listener.MaxConnections; {
+		case int(active) > rt.cfg.MaxConnections:
+			reject = fmt.Sprintf("too many connections (%d > %d)", active, rt.cfg.MaxConnections)
+		case lim > 0 && int(mine) > lim:
+			reject = fmt.Sprintf("too many connections on listener %s (%d > %d)", name, mine, lim)
+		}
+		if reject != "" {
+			s.rejectLog.logf("[#%d] rejected %s: %s", id, sock.RemoteAddr(), reject)
+			s.stats.flows.refused(id, name, time.Now(), sock.RemoteAddr(), sock.LocalAddr(), reject)
 			s.stats.Active.Add(-1)
+			ls.Active.Add(-1)
 			s.stats.Rejected.Add(1)
+			ls.Rejected.Add(1)
 			sock.Close()
 			continue
 		}
+		ls.Accepted.Add(1)
 		s.stats.GoroutinesStarted.Add(1)
 		go func() {
 			defer s.stats.GoroutinesFinished.Add(1)
 			defer s.stats.Active.Add(-1)
-			s.handle(id, sock, int(active), rt)
+			defer ls.Active.Add(-1)
+			s.handle(id, sock, int(active), rt, cfg)
 		}()
 	}
 }
@@ -303,63 +433,73 @@ func (s *Server) watchConfig(path string) {
 		if interval := s.runtime.Load().cfg.ReloadInterval; interval > 0 {
 			tick = time.After(interval)
 		}
+		var reply chan<- []string
 		select {
 		case <-tick:
-		case <-s.reloadNow:
+		case reply = <-s.reloadNow:
 		}
-		text, err := os.ReadFile(path)
-		if err != nil {
-			if haveLast {
-				errorf("config reload: cannot read %s: %v; keeping current config", path, err)
-				haveLast = false
-			}
-			continue
+		problems := s.reload(path, &lastHash, &haveLast)
+		if reply != nil {
+			reply <- problems
 		}
-		hash := fileHash(text)
-		if haveLast && hash == lastHash {
-			continue
-		}
-		lastHash, haveLast = hash, true
-		cfg, err := ParseConfig(string(text))
-		if err != nil {
-			errorf("config reload: %s is invalid, keeping current config: %v", path, err)
-			continue
-		}
-		old := s.runtime.Load()
-		if cfg.Bind != old.cfg.Bind || cfg.Port != old.cfg.Port {
-			errorf("config reload: bind/port change to %s:%d needs a restart; still listening on %s:%d",
-				cfg.Bind, cfg.Port, old.cfg.Bind, old.cfg.Port)
-		}
-		if err := s.certs.Apply(cfg); err != nil {
-			errorf("config reload: %s rejected, keeping current config: %v", path, err)
-			continue
-		}
-		if s.securePassword(path, cfg) {
-			lastHash = cfg.sourceHash // only our exact rewrite, never a subsequent editor save
-		}
-		if s.console != nil {
-			s.console.update(cfg.Console)
-			if cfg.Console == nil {
-				errorf("config reload: [console] was removed but stopping it needs a restart")
-			}
-		} else if cfg.Console != nil {
-			errorf("config reload: [console] was added but needs a restart")
-		}
-		for _, w := range cfg.Warnings {
-			errorf("config: %s", w)
-		}
-		if err := ConfigureLogging(cfg.Log); err != nil {
-			errorf("config reload: %v; logging is unchanged", err)
-		}
-		rt := newRuntime(cfg, old)
-		s.runtime.Store(rt)
-		extra := ""
-		if rt.pool != old.pool {
-			extra = ", buffer pool replaced (old buffers freed)"
-		}
-		logf("config reloaded from %s: %s; route caches cleared%s; existing connections keep their settings",
-			path, cfg.Describe(), extra)
 	}
+}
+
+// reload applies the config file if its content (hash) changed since
+// lastHash. It returns what went wrong: why the file was not applied, or the
+// listeners that could not open their ports.
+func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string {
+	text, err := os.ReadFile(path)
+	if err != nil {
+		if *haveLast {
+			errorf("config reload: cannot read %s: %v; keeping current config", path, err)
+			*haveLast = false
+		}
+		return []string{fmt.Sprintf("cannot read %s: %v; the running configuration is unchanged", path, err)}
+	}
+	hash := fileHash(text)
+	if *haveLast && hash == *lastHash {
+		return nil
+	}
+	*lastHash, *haveLast = hash, true
+	cfg, err := ParseConfig(string(text))
+	if err != nil {
+		errorf("config reload: %s is invalid, keeping current config: %v", path, err)
+		return []string{fmt.Sprintf("the file is invalid, so the running configuration is unchanged: %v", err)}
+	}
+	old := s.runtime.Load()
+	if err := s.certs.Apply(cfg); err != nil {
+		errorf("config reload: %s rejected, keeping current config: %v", path, err)
+		return []string{fmt.Sprintf("the file was not applied, the running configuration is unchanged: %v", err)}
+	}
+	if s.securePassword(path, cfg) {
+		*lastHash = cfg.sourceHash // only our exact rewrite, never a subsequent editor save
+	}
+	if s.console != nil {
+		s.console.update(cfg.Console)
+		if cfg.Console == nil {
+			errorf("config reload: [console] was removed but stopping it needs a restart")
+		}
+	} else if cfg.Console != nil {
+		errorf("config reload: [console] was added but needs a restart")
+	}
+	for _, w := range cfg.Warnings {
+		errorf("config: %s", w)
+	}
+	if err := ConfigureLogging(cfg.Log); err != nil {
+		errorf("config reload: %v; logging is unchanged", err)
+	}
+	rt := newRuntime(cfg, old)
+	s.stats.prepare(cfg) // before it goes live: connections only read these counters
+	s.runtime.Store(rt)
+	problems := s.syncListeners(cfg) // after the store: a new listener's connections need its config
+	extra := ""
+	if rt.pool != old.pool {
+		extra = ", buffer pool replaced (old buffers freed)"
+	}
+	logf("config reloaded from %s: %s; route caches cleared%s; existing connections keep their settings",
+		path, cfg.Describe(), extra)
+	return problems
 }
 
 func isTimeout(err error) bool {
@@ -451,21 +591,24 @@ func readHello(client net.Conn, buf []byte) (info helloInfo, data []byte, err er
 	}
 }
 
-func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
+// handle serves one accepted connection with cfg, its listener's
+// configuration.
+func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *Config) {
 	defer sock.Close()
-	cfg := rt.cfg
 	start := time.Now()
 	physicalKey := sourceKey(sock.RemoteAddr())
-	if !s.beginHandshake(physicalKey, cfg.MaxHandshakesPerIP) {
+	physicalSlot := s.beginHandshake(physicalKey, cfg.MaxHandshakesPerIP)
+	if physicalSlot == nil {
 		s.handshakeLog.logf("[#%d] rejected %s: %d connections from this source are still sending their ClientHello (max_handshakes_per_ip)", id, sock.RemoteAddr(), cfg.MaxHandshakesPerIP)
 		s.stats.Rejected.Add(1)
+		s.stats.flows.refused(id, cfg.listener.Name, start, sock.RemoteAddr(), sock.LocalAddr(), "too many handshakes from this source (max_handshakes_per_ip)")
 		return
 	}
 	s.stats.Accepted.Add(1)
-	handshakeKey, handshakeCounted := physicalKey, true
+	slot := physicalSlot // the handshake count this connection holds; nil once released
 	defer func() {
-		if handshakeCounted {
-			s.endHandshake(handshakeKey)
+		if slot != nil {
+			s.endHandshake(slot)
 		}
 	}()
 
@@ -483,50 +626,72 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 	if err != nil {
 		s.stats.Failed.Add(1)
 		logf("[#%d] closed src=%s: bad PROXY protocol header: %v after %s", id, sock.RemoteAddr(), err, humanDuration(time.Since(start)))
+		s.stats.flows.refused(id, cfg.listener.Name, start, sock.RemoteAddr(), sock.LocalAddr(), "bad PROXY protocol header: "+err.Error())
 		return
 	}
 	proxiedKey := sourceKey(client.RemoteAddr())
 	if proxiedKey != physicalKey {
-		if !s.beginHandshake(proxiedKey, cfg.MaxHandshakesPerIP) {
+		proxiedSlot := s.beginHandshake(proxiedKey, cfg.MaxHandshakesPerIP)
+		if proxiedSlot == nil {
 			s.handshakeLog.logf("[#%d] rejected %s: %d connections from this source are still sending their ClientHello (max_handshakes_per_ip)", id, client.RemoteAddr(), cfg.MaxHandshakesPerIP)
 			s.stats.Accepted.Add(-1) // source admission happens after header detection
 			s.stats.Rejected.Add(1)
+			s.stats.flows.refused(id, cfg.listener.Name, start, client.RemoteAddr(), client.LocalAddr(), "too many handshakes from this source (max_handshakes_per_ip)")
 			return
 		}
-		s.endHandshake(physicalKey)
-		handshakeKey = proxiedKey
+		s.endHandshake(physicalSlot)
+		slot = proxiedSlot
 	}
 	src := client.RemoteAddr().String()
 	logf("[#%d] accepted from %s (active=%d)", id, src, active)
 
-	c := &ConnState{ID: id, Src: src, Start: start}
+	c := &ConnState{ID: id, Src: src, Local: client.LocalAddr().String(), Start: start, Listener: cfg.listener.Name, lstats: s.stats.listener(cfg.listener.Name)}
 	c.lastActivityUnixNano.Store(start.UnixNano())
+	if client.version > 0 { // a load balancer in front stated the client's address
+		c.how.Via, c.how.ViaVersion = sock.RemoteAddr().String(), client.version
+	}
 	s.stats.register(c)
 	defer s.stats.unregister(c)
 
 	// One overall deadline: a slow trickle can't extend it.
 	helloBuf := rt.pool.Get()
 	info, hello, err := readHello(client, helloBuf)
-	s.endHandshake(handshakeKey)
-	handshakeCounted = false
+	s.endHandshake(slot)
+	slot = nil
 	sni := info.SNI
 	if err != nil {
 		rt.pool.Put(helloBuf)
 		s.stats.Failed.Add(1)
 		if isTimeout(err) {
+			c.setEnd(flowFailed, fmt.Sprintf("no ClientHello within %s", humanDuration(cfg.HandshakeTimeout)))
 			logf("[#%d] closed src=%s: no ClientHello within %s", id, src, humanDuration(cfg.HandshakeTimeout))
 		} else {
+			c.setEnd(flowFailed, fmt.Sprintf("bad ClientHello: %v", err))
 			logf("[#%d] closed src=%s: bad ClientHello: %v after %s", id, src, err, humanDuration(time.Since(start)))
 		}
 		return
 	}
 	client.SetReadDeadline(time.Time{})
 	sniDisp := sni
+	if sni == "" {
+		sniDisp = "<none>"
+	}
 
-	// The CA validating a TLS-ALPN-01 challenge for one of our names. If no
-	// challenge is pending, routing continues: a passed-through backend may
-	// be running its own ACME client.
-	if info.offers(acme.ALPNProto) {
+	// One cache for every listener: the key says whose rules decided.
+	d, hit := rt.cache.GetOrRoute(cfg.listener.Name+"\x00"+sni, func() Decision { return cfg.RouteExcept(sni, s.stoppedRules()) })
+	cached := ""
+	if hit {
+		cached = ", cached"
+		s.stats.CacheHits.Add(1)
+	} else {
+		s.stats.CacheMisses.Add(1)
+	}
+	// The CA validating a TLS-ALPN-01 challenge for one of our names: only
+	// answered here when the rule that routes the name terminates TLS here.
+	// A passed-through name's challenges reach its target untouched, like
+	// any other connection (its backend runs its own ACME client), and so
+	// do a terminated name's when no challenge of ours is pending.
+	if info.offers(acme.ALPNProto) && d.Allow && d.Rule != nil && d.Rule.Terminates() {
 		if answer := s.certs.Challenge(sni); answer != nil {
 			tc := tls.Server(&prefixConn{Conn: client, prefix: hello}, &tls.Config{
 				Certificates: []tls.Certificate{*answer},
@@ -536,37 +701,39 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 			err := tc.Handshake()
 			tc.Close()
 			rt.pool.Put(helloBuf)
+			c.mu.Lock()
+			c.SNI, c.routed = sni, true
+			c.mu.Unlock()
 			if err != nil {
 				s.stats.Failed.Add(1)
+				c.setEnd(flowFailed, fmt.Sprintf("TLS-ALPN-01 challenge failed: %v", err))
 				errorf("[#%d] cert: TLS-ALPN-01 challenge for %s from %s failed: %v", id, sni, src, err)
 			} else {
 				s.stats.Completed.Add(1)
+				c.setEnd(flowACME, "answered the TLS-ALPN-01 challenge")
 				logf("[#%d] cert: answered the TLS-ALPN-01 challenge for %s from %s", id, sni, src)
 			}
 			return
 		}
 	}
-	if sni == "" {
-		sniDisp = "<none>"
-	}
-
-	d, hit := rt.cache.GetOrRoute(sni, func() Decision { return cfg.Route(sni) })
-	cached := ""
-	if hit {
-		cached = ", cached"
-		s.stats.CacheHits.Add(1)
-	} else {
-		s.stats.CacheMisses.Add(1)
-	}
 	if !d.Allow {
 		rt.pool.Put(helloBuf)
 		s.stats.Denied.Add(1)
+		c.mu.Lock()
+		c.SNI, c.routed = sni, true
+		if d.Rule != nil {
+			c.RuleKey, c.rulePattern = d.Rule.Key(), d.Rule.Source
+		}
+		c.mu.Unlock()
 		switch {
 		case d.Err != "":
+			c.setEnd(flowDenied, "error: "+d.Err)
 			logf("[#%d] route sni=%s src=%s -> DENY (error: %s%s)", id, sniDisp, src, d.Err, cached)
 		case d.RuleLine == 0:
+			c.setEnd(flowDenied, "no rule matched")
 			logf("[#%d] route sni=%s src=%s -> DENY (no rule matched%s)", id, sniDisp, src, cached)
 		default:
+			c.setEnd(flowDenied, fmt.Sprintf("deny rule at line %d", d.RuleLine))
 			logf("[#%d] route sni=%s src=%s -> DENY (rule line %d%s)", id, sniDisp, src, d.RuleLine, cached)
 		}
 		client.Write(alertAccessDenied)
@@ -575,26 +742,52 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 	dest := net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 	destDisp := dest // [2001:db8::1]:443 for an IPv6 target
 	logf("[#%d] route sni=%s -> %s (ALLOW, rule line %d%s)", id, sniDisp, destDisp, d.RuleLine, cached)
+	ruleKey := d.Rule.Key()
+	l := cfg.listener
 	c.mu.Lock()
-	c.SNI, c.Dst = sni, destDisp
+	c.how.Cached = hit
+	if d.Rule.Proxy {
+		c.how.ProxyOut = d.Rule.ProxyVersion
+	}
+	c.how.ConnLimit = minLimit(d.Rule.MaxSingleConnectionSpeed, l.MaxSingleConnectionSpeed)
+	c.how.ShareLimit = minLimit(d.Rule.MaxAggregatedSpeed, l.MaxAggregatedSpeed)
+	c.SNI, c.Dst, c.routed = sni, destDisp, true
 	c.host = s.stats.host(sniDisp)
+	c.RuleKey, c.rulePattern, c.rule = ruleKey, d.Rule.Source, s.stats.rule(ruleKey)
 	c.mu.Unlock()
 	c.host.Active.Add(1)
 	c.host.Total.Add(1)
 	defer c.host.Active.Add(-1)
+	c.rule.Active.Add(1)
+	c.rule.Total.Add(1)
+	defer c.rule.Active.Add(-1)
+	s.stats.flows.emit("route", c)
+
+	// A local CA only issues for the names its rule allows: refuse the others
+	// before connecting anywhere.
+	if caID := d.Rule.LocalCA(); caID != "" && !d.Rule.LocalCAIssues(sni) {
+		rt.pool.Put(helloBuf)
+		s.stats.Failed.Add(1)
+		reason := fmt.Sprintf("CA %s does not issue for %s: it matches none of cert_domains (%s)", caID, sniDisp, strings.Join(d.Rule.CertDomains, ", "))
+		c.setEnd(flowFailed, reason)
+		logf("[#%d] closed src=%s sni=%s: %s", id, src, sniDisp, reason)
+		client.Write(alertAccessDenied)
+		return
+	}
 
 	t0 := time.Now()
 	up, err := s.dialer.Dial(d.Host, d.Port, cfg.ConnectTimeout)
 	if err != nil {
 		rt.pool.Put(helloBuf)
 		s.stats.Failed.Add(1)
+		c.setEnd(flowFailed, fmt.Sprintf("connect failed: %v", err))
 		logf("[#%d] closed src=%s sni=%s dst=%s: connect failed: %v after %s", id, src, sniDisp, destDisp, err, humanDuration(time.Since(t0)))
 		return
 	}
 	defer up.Close()
 	peer := up.RemoteAddr().String()
 	c.mu.Lock()
-	c.Peer = peer
+	c.Peer, c.UpLocal = peer, up.LocalAddr().String()
 	c.mu.Unlock()
 
 	var clientSide, serverSide duplex = client, up.(*net.TCPConn)
@@ -608,6 +801,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 		if !d.Rule.UpstreamTLS {
 			rt.pool.Put(helloBuf)
 			s.stats.Failed.Add(1)
+			c.setEnd(flowFailed, "TLS-ALPN-01 challenge for a plaintext upstream")
 			logf("[#%d] closed src=%s sni=%s dst=%s: TLS-ALPN-01 challenge that this proxy did not start, and the upstream is plaintext so it cannot answer either", id, src, sniDisp, destDisp)
 			return
 		}
@@ -623,19 +817,33 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 		rt.pool.Put(helloBuf)
 		if err != nil {
 			s.stats.Failed.Add(1)
+			c.setEnd(flowFailed, err.Error())
 			logf("[#%d] closed src=%s sni=%s dst=%s (%s): %v", id, src, sniDisp, destDisp, peer, err)
 			return
 		}
 		clientSide, mode = tlsClient, how
 		c.host.Terminated.Add(1)
+		st := tlsClient.ConnectionState()
 		c.mu.Lock()
 		c.Mode = how
+		c.how.TLS, c.how.ClientTLS, c.how.ALPN, c.how.Resumed = "terminated", tls.VersionName(st.Version), st.NegotiatedProtocol, st.DidResume
+		switch {
+		case !d.Rule.UpstreamTLS:
+			c.how.Upstream = "plain"
+		case !d.Rule.UpstreamTLSVerify:
+			c.how.Upstream = "tls-unverified"
+		default:
+			c.how.Upstream = "tls"
+		}
 		c.mu.Unlock()
 		if tlsServer != nil {
 			serverSide = tlsServer
 		}
-		logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
+		logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), withLimits(mode, d.Rule))
 	} else {
+		c.mu.Lock()
+		c.how.TLS, c.how.ALPN = "passthrough", strings.Join(info.ALPN, ",") // what the client offered
+		c.mu.Unlock()
 		// A foreign TLS-ALPN-01 challenge bypasses normal termination, but a
 		// backend configured for PROXY protocol still needs its header before
 		// the untouched ClientHello.
@@ -644,6 +852,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 			if err := writeProxyProtocol(up, d.Rule.ProxyVersion, client.RemoteAddr(), client.LocalAddr()); err != nil {
 				rt.pool.Put(helloBuf)
 				s.stats.Failed.Add(1)
+				c.setEnd(flowFailed, fmt.Sprintf("upstream PROXY protocol header failed: %v", err))
 				logf("[#%d] closed src=%s sni=%s dst=%s: upstream PROXY protocol v%d header failed: %v", id, src, sniDisp, destDisp, d.Rule.ProxyVersion, err)
 				return
 			}
@@ -653,7 +862,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 			}
 			mode += fmt.Sprintf("PROXY v%d header sent", d.Rule.ProxyVersion)
 		}
-		if mode != "" {
+		if mode = withLimits(mode, d.Rule); mode != "" {
 			logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
 		} else {
 			logf("[#%d] connected %s -> %s (%s) in %s", id, src, destDisp, peer, humanDuration(time.Since(t0)))
@@ -664,6 +873,8 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 		written, writeErr := up.Write(hello)
 		c.BytesUp.Add(int64(written))
 		c.host.BytesUp.Add(int64(written))
+		c.rule.BytesUp.Add(int64(written))
+		c.lstats.BytesUp.Add(int64(written))
 		s.stats.BytesUp.Add(int64(written))
 		err = writeErr
 		if err == nil && written != len(hello) {
@@ -672,14 +883,32 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 		rt.pool.Put(helloBuf) // back to the pool before the (possibly long) relay
 		if err != nil {
 			s.stats.Failed.Add(1)
+			c.setEnd(flowFailed, fmt.Sprintf("upstream write error: %v", err))
 			logf("[#%d] closed src=%s sni=%s dst=%s: upstream write error: %v", id, src, sniDisp, destDisp, err)
 			return
 		}
 	}
 	c.touch()
+	s.stats.flows.emit("route", c) // connected: the peer and TLS mode are known
 
-	r := &relay{c: c, stats: s.stats, cfg: cfg, pool: rt.pool, client: clientSide, server: serverSide}
+	r := &relay{c: c, stats: s.stats, cfg: cfg, pool: rt.pool, client: clientSide, server: serverSide, done: make(chan struct{})}
+	for dir := range r.limits {
+		r.limits[dir][0] = newLimiter(d.Rule.MaxSingleConnectionSpeed, cfg.BufferSize)
+		if agg := rt.limits[d.Rule]; agg != nil {
+			r.limits[dir][1] = agg.dir[dir]
+		}
+		r.limits[dir][2] = newLimiter(l.MaxSingleConnectionSpeed, cfg.BufferSize)
+		if agg := rt.listenerLimits[l.Name]; agg != nil {
+			r.limits[dir][3] = agg.dir[dir]
+		}
+	}
 	var wg sync.WaitGroup
+	// A stop from the console (the connection, or its rule since routing)
+	// ends the relay; one asked for earlier is applied right here.
+	c.setKill(r.closeAll)
+	if s.stoppedRules()[ruleKey] {
+		r.closeAll("rule stopped from the console; closed by proxy")
+	}
 	wg.Add(1)
 	s.stats.GoroutinesStarted.Add(1)
 	go func() {
@@ -691,9 +920,33 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime) {
 	wg.Wait()
 	r.finish()
 	s.stats.Completed.Add(1)
+	c.setEnd(flowClosed, r.reason())
 	logf("[#%d] closed src=%s sni=%s dst=%s (%s) up=%s down=%s duration=%s reason=%s",
 		id, src, sniDisp, destDisp, peer, humanBytes(c.BytesUp.Load()), humanBytes(c.BytesDown.Load()),
 		humanDuration(time.Since(start)), r.reason())
+}
+
+// minLimit is the tighter of two speed limits, 0 meaning none.
+func minLimit(a, b float64) float64 {
+	if a == 0 || (b != 0 && b < a) {
+		return b
+	}
+	return a
+}
+
+// withLimits adds the rule's speed limits, if any, to the connected line's note.
+func withLimits(mode string, r *Rule) string {
+	l := ""
+	if r != nil {
+		l = describeLimits(r)
+	}
+	switch {
+	case l == "":
+		return mode
+	case mode == "":
+		return l
+	}
+	return mode + "; " + l
 }
 
 // duplex is a connection whose write side can be closed on its own
@@ -847,6 +1100,11 @@ type relay struct {
 	cfg            *Config
 	pool           *BufferPool
 	client, server duplex
+	// Speed limits per direction: [0] this connection's and [1] the rule's
+	// shared one, [2] and [3] the same from the listener. nil = none.
+	limits    [2][4]*limiter
+	done      chan struct{} // closed by closeAll: wakes a pump waiting on a limit
+	closeOnce sync.Once
 }
 
 func (r *relay) dirState(d direction) *atomic.Int32 {
@@ -856,18 +1114,66 @@ func (r *relay) dirState(d direction) *atomic.Int32 {
 	return &r.c.SToC
 }
 
-// pump copies one direction with a pooled buffer held for the life of the
+// mover moves one direction a chunk at a time: read waits for data and takes
+// up to chunk() bytes of it, write delivers all n of them and says how many
+// it did deliver (fewer only with an error).
+type mover interface {
+	read() (int, error)
+	write(n int) (int, error)
+	chunk() int
+	close()
+}
+
+// errNoSplice: the kernel refused to splice this socket before anything was
+// moved, so the direction can still switch to a buffer.
+var errNoSplice = errors.New("splice not supported")
+
+// bufferMover copies through a pooled buffer held for the life of the
 // connection. Stale bytes in a reused buffer are never looked at: only
 // buf[:n] from the latest read is used.
+type bufferMover struct {
+	from, to duplex
+	pool     *BufferPool
+	buf      []byte
+}
+
+func (m *bufferMover) read() (int, error) { return m.from.Read(m.buf) }
+
+func (m *bufferMover) write(n int) (int, error) { return m.to.Write(m.buf[:n]) }
+func (m *bufferMover) chunk() int               { return len(m.buf) }
+func (m *bufferMover) close()                   { m.pool.Put(m.buf) }
+
+// pump copies one direction: spliced in the kernel when both sides are plain
+// TCP on Linux (passthrough), through a buffer otherwise (terminated TLS).
 func (r *relay) pump(d direction) {
 	from, to := r.client, r.server
-	bytes, total, perHost := &r.c.BytesUp, &r.stats.BytesUp, &r.c.host.BytesUp
+	bytes, total, perHost, perRule, perListener := &r.c.BytesUp, &r.stats.BytesUp, &r.c.host.BytesUp, &r.c.rule.BytesUp, &r.c.lstats.BytesUp
 	if d == sToC {
 		from, to = r.server, r.client
-		bytes, total, perHost = &r.c.BytesDown, &r.stats.BytesDown, &r.c.host.BytesDown
+		bytes, total, perHost, perRule, perListener = &r.c.BytesDown, &r.stats.BytesDown, &r.c.host.BytesDown, &r.c.rule.BytesDown, &r.c.lstats.BytesDown
 	}
-	buf := r.pool.Get()
-	defer r.pool.Put(buf)
+	// A limited direction moves smaller chunks, about 20 a second, so the
+	// rate stays smooth.
+	chunk := r.cfg.BufferSize
+	limits := r.limits[d][:]
+	for _, l := range limits {
+		if l != nil {
+			chunk = min(chunk, limitedChunk(l.rate, r.cfg.BufferSize))
+		}
+	}
+	var m mover
+	if r.cfg.Splice {
+		m = newSpliceMover(from, to, chunk)
+	}
+	if m == nil {
+		m = &bufferMover{from: from, to: to, pool: r.pool, buf: r.pool.Get()[:chunk]}
+	} else {
+		r.c.spliced.Add(1)
+	}
+	if r.c.relaying.Add(1) == 2 { // both directions chose: the flow log can say how
+		r.stats.flows.emit("route", r.c)
+	}
+	defer func() { m.close() }()
 	idle := r.cfg.IdleTimeout
 	for {
 		if idle > 0 {
@@ -875,15 +1181,29 @@ func (r *relay) pump(d direction) {
 			// follows the shared last-activity time.
 			from.SetReadDeadline(time.Unix(0, r.c.lastActivityUnixNano.Load()).Add(idle))
 		}
-		n, err := from.Read(buf)
+		n, err := m.read()
+		if err == errNoSplice {
+			m.close()
+			m = &bufferMover{from: from, to: to, pool: r.pool, buf: r.pool.Get()[:chunk]}
+			r.c.spliced.Add(-1)
+			continue
+		}
 		if n > 0 {
+			if limits[0] != nil || limits[1] != nil || limits[2] != nil || limits[3] != nil {
+				if !waitAll(int64(n), r.done, limits...) {
+					return // closeAll woke us; the reason is already recorded
+				}
+				r.c.touch() // waiting for the limit is not idleness
+			}
 			if idle > 0 {
 				to.SetWriteDeadline(time.Now().Add(idle))
 			}
-			written, werr := to.Write(buf[:n])
+			written, werr := m.write(n)
 			if written > 0 {
 				bytes.Add(int64(written))
 				perHost.Add(int64(written))
+				perRule.Add(int64(written))
+				perListener.Add(int64(written))
 				total.Add(int64(written))
 				r.c.touch()
 			}
@@ -904,7 +1224,7 @@ func (r *relay) pump(d direction) {
 			// Optional coalescing: after a short read the socket is drained;
 			// pausing lets more data queue, so the next read is bigger (fewer
 			// syscalls and goroutine wake-ups per byte).
-			if n < len(buf) && r.cfg.ShortReadDelay > 0 && err == nil {
+			if n < m.chunk() && r.cfg.ShortReadDelay > 0 && err == nil {
 				time.Sleep(r.cfg.ShortReadDelay)
 			}
 		}
@@ -967,7 +1287,10 @@ func (r *relay) endDirection(d direction, how string, forward bool) {
 		if d == sToC {
 			to = r.client
 		}
-		to.CloseWrite()
+		// Sent once this end is on record (every return below unlocks first):
+		// the peer may answer the FIN with its own close at once, and that
+		// must not be logged as the first.
+		defer to.CloseWrite()
 	}
 	r.dirState(d).Store(dirHalfClosed)
 	c := r.c
@@ -1004,6 +1327,7 @@ func (r *relay) closeAll(reason string) {
 		c.closed, c.closeReason = true, reason
 	}
 	c.mu.Unlock()
+	r.closeOnce.Do(func() { close(r.done) })
 	r.client.Close()
 	r.server.Close()
 }

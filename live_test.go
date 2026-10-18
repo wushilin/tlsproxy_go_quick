@@ -65,7 +65,7 @@ func TestLivePassThrough(t *testing.T) {
 	requireLive(t)
 	var rules strings.Builder
 	for _, site := range []string{"google", "facebook", "cloudflare", "github"} { // the name itself and one label below it
-		fmt.Fprintf(&rules, "[[host]]\npattern=%s.com\ntarget_host=$0\n[[host]]\npattern=*.%s.com\ntarget_host=$0\n", site, site)
+		fmt.Fprintf(&rules, "[[host]]\npattern=%s.com\ntarget_host=${host}\n[[host]]\npattern=*.%s.com\ntarget_host=${host}\n", site, site)
 	}
 	p := startProxy(t, "", rules.String()+"[[host]]\npattern=ANY\naction=deny\n")
 	c := clientVia(p, nil) // default config: full verification against system roots
@@ -94,7 +94,7 @@ func TestLiveTerminateWithVerifiedTLSUpstream(t *testing.T) {
 	ca := newTestCA(t)
 	var rules strings.Builder
 	for _, host := range liveSites {
-		fmt.Fprintf(&rules, "[[host]]\npattern=%s\ncert=%s\ntarget_host=%s\n", strings.ReplaceAll(host, ".", `\.`), ca.certDir(t, host), host)
+		fmt.Fprintf(&rules, "[[host]]\npattern=%s\ncert=%s\ntarget_host=%s\n", strings.ReplaceAll(host, ".", `\.`), ca.localCA(t), host)
 	}
 	p := startProxy(t, "", rules.String()) // upstream_tls and upstream_tls_verify default to true
 	c := clientVia(p, &tls.Config{RootCAs: ca.pool})
@@ -118,7 +118,7 @@ func TestLiveUpstreamVerificationCatchesWrongHost(t *testing.T) {
 		t.Skip(err)
 	}
 	// Connect to Google's address but expect a certificate for that bare IP: must fail.
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=victim\\.test\ncert=%s\ntarget_host=%s\n", ca.certDir(t, "victim.test"), ips[0]))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=victim\\.test\ncert=%s\ntarget_host=%s\n", ca.localCA(t), ips[0]))
 	c := clientVia(p, &tls.Config{RootCAs: ca.pool})
 	if resp, err := c.Get("https://victim.test/"); err == nil {
 		t.Fatalf("relayed despite an unverifiable upstream certificate: HTTP %d", resp.StatusCode)

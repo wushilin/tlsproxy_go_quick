@@ -5,8 +5,8 @@ reads the hostname in the TLS ClientHello (SNI), picks a backend from
 `config.toml`, and relays the still-encrypted bytes to it. By default it never
 decrypts anything, so it needs no certificates or keys. Per host it can
 instead **terminate TLS**, with certificates issued and renewed automatically
-by Let's Encrypt over TLS-ALPN-01 (port 443 only, no port 80), or loaded from
-a directory.
+by Let's Encrypt over TLS-ALPN-01 (port 443 only, no port 80), or by a CA of
+your own (generated here, or your organisation's, imported).
 
 It is written in Go because a firewall such as **pfSense** has no C compiler
 or linker, so anything that needs one cannot be built on it, while Go can:
@@ -27,8 +27,41 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(git describe 
 ./tlsproxy config.toml                                 # run (logs to stderr)
 ./tlsproxy config.toml --test foo.wushilin.net x.com   # dry run: show routing only
 ./tlsproxy config.toml --test ""                       # dry run for a client without SNI
-go test ./...                                          # ~25 s
+go test ./...                                          # ~50 s; needs no network
 ```
+
+### Docker
+
+Each release is also an image, `docker.io/wushilin/tlsproxy:<version>` (and
+`:latest`), for `linux/amd64` and `linux/arm64`: the static binary on a
+distroless base (CA certificates, nothing else), running as uid 65532.
+
+```sh
+mkdir -p /srv/tlsproxy/etc /srv/tlsproxy/data
+cp config.toml /srv/tlsproxy/etc/                      # your configuration
+chown -R 65532:65532 /srv/tlsproxy                      # the container's user writes both
+docker run -d --name tlsproxy --restart unless-stopped \
+  -p 443:443 -p 127.0.0.1:9443:9443 \
+  -v /srv/tlsproxy/etc:/etc/tlsproxy -v /srv/tlsproxy/data:/var/lib/tlsproxy \
+  docker.io/wushilin/tlsproxy:latest
+```
+
+- `/etc/tlsproxy/config.toml` is the configuration. It must be writable: the
+  proxy replaces a plain `password` with its hash, and the console saves
+  edits there. The image carries the documented example as
+  `config.toml.example`.
+- `/var/lib/tlsproxy` is the working directory, so the default `cert_path`
+  (`./certs`) and `ca_root` (`./ca`) live there; keep it on a volume.
+- The console must listen on `0.0.0.0` inside the container to be reached
+  through `-p`; publish it on the host's loopback (as above) and keep the
+  password strong.
+- Port 443 as a non-root user: Docker allows it in containers by default.
+  Rootless Podman and Kubernetes don't; add
+  `--sysctl net.ipv4.ip_unprivileged_port_start=0` (Podman) or the same
+  sysctl in the pod's `securityContext`, or listen on a high port inside and
+  map 443 to it.
+- Build it yourself with `docker build --build-arg VERSION=$(git describe --tags) -t tlsproxy .`:
+  it needs nothing but this repository (dependencies are vendored).
 
 ## Platforms
 
@@ -48,8 +81,9 @@ PROXY protocol and log rotation have no Linux-only dependency.
   account's directory permissions to protect keys and configuration.
 
 GitHub Actions tests on Linux and Windows and in a FreeBSD VM, cross-builds
-all six release binaries with `CGO_ENABLED=0`, and attaches them with
-`SHA256SUMS` and `config.toml` to a tagged release after all checks pass.
+all six release binaries with `CGO_ENABLED=0`, builds the container image,
+and for a tag, after all checks pass, pushes the image and attaches the
+binaries with `SHA256SUMS` and `config.toml` to the release.
 
 ## Configuration
 
@@ -61,7 +95,7 @@ port = 443
 [[host]]
 pattern = *.wushilin.net
 action = allow
-target_host = $1.wushilin.internal.net
+target_host = ${1}.wushilin.internal.net
 target_port = 443
 
 [[host]]
@@ -97,15 +131,16 @@ action = deny
   becomes `node*.example.com`, `.*` becomes `ANY` (`.*` is still accepted as a
   spelling of `ANY`), `^$` becomes `NONE`. Escaped dots and `^...$` around a
   name are tolerated, so `vq\.example\.com` and `^vq.example.com$` keep working.
-- `target_host` can use what each `*` matched: `$1` is the first `*` from the
-  left, `$2` the second, and so on (`${1}` when a digit or letter follows);
-  `$0` is the whole SNI. A reference to a group that doesn't exist is rejected at load time.
+- `target_host` can use what each `*` matched: `${1}` is the first `*` from the
+  left, `${2}` the second, and so on; `${host}` (or `${0}`) is the whole SNI.
+  References are always in braces, so `${1}hello` is exact; a bare `$1`, an
+  unknown `${...}` or a `*` the pattern doesn't have is rejected at load time.
 - The port is always separate: `target_host` is a name or an IP address (IPv6
   without brackets) and the port goes in `target_port`. `target_host =
   10.0.0.1:8080` is rejected at load time.
 - An SNI that is an IP address is refused (RFC 6066 forbids it), so a
-  `target_host = $0` rule cannot be pointed at arbitrary addresses. An `ANY` rule
-  whose target follows the client (`pattern = ANY` with `target_host = $0`)
+  `target_host = ${host}` rule cannot be pointed at arbitrary addresses. An `ANY` rule
+  whose target follows the client (`pattern = ANY` with `target_host = ${host}`)
   still connects to any *name* a client sends, internal ones included; that is
   logged as a warning at start-up.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
@@ -134,13 +169,14 @@ with its default, and a test keeps that file in step with the code:
 | `max_connections`      | 1024    | further connections are rejected; goroutines ≤ 2 × this              |
 | `proxy_protocol_from`  | (none)  | who may put a PROXY protocol header in front of a connection: IP addresses or networks (`10.0.0.0/8`), `;`-separated. See [The client's address](#the-clients-address-proxy-protocol) |
 | `max_handshakes_per_ip` | 64     | connections from one source (an IPv4 address, or an IPv6 /64) that have not sent their ClientHello yet. Further ones are closed at once, so one address cannot hold every slot with silent sockets for `handshake_timeout` each. Established connections don't count. 0 = unlimited |
-| `buffer_size`          | 65536   | bytes per pooled buffer; each open connection holds two              |
+| `buffer_size`          | 65536   | the most bytes moved per read/write or splice step, in each direction. Clamped to 4 KiB..128 KiB (4096..131072), with a warning in the log. A spliced connection uses it as its kernel pipe size and holds no buffer; any other (terminated TLS, non-Linux, or splice unavailable) holds two pooled buffers of this size |
 | `buffer_pool_max_idle` | 2 × max_connections | capacity of the pool's channel                           |
 | `allow_cache_size`     | 4096    | LRU cache of allowed SNI → target decisions (0 = off)                |
 | `deny_cache_size`      | 4096    | separate LRU cache of denied SNIs (0 = off)                          |
 | `reload_interval`      | 5       | check the config file every N seconds and apply changes; minimum 5, 0 = never |
 | `stats_interval`       | 60      | log a one-line state summary every N seconds; 0 = never              |
 | `short_read_delay_us`  | 0       | pause N µs after a short read so data batches up. Measured in Go: a few percent more throughput at best, +37 µs (50) or +210 µs (200) per round trip, so leave it off unless your box shows otherwise |
+| `splice`               | true    | Linux only: relay passed-through connections with `splice(2)`, see [Zero-copy relaying](#zero-copy-relaying-linux) |
 
 The legacy keys `io_model` and `worker_threads` are accepted and ignored (with
 a log line), so older config files keep loading.
@@ -150,8 +186,9 @@ option is missing from it, from `config.toml` or from this README):
 
 | section | options |
 |---|---|
-| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
-| `[[host]]` | `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` |
+| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[[listener]]` | `name` `bind` `port` · `proxy_protocol_from` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
+| `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | `[console]` | `listen` `port` `password` `password_hash` `hostnames` `secure_cookie` |
 
@@ -159,12 +196,12 @@ Samples, each with its expected routing checked by `go test`:
 
 | file | shows |
 |---|---|
-| [`01-basic`](samples/01-basic.toml) | map `*.wushilin.net` to internal names with `$1` |
+| [`01-basic`](samples/01-basic.toml) | map `*.wushilin.net` to internal names with `${1}` |
 | [`02-home-lab`](samples/02-home-lab.toml) | several internal services behind one public IP; a literal deny that beats a broader allow |
-| [`03-egress-allowlist`](samples/03-egress-allowlist.toml) | outbound allowlist, one rule per name and depth, connecting to the real host with `$0` |
+| [`03-egress-allowlist`](samples/03-egress-allowlist.toml) | outbound allowlist, one rule per name and depth, connecting to the real host with `${host}` |
 | [`04-blocklist`](samples/04-blocklist.toml) | pass everything except blocked names |
 | [`05-default-backend`](samples/05-default-backend.toml) | specific routes, then `ANY` as the default backend |
-| [`06-multi-capture-rewrite`](samples/06-multi-capture-rewrite.toml) | several `*` in one pattern (`$1`, `$2`), a `*` inside a label, `${1}` form |
+| [`06-multi-capture-rewrite`](samples/06-multi-capture-rewrite.toml) | several `*` in one pattern (`${1}`, `${2}`), a `*` inside a label |
 | [`07-ipv6-and-tuning`](samples/07-ipv6-and-tuning.toml) | IPv6 listener, timeouts, limits, buffers, quoted values |
 | [`08-no-sni`](samples/08-no-sni.toml) | `pattern = NONE` for clients without SNI |
 | [`09-tls-termination`](samples/09-tls-termination.toml) | `cert = auto`, `cert_domains`, plaintext and TLS upstreams, pass-through side by side |
@@ -172,6 +209,62 @@ Samples, each with its expected routing checked by `go test`:
 | [`11-web-console`](samples/11-web-console.toml) | the console on loopback, published through a terminating rule |
 | [`12-everything`](samples/12-everything.toml) | every option, annotated |
 | [`13-rule-precedence`](samples/13-rule-precedence.toml) | literal, wildcard and `ANY` rules written broadest first, and which one wins |
+| [`14-listeners`](samples/14-listeners.toml) | several listeners (a public port and a VPN-only port), each with its own rules and overrides |
+
+## Listeners
+
+One port is enough for most setups: `[global] bind` and `port` make one
+listener, named `default`, and every rule belongs to it. For more ports, each
+with its own rules, write `[[listener]]` sections and name the listener in
+every rule:
+
+```toml
+[[listener]]
+name = public
+port = 443
+
+[[listener]]
+name = lab
+bind = 10.11.12.212
+port = 9092
+idle_timeout = 3600                # overrides [global] on this listener
+max_aggregated_speed = 200Mbit     # all connections on this listener together
+
+[[host]]
+listener = public
+pattern = www.example.com
+target_host = 192.168.1.30
+
+[[host]]
+listener = lab
+pattern = kafka.example.com
+target_host = 10.11.12.50
+target_port = 9092
+```
+
+| `[[listener]]` | default | meaning |
+|---|---|---|
+| `name` | (required) | up to 64 letters, digits, spaces and `-` `_` `@` `#` `~` `(` `)` `[` `]` `<` `>` `"` `'`, no space at either end; unique, ignoring case. What `listener =` in a rule refers to. Quote it as a TOML string when it has spaces or quotes: `name = "Kafka (EU)"`, `listener = "Kafka (EU)"` (the console does this for you) |
+| `bind` | 0.0.0.0 | as in `[global]` |
+| `port` | (required) | |
+| `proxy_protocol_from` `handshake_timeout` `idle_timeout` `half_close_timeout` | `[global]` | the same settings, for this listener only |
+| `max_connections` | (none) | a cap for this listener, on top of the global `max_connections` |
+| `max_aggregated_speed` `max_single_connection_speed` | unlimited | as for a rule (see [Speed limits](#speed-limits)), for every connection on this listener; they apply on top of each rule's own |
+
+- With `[[listener]]` sections, `bind` and `port` belong in them: setting
+  them in `[global]` too is a load error.
+- Each listener has its own rules, so the same pattern can appear on several
+  listeners, and a name that matches nothing *on that listener* is denied.
+- With two or more listeners every rule must name its `listener`; an untagged
+  rule is a load error. With one, `listener =` may be left out.
+- Two listeners cannot share a port on the same (or a wildcard) address.
+- **Listeners follow hot reload.** A new listener opens its port, a changed
+  `bind` or `port` moves it, and a removed one closes its port, all without a
+  restart; connections already open carry on. If a port cannot be opened (in
+  use, say), at start-up or on a reload, that is logged and shown in the
+  console (where Start retries it), and the other listeners keep working.
+  The proxy refuses to start only when no listener can open its port.
+- `--test` and the console's routing tests answer for every listener.
 
 ## IPv6
 
@@ -245,6 +338,44 @@ proxy = true
   ClientHello): otherwise any client could choose the address you log, evade
   the per-source limit, and lie to your backends.
 
+## Speed limits
+
+Any allow rule, passed through or terminated, can cap its bandwidth:
+
+```toml
+[[host]]
+pattern = *.downloads.example.com
+target_host = 10.0.0.20
+max_aggregated_speed = 1Gbit             # all connections of this rule together
+max_single_connection_speed = 15MiB/s    # each connection
+```
+
+| per rule | default | meaning |
+|---|---|---|
+| `max_aggregated_speed` | unlimited | shared by every connection this rule matches, whatever name it asked for: a wildcard rule has one budget for all its names |
+| `max_single_connection_speed` | unlimited | for each connection on its own |
+
+- When both are set, both apply: no connection exceeds its own cap, and all
+  of them together never exceed the aggregate.
+- Each limit applies to each direction separately (client to target and
+  target to client), like a full-duplex link.
+- Units: `B`, `KB`, `MB`, `GB` (1000-based), `KiB`, `MiB`, `GiB` (1024-based),
+  or bit rates `bit`, `Kbit`, `Mbit`, `Gbit` (also `bps`, `Kbps`, `Mbps`,
+  `Gbps`). `/s` is optional, so `512B/s`, `14KiB/s`, `100Mbit` and `1GiB/s`
+  all work. The short forms are case sensitive: `Mb` is megabits, `MB`
+  megabytes.
+- On a terminated connection the limit counts the decrypted bytes. The
+  ClientHello is forwarded without being counted against a limit.
+- Limits keep the [splice](#zero-copy-relaying-linux) data path: the proxy
+  reserves bandwidth before forwarding each chunk, and a limited direction
+  moves smaller chunks (about 20 a second, at least 256 bytes) to keep the
+  rate smooth.
+- On a reload, a rule whose `pattern` and `max_aggregated_speed` are unchanged
+  keeps its shared budget, so connections from before and after the reload
+  share it. A changed rate starts a new budget; connections already open
+  keep the one they started with.
+- The `connected` log line notes the limits that apply.
+
 ## TLS termination and automatic certificates
 
 Without `cert`, a rule passes TLS through untouched (the backend keeps its own
@@ -276,16 +407,17 @@ target_port = 8080
 upstream_tls = false                  # plain HTTP backend
 
 [[host]]
-pattern = intranet\.example\.com
-cert = /usr/local/etc/ssl/intranet    # cert.pem (leaf + chain), key.pem, optional ca.pem
+pattern = intranet.example.com
+cert = local-ca                       # your own CA (ca001 in ca_root, made on the CAs page)
 target_host = 192.168.1.40
 ```
 
 | per rule | default | meaning |
 |---|---|---|
-| `cert` | (none) | `auto`: issue and renew via ACME. `<dir>`: use `cert.pem` + `key.pem` (+ `ca.pem`) from that directory; must exist at startup, re-read when the files change. None: pass through |
+| `cert` | (none) | `auto`: issue and renew via ACME. `local-ca` or `local-ca:ca002`: your own CA issues a certificate per name (see [Your own CA](#your-own-ca-cert--local-ca)); the CA must exist (made on the CAs page). None: pass through. A certificate directory is no longer supported: import the CA that issued it instead |
 | `cert_domains` | from a literal pattern | exact names to issue, separated by `,` or `;`. Required when `pattern` has a `*` or is `ANY`, unless a `cert_validate_script` decides (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
 | `cert_validate_script` | (none) | decides about names that match the pattern but are not in `cert_domains`; see below. Must exist and be executable at start-up and on reload |
+| `cert_validate_args` | `["${host}"]` | the script's arguments, a TOML array of strings. Each is fixed text with `${1}`, `${2}`, ... and `${host}` filled in as in `target_host`, e.g. `["--customer", "aaa-${1}", "${host}"]`. One argument stays one argument, spaces and all |
 | `upstream_tls` | true | speak TLS to the target; `false` = plaintext |
 | `upstream_tls_verify` | true | verify the target's certificate against the system roots |
 | `upstream_sni` | the client's SNI | name sent to the target as SNI, and the name its certificate is verified against. The default passes the client's name through, so a target that routes or selects certificates by SNI works even when `target_host` is an IP address |
@@ -303,15 +435,117 @@ target_host = 192.168.1.40
 | `public_ip_address` | (none) | `;`-separated, IPv4 and IPv6. A name is only sent to the CA if **all** its public addresses (A and AAAA) are among these; without it the check is skipped (with a warning) |
 | `dns_resolvers` | 1.1.1.1; 8.8.8.8 | resolvers for that check; deliberately not the local one, which may return LAN addresses |
 
+### Your own CA (`cert = local-ca`)
+
+For names a public CA can't or shouldn't issue (internal hosts, no public
+DNS, wildcards), the proxy runs CAs of its own, or uses your organisation's:
+
+```toml
+[global]
+ca_root = /var/db/tlsproxy/ca          # default ./ca
+
+[[host]]
+pattern = *.lab.internal
+cert = local-ca:ca002                  # plain "local-ca" is ca001
+cert_domains = *.dev.lab.internal, git.lab.internal   # optional: names or globs; others are refused
+target_host = 10.0.0.30
+upstream_tls = false
+```
+
+```
+<ca_root>/ca002/ca_cert.pem             the CA (then its issuers, for an intermediate)
+<ca_root>/ca002/ca_key.pem              its private key
+<ca_root>/ca002/config.toml             its settings (below)
+<ca_root>/ca002/git.lab.internal/       one folder per name it issued: cert.pem, key.pem
+<ca_root>/ca002/_archive/<name>-<time>  certificates it did not issue, moved aside
+```
+
+- **Certificates are issued on demand**: the first time a client asks for a
+  name, in well under a millisecond, so even that client gets the real one.
+  One name per certificate, 90 days by default. They are kept in the CA's
+  folder and used again after a restart.
+- **Renewal runs in the background**, at start and every 6 hours: each CA's
+  own certificate when due, and every certificate in its folder that is due
+  (`renew_before_days`, by default when a third of its lifetime is left)
+  and that a rule still issues for, so a name nobody asked for in a while
+  doesn't expire. A handshake that finds its certificate due renews it too.
+  Names no rule issues for any more are left to expire. A handshake finds its certificate in memory (a lock-free table),
+  never by searching files.
+- **Only what the CA issued is used.** A certificate in a name's folder is
+  checked first: it must be signed by this CA's key, for exactly that name,
+  and readable. Anything else is moved to `_archive/<name>-<UTC time>`, a new
+  one is issued, and archived folders are deleted after 14 days.
+- **CAs** are made on the console's **CAs** page only (generate one, or
+  import yours: a CA certificate with its chain and its private key); a rule
+  naming a CA that does not exist is a config error. A self-signed CA is renewed before it
+  expires with the same key and subject, so certificates it issued stay
+  valid; an imported intermediate is reported as it nears expiry (renew it
+  where it came from and import again). Certificates from an intermediate are
+  sent with its chain, without the root, so clients that trust your
+  organisation's root accept them. A CA is deleted only when no rule uses it
+  (moved to `<ca_root>/_archive`, removed after 14 days); its id is not
+  reused.
+- **Each CA's `config.toml`** is written when the CA is made, read again
+  whenever it changes (a broken edit keeps the previous settings, logged and
+  shown on the CAs page), and editable there with *Settings*:
+
+  ```toml
+  [ca]                    # how the CA was made: fixed, can't be changed
+  common_name = "Home lab CA"
+  organization = tlsproxy
+  key_algorithm = ecdsa   # ecdsa, rsa or ed25519
+  key_bits = 256          # ecdsa 256/384/521, rsa 2048/3072/4096
+  hash_algorithm = sha256 # sha256, sha384, sha512 (its own renewals)
+  validity_days = 3650
+
+  [certificates]          # what it issues: editable
+  key_algorithm = ecdsa
+  key_bits = 256
+  hash_algorithm = sha256 # the CA's signature on them
+  validity_days = 90
+  renew_before_days = 0   # 0 = when a third of the lifetime is left
+  key_usage = digitalSignature        # add keyEncipherment for RSA keys and old clients
+  ext_key_usage = serverAuth          # serverAuth, clientAuth
+  organization = ""                   # subject fields; the common name is always the name
+  organizational_unit = ""
+  country = ""
+  province = ""
+  locality = ""
+  ```
+
+  `[ca]` is set by *Generate* (common name, organisation, key, hash,
+  validity) and checked against the CA certificate on every read: an edit
+  that changes it is refused, since a CA's key or name can't change without
+  breaking everything it issued. Renewal reuses what the CA was made with.
+  `[certificates]` changes apply to new certificates and renewals. ECDSA and
+  Ed25519 keys take well under a millisecond to make; RSA keys take far
+  longer (about 0.1 s for 2048 bits, seconds for 4096), and the first
+  handshake for a new name waits for its key: prefer ECDSA unless clients
+  need RSA.
+- **No races.** A current certificate is found without a lock. Loading one
+  from disk, issuing, renewing, archiving and writing its files hold that
+  name's lock, so racing handshakes for a new name get one certificate
+  between them. Making, renewing or deleting a CA and saving its settings
+  hold that CA's lock; choosing a new CA's id holds the `ca_root`'s.
+- **Clients must trust the CA**: download its certificate from the CAs page
+  (the private key is never offered) and add it to their trust store.
+- **`cert_domains` says which names get a certificate**: host names or globs
+  written like patterns (`*.dev.abc.com, *.prod.abc.com, *.abc.com`; a `*`
+  never crosses a dot). Any other name is refused: no certificate, no
+  placeholder, the target is not contacted, and the flow log says why.
+  Without it, every name the rule matches gets one, at most 10000 per CA
+  (beyond that, names are refused and it is logged).
+
 **Names decided by a script.** When the names are not known in advance
 (customer subdomains, say), let a script decide per name:
 
 ```toml
 [[host]]
-pattern = (.*)\.customers\.example\.com
+pattern = *.customers.example.com
 cert = auto
 cert_domains = www.customers.example.com        # optional: always issued, never put to the script
 cert_validate_script = /usr/local/etc/tlsproxy/domains.sh
+# cert_validate_args = ["${host}"]              # the default: the name alone
 target_host = 192.168.1.50
 ```
 
@@ -328,8 +562,9 @@ SigV4-signed request, parses the answer as XML (`xmllint`, not `grep`), keeps
 the secret key out of the process list, and tells "no such bucket" (exit 1)
 from "could not find out" (exit 2).
 
-- The script is run as `<script> <name>`, without a shell, and only with names
-  that are valid host names matching the rule. Exit status 0 accepts the name;
+- The script is run as `<script> <name>` (or with `cert_validate_args`),
+  without a shell, and only for names that are valid host names matching the
+  rule. Exit status 0 accepts the name;
   any other status refuses it. It is killed after 20 seconds, and no answer
   (killed, or it could not be started) counts as a refusal.
 - **It runs only when a certificate has to be issued or renewed**: the first
@@ -360,12 +595,15 @@ How it works:
   those itself with the challenge certificate. Port 80 is never needed. If the
   proxy listens on another port, forward public 443 to it (a warning reminds
   you).
-- **Challenges that are not ours go to the upstream.** Only a name with an
-  order in progress here is answered here. Any other `acme-tls/1` connection
-  belongs to an ACME client behind the proxy, so it is handed to the upstream
-  untouched: always for pass-through rules, and for terminating rules too when
-  `upstream_tls = true` (normal traffic for that name is still terminated
-  here). With a plaintext upstream nobody could answer, so it is refused.
+- **Challenges that are not ours go to the upstream.** A challenge is
+  answered here only when the rule that routes the name (on the listener the
+  CA connected to) terminates TLS here and an order for the name is in
+  progress. A pass-through rule's `acme-tls/1` connections always go to its
+  target untouched, like the rest of its traffic: the backend runs its own
+  ACME client. A terminating rule's go to the upstream when no order is in
+  progress here and `upstream_tls = true` (normal traffic for that name is
+  still terminated here). With a plaintext upstream nobody could answer, so
+  it is refused.
 - **Urgent first, up to 4 names at once.** At startup and every 10 minutes:
   names with no or an expired certificate first, then renewals by due date.
   Names don't depend on each other, so a slow one (a hanging validation, a
@@ -401,8 +639,8 @@ How it works:
 - Reload cancels certificate jobs from the previous config, including scripts
   and retry waits; obsolete results are discarded. Pending names are retried
   under the new settings. A rejected config leaves current jobs running.
-- Reload applies certificate settings too; a config whose `cert = <dir>`
-  cannot be loaded is rejected and the running config stays.
+- Reload applies certificate settings too; a config naming a CA that does
+  not exist (or does not load) is rejected and the running config stays.
 - Terminated connections are still plain TCP relaying: no HTTP parsing, no
   added headers. They cost more CPU and memory than pass-through.
 
@@ -437,8 +675,10 @@ compress_after = 3      # file.1-.3 stay plain, file.4.gz and older are gzip; de
 
 ## Web console
 
-An optional console on its own port: a live dashboard, open connections,
-certificates, the recent log and a config editor.
+An optional console on its own port: live listeners, rules and connections,
+all editable (start, stop, add, edit, delete), a flow log, certificates, the
+recent log and a config editor. It is served under `/tlsproxy_quick/`
+(`http://127.0.0.1:9443/tlsproxy_quick/`); `/` redirects there.
 
 ```toml
 [console]
@@ -450,7 +690,7 @@ secure_cookie = true               # require HTTPS for browser sessions
 
 # Publish it through the proxy itself, with a real certificate:
 [[host]]
-pattern = console\.example\.com
+pattern = console.example.com
 cert = auto
 upstream_tls = false
 target_host = 127.0.0.1
@@ -471,32 +711,93 @@ reload (a changed password or cookie policy signs everyone out).
 
 **Pages**
 
-- **Dashboard** (refreshes every second): live connections, connections to
-  date (relayed, denied, failed, rejected), total bytes received and sent,
-  byte and connection rates over the last 5 seconds, route-cache figures, and
-  per host (SNI): live and total connections, how many were TLS-terminated,
-  bytes each way.
-- **Connections**: every open connection with client, host, target,
-  terminated or passed through, bytes, age, idle time and the state of each
-  direction.
+The config file stays the source of truth: everything the console changes is
+written to it (and every change to the file shows up in the console).
+
+- **Listeners** (live: the state is pushed over a WebSocket, a frame only when
+  something changed): totals, rates and a 2-minute throughput trace on top,
+  then one card per listener (its addresses, overrides, connections and
+  rates), and inside it one card per `[[host]]` rule of that listener in file
+  order, with its target, kind, TLS mode, PROXY protocol and speed limits, its
+  live and total connections and rates, and its open connections underneath. A connection row opens into its
+  details: client, proxy and upstream addresses, bytes each way, the state of
+  each direction, SNI and how TLS was handled.
+  - **Add / Edit / Delete a listener** with the same guided form: name, bind
+    and port, then any overrides. The new port opens (or moves) at once. A
+    file that has no `[[listener]]` yet is converted on the first one: `bind`
+    and `port` move from `[global]` into a `[[listener]]` named `default`, and
+    every existing rule gets `listener = default`; the form says so before
+    anything is saved. Renaming a listener renames it in its rules. A listener
+    that still has rules cannot be deleted.
+  - **Stop / Start a listener.** Stop closes its port and its connections;
+    like stopping a rule, it is not written to the file and lasts until Start
+    or a restart. If Start cannot open the port (another process has it), the
+    listener stays stopped and the card shows why. A save whose new or moved
+    port cannot be opened says so too, and the card offers Start to retry.
+  - **Stop / Start a rule.** A stopped rule is routed as if it were not
+    configured: the names it matched go to the next rule that matches
+    (another wildcard, `ANY`, or nothing: denied), and its open connections
+    are closed. Stopping is not written to the file: it lasts until Start or
+    a restart, and survives reloads.
+  - **Add / Edit a rule** with a guided form: what to match, where to send
+    it, then TLS, PROXY protocol and speed limits, showing only the fields
+    that apply. Every change is validated against the whole file as you type,
+    with a preview of the exact `[[host]]` block that will be written and a
+    "try a name" box showing where sample names would be routed. Saving
+    rewrites only that block (comments and the rest of the file are kept),
+    with the same checks and backup as the config editor below, and applies
+    it at once.
+  - **Delete a rule**: its block (and the comment right above it) leaves the
+    file. Its open connections keep running until they end.
+  - **Stop a connection**: closes one connection.
+
+  Start, Stop and Delete keep their buttons disabled until the pushed state
+  shows the change (normally well under a second), so a card changes once.
+  If the server refuses, the buttons come back and nothing changes.
+- **Flow log**: every connection, including those too short to ever show on
+  the Listeners page, and those refused before routing (limits, bad PROXY
+  header). Each one is listed as it opens (client, listener), when it is
+  routed (name, rule, target) and when it closes (duration, bytes each way,
+  and the result: closed, denied, failed, rejected or ACME, with the reason).
+  Tags say how each one is handled: end-to-end TLS (passed through) or
+  terminated (with the TLS version, and whether the target gets TLS,
+  unverified TLS or plaintext), the ALPN protocols, the PROXY header sent to
+  the target (or none), the load balancer it came through, speed limits, a
+  cached route, and **zero-copy** when both directions are spliced in the
+  kernel.
+  Events are pushed over their own WebSocket, open only while the page
+  shows; every 5 seconds the server also sends the authoritative list of
+  open connections, which repairs anything a dropped event missed. Open
+  connections are listed first. A closed one fades out over 30 seconds;
+  with **Show all closed** on, every closed connection the proxy still
+  remembers (the last 2000) stays listed. Open connections can be stopped
+  from here too.
 - **Certificates**: every certificate in use, both those the proxy manages
-  (`cert = auto`) and those you manage (`cert = <dir>`): status (`ok`,
+  (`cert = auto`) and those your CAs issued (`cert = local-ca`): status (`ok`,
   `expiring`, `expired`, `missing`, `failing`), issuer, validity, days left,
   renewal date, the rules using it, the last error and next attempt, and a
   "retry now" button that skips the 6-hour wait.
 - **Log**: the most recent 2,000 lines of both streams, filterable (for
   example by `[#42]` or a host name), wherever the log is configured to go.
-- **Config**: a text editor for the config file, with line numbers.
+- **Config file**: a text editor for the whole file, with line numbers.
   - *Validate* and *Test routing* work on the text in the editor, saved or not.
+    *Validate* answers green with a tree of the settings the proxy would run
+    with (each value marked when it is a default or inherited from
+    `[global]`), yellow for each warning, red for an error, each with its
+    line, which one click selects in the editor.
+  - *Reference* (ⓘ) lists every key, by section, with its default and
+    meaning; filter by name or word, click a key to copy `key = `. It is
+    generated from the code, and a test keeps it complete.
   - *Save & apply* validates first (an invalid config is never written, and a
-    `cert = <dir>` that can't be loaded counts as invalid), keeps the previous
+    `cert = local-ca` naming a CA that doesn't exist counts as invalid), keeps the previous
     file as `config.toml.<timestamp>.bak` (the last 10, loadable from the
     editor), and applies the change at once.
-  - **Saves are race free.** Every read-check-write of the file happens under
-    one lock in the proxy, and a save must present the modification time and
-    content hash the editor loaded. If the file was changed by anything else in
-    between (vim, another session, the proxy hashing a password), that save
-    fails and nothing is written.
+  - **Saves are race free**, here and in the rule editor. Every
+    read-check-write of the file happens under one lock in the proxy, and a
+    save must present the modification time and content hash the page
+    loaded. If the file was changed by anything else in between (vim, another
+    session, the proxy hashing a password), that save fails and nothing is
+    written.
   - The `[console]` section is hidden from the editor and kept as it is; text
     containing its own `[console]` is rejected. Errors use the editor's line
     numbers.
@@ -505,7 +806,8 @@ reload (a changed password or cookie policy signs everyone out).
 your browser could otherwise reach it). Sign-ins are rate limited globally
 (5 failures, then 30 s doubling up to 15 min); sessions are random, in memory,
 `HttpOnly`, `SameSite=Strict`, 12 hours; every POST needs the session's CSRF
-token and a JSON content type; responses forbid framing. Whoever can save a
+token and a JSON content type; the WebSocket only accepts its own origin and
+closes when the session ends; responses forbid framing. Whoever can save a
 config controls the proxy (targets, certificate paths, log file locations), so
 treat the console password like root access to the gateway.
 
@@ -541,10 +843,74 @@ idle time and the state of each direction (`open` / `half-closed`).
   `stats: active=3 accepted=120 completed=113 denied=4 ... goroutines=6 (started=240 finished=234, runtime=11) up=1.20 GiB down=30.11 GiB cache=5 allow/2 deny (hits=101 misses=19) pool_idle=12`
 - `kill -USR1 <pid>` logs that summary plus one line per open connection.
 
+## Zero-copy relaying (Linux)
+
+On Linux, a passed-through connection is relayed with `splice(2)`: each
+direction has its own kernel pipe, and the bytes go
+
+```
+client socket ──splice──▶ kernel pipe ──splice──▶ upstream socket
+```
+
+without ever being copied into the proxy. A terminated connection cannot do
+this, because the proxy has to decrypt and re-encrypt every record, so it
+keeps the buffered copy. The same holds for the ClientHello itself, which
+the proxy reads to route the connection: it is forwarded from user space,
+and splicing starts with the first byte after it.
+
+Go's `TCPConn.ReadFrom` also splices, but it only returns at EOF. The proxy
+runs its own loop, one splice step at a time, so byte counts, the idle timer,
+write timeouts and half-close work exactly as they do in the buffered copy.
+
+- The pipe is `buffer_size` bytes (rounded up to a page), and a spliced
+  connection holds no pooled buffer. It holds four extra file descriptors
+  (two pipes) instead. Go raises the soft `RLIMIT_NOFILE` to the hard limit
+  at start-up; with many connections, check that the hard limit allows
+  about 6 × `max_connections`.
+- Beyond `fs.pipe-user-pages-soft` (16384 pages per user by default, which
+  is 64 MiB of pipes with 4 KiB pages), the kernel will not grow pipes and
+  may hand out smaller ones. Splicing still works, in smaller steps. If no
+  pipe can be created at all (out of descriptors), or the kernel refuses to
+  splice a socket, that direction falls back to the buffered copy.
+- `splice = false` in `[global]` turns it off. macOS, FreeBSD and Windows
+  always use the buffered copy.
+
+Measured on a 4 KiB-page arm64 Linux VM: one stream through loopback
+reached 3,430 MiB/s spliced against 2,260 MiB/s buffered, and the whole test
+(client, backend and proxy together) used 0.65 instead of 0.95 CPU-seconds
+per GiB.
+
 ## Design notes
 
-- **Logging never holds up traffic.** A log call appends the line to a buffer
-  in memory; a background goroutine writes it out ten times a second, and at
+- **No locks on the serving path.** From accept to close a connection never
+  waits for a lock another connection holds. Shared state is read lock-free
+  and updated atomically, giving up a little freshness where that is needed:
+  - The running configuration, the stopped rules, TLS ticket keys and the
+    certificates a handshake can be given are immutable snapshots behind an
+    atomic pointer (like Rust's `ArcSwap`): readers load the pointer, a
+    reload or the certificate worker swaps in a new one.
+  - The route and DNS caches are CLOCK caches: a hit is a lock-free map read
+    and an atomic "recently used" flag; adding a name uses `TryLock` and
+    skips caching rather than wait.
+  - Open connections live in a slot table claimed with compare-and-swap;
+    per-name counters in a fixed lock-free hash table; per-rule and
+    per-listener counters are made when a configuration loads, so
+    connections only read them.
+  - Speed limits are GCRA token buckets: one compare-and-swap per chunk,
+    however many connections share a rule's limit.
+  - Handshakes in progress per source are counted in a fixed array of
+    atomic counters (a keyed hash of the address picks one).
+  - Buffers, log lines and new names for a `cert_validate_script` go through
+    a lock-free bounded ring (Vyukov's MPMC queue); full means drop, never
+    wait.
+  A test drives concurrent passthrough and terminated traffic with shared
+  speed limits and checks Go's mutex profile: any wait for a lock taken by
+  this program on the way from accept to relay fails it. What remains is
+  outside it: the Go runtime's own locks (heap, garbage collector) and the
+  standard library's (crypto/tls caching a key). The console's live views
+  and a page watching the flow log are not on the serving path.
+- **Logging never holds up traffic.** A log call puts the line in a
+  lock-free ring; a background goroutine writes it out ten times a second, and at
   once after a problem line. A slow disk or a stalled stdout pipe therefore
   cannot block connection handlers or the accept loop. If the destination
   cannot keep up, at most 4 MiB is held; further lines are dropped and the
@@ -554,22 +920,24 @@ idle time and the state of each direction (`open` / `half-closed`).
 - **Goroutines, no event loop.** One goroutine per connection reads the
   ClientHello, routes, connects and copies client → server; a second copies
   server → client. The Go runtime multiplexes them over kqueue/epoll.
-- **Buffer pool = buffered channel.** Borrow and return never block:
+- **Buffer pool = lock-free ring.** Borrow and return never block:
   borrowing from an empty pool allocates, returning to a full pool drops the
   buffer for the GC. In steady state every buffer is reused, so relaying
   allocates nothing per byte and the GC has next to nothing to do (byte
   slices hold no pointers, so pooled buffers are never scanned). Buffers are
   not cleared on reuse; only the bytes just read are ever used.
-- **Route cache.** Two capped LRU caches keyed by lowercased SNI, one for
-  allowed and one for denied names, so a flood of junk names can only evict
+- **Route cache.** Two capped CLOCK caches (an approximation of LRU, lock-free
+  on a hit) keyed by listener and lowercased SNI, one for allowed and one for
+  denied names, so a flood of junk names can only evict
   other junk. Cached decisions are marked `cached` in the log.
 - **Hot reload.** The config file is re-read every `reload_interval` seconds
   (content is compared, not mtime), so reloads happen at most once per 5 s
   and the newest version always wins. Config, caches and buffer pool swap
   together through one `atomic.Pointer`: caches start empty, a changed buffer
   size gets a fresh pool, an invalid file is logged and ignored, existing
-  connections keep the settings they started with. `bind`/`port` changes
-  need a restart.
+  connections keep the settings they started with. Listeners open, move and
+  close to match (see [Listeners](#listeners)); only `[console]` `listen` and
+  `port` need a restart.
 - **Half-close and interruptions.** EOF on one side is forwarded as a
   half-close and starts the `half_close_timeout` clock; the other direction
   keeps flowing until it ends or the clock fires. A write failure (receiver
@@ -578,11 +946,37 @@ idle time and the state of each direction (`open` / `half-closed`).
 
 ## Tests
 
-`go test ./...` runs 80+ tests, also under the race detector in CI:
+`go test ./...` runs 100+ tests, also under the race detector in CI. The
+suite is self-contained: everything it needs is in the repository
+(dependencies, Pebble included, are vendored), and it talks to nothing but
+localhost, so it runs on a fresh host with no network. Only the live-sites
+test (`TLSPROXY_LIVE=1`) goes out to the internet.
 
-- **ACME, end to end (`TLSPROXY_PEBBLE=1`).** Starts Pebble (Let's Encrypt's
-  official test CA) and its DNS server; Pebble validates TLS-ALPN-01 against
-  the proxy exactly as Let's Encrypt would. Checks issuance for two names,
+- **Every combination, at once (`TestChaosCombinations`).** One proxy per
+  relay mode (splice on, off), each case its own rule, backend and random
+  payload: passed through to a TCP echo, a TLS echo or an HTTPS server, and
+  terminated with a local CA to a TCP echo, TLS echo, HTTP or HTTPS server;
+  each with no PROXY header, v1 or v2 to the backend, and none, v1 or v2
+  from a load balancer in front; on either of two listeners, some with a
+  speed limit. Each checks the certificate the client gets, that the right
+  backend got it, what that backend saw (PROXY version, the client address,
+  even one a load balancer stated; the TLS name; the ALPN protocols offered),
+  that TLS and ALPN pass through untouched (the client ends up with the
+  backend's TLS version and its choice of protocol, an unusual one only the
+  backend would pick) and survive termination, the payload both ways, and
+  the proxy's log and flow log (result, TLS mode, PROXY version, load
+  balancer, splice or copy, bytes). Then the refusals: a deny rule, no
+  matching rule, a name the local CA won't issue for, a backend that is down,
+  an upstream certificate that fails verification. The backends parse PROXY
+  headers with code of their own, so the proxy is checked against the
+  specification, not against itself. Random choices come from a seed it
+  logs: `TLSPROXY_CHAOS_SEED=<n>` repeats a run.
+- **The same with `cert = auto`.** Every backend, PROXY out and PROXY in, with
+  certificates Pebble issued over TLS-ALPN-01 through the proxy, verified
+  against Pebble's root.
+- **ACME, end to end.** Runs Pebble (Let's Encrypt's official test CA) in the
+  test process, from its vendored packages, with a fake DNS server; Pebble
+  validates TLS-ALPN-01 against the proxy exactly as Let's Encrypt would. Checks issuance for two names,
   the certificate served to clients, files and permissions, the DNS pre-check
   refusing a name that resolves elsewhere, renewal, and reuse after a restart.
 - **Live sites (`TLSPROXY_LIVE=1`).** HTTPS GETs to Google, Facebook,
@@ -593,9 +987,14 @@ idle time and the state of each direction (`open` / `half-closed`).
 - **TLS termination with mock backends:** plaintext and TLS upstreams, ALPN
   negotiation, half-close, 4 MiB integrity with 4 KiB buffers, termination and
   pass-through side by side, the placeholder, the challenge responder,
-  certificate reload (and a broken update keeping the old one), start-up
-  errors, config validation, renewal schedule and job priority, and the DNS
-  check against a fake DNS server.
+  start-up errors, config validation, renewal schedule and job priority, and
+  the DNS check against a fake DNS server.
+- **Local CAs:** issuance on first use, one certificate for racing
+  handshakes, reuse after a restart, renewal (at a handshake, in the
+  background, at start-up, `renew_before_days`), the CA renewing itself with
+  the same key, foreign certificates archived and old archives pruned,
+  imported intermediates served with their chain, refusals, `config.toml`
+  (what `[certificates]` changes, `[ca]` locked), and the console's CAs page.
 - **Unit:** ClientHello parsing (every prefix of a fragmented hello,
   post-quantum sizes, malformed input), config parsing and errors, routing,
   LRU eviction order and caps, a denial flood that cannot evict allowed

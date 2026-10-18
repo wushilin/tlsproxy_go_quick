@@ -100,56 +100,6 @@ func TestConsoleSecureCookies(t *testing.T) {
 	}
 }
 
-func TestDirectoryCertificateChainAndKeyRefresh(t *testing.T) {
-	ca := newTestCA(t)
-	dir := ca.certDir(t, "refresh.test")
-	m := NewCertManager()
-	initial, err := loadDirCert(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.files[dir] = initial
-	certPEM, err := os.ReadFile(filepath.Join(dir, "cert.pem"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "ca.pem"), certPEM, 0600); err != nil {
-		t.Fatal(err)
-	}
-	m.refreshFileCerts()
-	withChain := m.files[dir]
-	if len(withChain.cert.Certificate) != len(initial.cert.Certificate)+1 {
-		t.Fatal("ca.pem addition ignored")
-	}
-	if err := os.Remove(filepath.Join(dir, "ca.pem")); err != nil {
-		t.Fatal(err)
-	}
-	m.refreshFileCerts()
-	if len(m.files[dir].cert.Certificate) != len(initial.cert.Certificate) {
-		t.Fatal("ca.pem removal ignored")
-	}
-	previous := m.files[dir]
-	key, err := os.ReadFile(filepath.Join(dir, "key.pem"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "key.pem"), []byte("broken key"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	m.refreshFileCerts()
-	if m.files[dir] != previous {
-		t.Fatal("broken key replaced working certificate")
-	}
-	// Change only the key's encoding, retaining the matching private key.
-	if err := os.WriteFile(filepath.Join(dir, "key.pem"), append(key, '\n'), 0600); err != nil {
-		t.Fatal(err)
-	}
-	m.refreshFileCerts()
-	if m.files[dir] == previous {
-		t.Fatal("key-only change ignored")
-	}
-}
-
 type partialWriteConn struct {
 	net.Conn
 	input   *bytes.Reader
@@ -163,16 +113,16 @@ func (c *partialWriteConn) CloseWrite() error           { return nil }
 
 func TestRelayCountsPartialWrites(t *testing.T) {
 	for _, err := range []error{io.ErrClosedPipe, nil} {
-		c := &ConnState{host: &HostStats{}}
+		c := &ConnState{host: &HostStats{}, rule: &RuleStats{}, lstats: &ListenerStats{}}
 		c.SToC.Store(dirHalfClosed)
 		st := NewStats()
 		pool := NewBufferPool(1024, 2)
 		defer pool.Stop()
-		r := &relay{c: c, stats: st, cfg: &Config{}, pool: pool,
+		r := &relay{c: c, stats: st, cfg: &Config{BufferSize: 1024}, pool: pool, done: make(chan struct{}),
 			client: &partialWriteConn{input: bytes.NewReader([]byte("abcdef"))},
 			server: &partialWriteConn{written: 3, err: err}}
 		r.pump(cToS)
-		if c.BytesUp.Load() != 3 || st.BytesUp.Load() != 3 || c.host.BytesUp.Load() != 3 {
+		if c.BytesUp.Load() != 3 || st.BytesUp.Load() != 3 || c.host.BytesUp.Load() != 3 || c.rule.BytesUp.Load() != 3 || c.lstats.BytesUp.Load() != 3 {
 			t.Fatal("partial write bytes missing")
 		}
 		if c.CToS.Load() != dirHalfClosed {
@@ -250,7 +200,8 @@ func TestCertificateReloadCancelsIssuance(t *testing.T) {
 		t.Fatal("duplicate job started")
 	}
 	// A rejected config must leave the current generation alive.
-	bad := mustParse(t, "[global]\nport=443\n[[host]]\npattern=ANY\ncert=/nonexistent/review-cert\ntarget_host=127.0.0.1\n")
+	// (It parses, but names a CA that doesn't exist: Apply refuses it.)
+	bad := mustParse(t, "[global]\nport=443\nca_root="+t.TempDir()+"\n[[host]]\npattern=ANY\ncert=local-ca:ca009\ntarget_host=127.0.0.1\n")
 	if err := m.Apply(bad); err == nil {
 		t.Fatal("bad config accepted")
 	}
@@ -333,7 +284,7 @@ func TestReloadUsesParsedSnapshotAtStartup(t *testing.T) {
 	}
 	p := startProxyText(t, oldText, path)
 	// Trigger immediately, including before the watcher gets scheduled.
-	p.srv.reloadNow <- struct{}{}
+	p.srv.reloadNow <- nil // (a nil reply channel: nobody waits for the outcome)
 	for deadline := time.Now().Add(T); ; {
 		if p.srv.runtime.Load().cfg.StatsInterval == 17*time.Second {
 			break

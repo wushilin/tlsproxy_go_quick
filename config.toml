@@ -23,7 +23,10 @@ port = 443                      # (required) listen port
 # max_handshakes_per_ip = 64    # (default: 64) connections from one source (IPv4 address or IPv6 /64)
 #                               #   that have not sent their ClientHello yet; more are closed at once,
 #                               #   so one address cannot hold every slot with silent sockets. 0 = unlimited
-# buffer_size = 65536           # (default: 65536) bytes per pooled buffer; 2 held per open connection
+# buffer_size = 65536           # (default: 65536 = 64 KiB) the most bytes moved per step, in each
+#                               #   direction: the kernel pipe size when spliced (Linux passthrough),
+#                               #   else a pooled buffer (2 held per open connection). Clamped to
+#                               #   4096..131072 (4 KiB..128 KiB), with a warning
 # buffer_pool_max_idle = 2048   # (default: 2 x max_connections) free buffers kept for reuse
 
 # --- Route cache (LRU, keyed by lowercased SNI; cleared on every reload) ------
@@ -34,11 +37,14 @@ port = 443                      # (required) listen port
 # --- Hot reload ------------------------------------------------------------------
 # reload_interval = 5           # (default: 5) check this file every N s and apply changes;
 #                               #   min 5 (at most one reload per 5 s), 0 = never.
-#                               #   bind/port changes need a restart; an invalid file is ignored
+#                               #   listeners open, move and close live; an invalid file is ignored
 
 # --- Throughput tuning ------------------------------------------------------------
 # short_read_delay_us = 0       # (default: 0 = off) pause N microseconds after a short read so
 #                               #   data batches up: less CPU per GiB, more latency per round trip
+# splice = true                 # (default: true) on Linux, relay passed-through connections with
+#                               #   splice(2): bytes go socket -> kernel pipe -> socket, never copied
+#                               #   into the proxy. Terminated TLS is always copied. Ignored elsewhere
 
 # --- State reporting ------------------------------------------------------------
 # stats_interval = 60           # (default: 60) log one summary line every N s; 0 = never.
@@ -47,6 +53,8 @@ port = 443                      # (required) listen port
 # --- Certificates (only for rules that terminate TLS with cert = ...) ------------
 # cert_path = ./certs           # (default: ./certs) automatic certificates: <cert_path>/<name>/cert.pem,
 #                               #   key.pem; the ACME account key lives in <cert_path>/_account/
+# ca_root = ./ca                # (default: ./ca) your own CAs for cert = local-ca: <ca_root>/ca001/ca_cert.pem,
+#                               #   ca_key.pem, and <ca_root>/ca001/<name>/cert.pem, key.pem per name issued
 # expiry_threshold_days = 15    # (default: 15) renew this many days before expiry (or when a third
 #                               #   of the lifetime is left, if that is later); failures retry every 6 h
 # acme_agree_tos = false        # (default: false) must be true for cert = auto: you accept the CA's terms
@@ -97,6 +105,23 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 # listen and port need a restart; password, secure_cookie and hostnames follow hot reload. The
 # section is hidden from the console's editor and cannot be changed there.
 
+# --- Listeners (optional) ------------------------------------------------------
+# Without [[listener]] sections the proxy has one listener, "default", made from
+# bind and port above. With them, bind and port move into the sections (setting
+# them in [global] too is an error), each listener has its own rules, and every
+# [[host]] names its listener. See samples/14-listeners.toml.
+#   [[listener]]
+#   name        (required) up to 64 letters, digits, spaces and -_@#~()[]<>"'; unique ignoring
+#               case; what listener = in [[host]] refers to. Quote it if it has spaces or
+#               quotes: name = "Kafka (EU)"
+#   bind        same as in [global] (0.0.0.0 unless set)
+#   port        (required)
+#   Optional, each overriding [global] for this listener only:
+#   proxy_protocol_from, handshake_timeout, idle_timeout, half_close_timeout,
+#   max_connections (a cap for this listener, on top of the global one), and
+#   max_aggregated_speed / max_single_connection_speed (for all connections on
+#   the listener together / each of them, on top of each rule's own limits)
+
 # --- Rules -------------------------------------------------------------------
 # The most specific rule wins, wherever it stands in the file; a name matching no
 # rule is denied. All matching ignores case.
@@ -110,22 +135,31 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 #                                    fine: *.*.example.com. More literal characters win
 #               ANY                  everything, with or without SNI: always last
 #             No regular expressions, no **, no "a or b": one rule per name and per depth.
+# listener    the [[listener]] this rule belongs to; required when there are several
 # action      (default: allow) allow | deny; deny sends a TLS access_denied alert
-# target_host (required for allow) $1, $2, ... = what each * matched, from the left (${1} before a
-#             digit or letter); $0 = the whole SNI
+# target_host (required for allow) ${1}, ${2}, ... = what each * matched, from the left;
+#             ${host} (or ${0}) = the whole SNI. Always in braces: a bare $1 is an error
 # target_port (default: 443)
 #
 # TLS termination (optional; without cert the TLS stream is passed through untouched):
 # cert        auto       issue and renew through ACME with TLS-ALPN-01 (the CA connects to public
 #                        port 443; no port 80 needed). A pattern with * (or ANY) also needs cert_domains
 #                        and/or cert_validate_script.
-#             <dir>      use <dir>/cert.pem (leaf + chain) and <dir>/key.pem, plus optional ca.pem;
-#                        re-read when the files change. Must exist at startup.
+#             local-ca   (or local-ca:ca002) your own CA, in <ca_root>/ca001; it must exist (generate it,
+#                        or import yours, on the console's CAs page). One certificate per name,
+#                        issued the first time a client asks, renewed before it expires (checked every 6 h);
+#                        anything in the folder that the CA did not issue is moved to _archive and
+#                        deleted after 14 days. Clients must trust the CA. cert_domains, if set: names
+#                        or globs (*.dev.abc.com, *.abc.com) that get one; any other name is refused
+#                        (no placeholder). A pattern = NONE rule can't use it
 # cert_domains           names to issue, e.g. a.example.com, b.example.com (each must match pattern)
 # cert_validate_script   decides about names that match pattern but are not in cert_domains:
 #                        run as `<script> <name>`, exit 0 = issue a certificate, anything else = don't.
 #                        Only run when a certificate must be issued or renewed (never per connection);
 #                        killed after 20 s, which counts as a refusal. Every decision is logged.
+# cert_validate_args     (default: ["${host}"]) the script's arguments, a TOML array of strings;
+#                        each is fixed text with ${1}, ${2}, ... ${host} filled in as in target_host,
+#                        e.g. ["--customer", "aaa-${1}", "${host}"]
 # upstream_tls           (default: true) connect to the target with TLS; set false for a plaintext target
 # upstream_tls_verify    (default: true) verify the target's certificate against the system roots
 # upstream_sni           the name sent to the target as SNI and checked in its certificate.
@@ -136,6 +170,12 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 #                        header, sent before the ClientHello / upstream TLS / plaintext. The target
 #                        must expect it (nginx: listen ... proxy_protocol)
 # proxy_version          (default: 2) PROXY protocol version; 1 or 2 (only used when proxy is enabled)
+#
+# Speed limits (optional, any allow rule; each direction separately; default unlimited):
+# max_aggregated_speed          shared by every connection this rule matches, e.g. 1Gbit, 100MB/s
+# max_single_connection_speed   for each connection, e.g. 15MiB/s, 512KB, 20Mbps
+#                               units: B KB MB GB (1000), KiB MiB GiB (1024), bit Kbit Mbit Gbit
+#                               (also bps Kbps Mbps Gbps); /s optional
 
 [[host]]
 pattern = myhome.wushilin.net
@@ -150,7 +190,7 @@ proxy_version = 2
 [[host]]
 pattern = *.wushilin.net
 action = allow
-target_host = $1.wushilin.internal.net
+target_host = ${1}.wushilin.internal.net
 target_port = 443
 
 [[host]]

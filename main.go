@@ -68,20 +68,29 @@ func main() {
 	}
 
 	if testMode { // dry run: print routing decisions and exit
-		for _, sni := range testSNIs {
-			d := cfg.Route(strings.ToLower(sni))
-			if sni == "" {
-				sni = "<none>" // --test "" asks about a client without SNI
-			}
-			switch {
-			case d.Err != "":
-				fmt.Printf("%s -> ERROR %s\n", sni, d.Err)
-			case d.Allow:
-				fmt.Printf("%s -> %s (rule line %d, %s: %s)\n", sni, net.JoinHostPort(d.Host, strconv.Itoa(d.Port)), d.RuleLine, d.Rule.Kind, d.Rule.Source)
-			case d.RuleLine == 0:
-				fmt.Printf("%s -> DENY (no rule matched)\n", sni)
-			default:
-				fmt.Printf("%s -> DENY (rule line %d, %s: %s)\n", sni, d.RuleLine, d.Rule.Kind, d.Rule.Source)
+		for _, w := range cfg.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		for _, name := range testSNIs {
+			for i := range cfg.Listeners {
+				d := cfg.ForListener(&cfg.Listeners[i]).Route(strings.ToLower(name))
+				sni := name
+				if sni == "" {
+					sni = "<none>" // --test "" asks about a client without SNI
+				}
+				if len(cfg.Listeners) > 1 {
+					sni = cfg.Listeners[i].Name + ": " + sni // each listener has its own rules
+				}
+				switch {
+				case d.Err != "":
+					fmt.Printf("%s -> ERROR %s\n", sni, d.Err)
+				case d.Allow:
+					fmt.Printf("%s -> %s (rule line %d, %s: %s)\n", sni, net.JoinHostPort(d.Host, strconv.Itoa(d.Port)), d.RuleLine, d.Rule.Kind, d.Rule.Source)
+				case d.RuleLine == 0:
+					fmt.Printf("%s -> DENY (no rule matched)\n", sni)
+				default:
+					fmt.Printf("%s -> DENY (rule line %d, %s: %s)\n", sni, d.RuleLine, d.Rule.Kind, d.Rule.Source)
+				}
 			}
 		}
 		return

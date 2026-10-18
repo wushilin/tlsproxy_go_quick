@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -200,7 +201,7 @@ port=8443   # listen port
 [[host]]
 pattern=*.wushilin.net
 action=allow
-target_host=$1.wushilin.internal.net
+target_host=${1}.wushilin.internal.net
 target_port=443
 
 [[host]]
@@ -254,7 +255,7 @@ func TestConfigSample(t *testing.T) {
 
 func TestConfigDefaultsAndValueForms(t *testing.T) {
 	c := mustParse(t, "[global]\r\nport = \"8443\" # quoted number\r\nidle_timeout = 0\r\n"+
-		"[[host]]\r\npattern = \"*.a\\.com\"  # comment\r\ntarget_host = '$1.b'\r\n")
+		"[[host]]\r\npattern = \"*.a\\.com\"  # comment\r\ntarget_host = '${1}.b'\r\n")
 	if c.Bind != "0.0.0.0" || c.IdleTimeout != 0 || c.HandshakeTimeout != 10*time.Second ||
 		c.HalfCloseTimeout != 30*time.Second || c.BufferSize != 65536 ||
 		c.BufferPoolMaxIdle != 2*c.MaxConnections || c.ReloadInterval != 5*time.Second {
@@ -267,7 +268,7 @@ func TestConfigDefaultsAndValueForms(t *testing.T) {
 
 func TestConfigRouting(t *testing.T) {
 	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=secret.*.com\naction=deny\n"+
-		"[[host]]\npattern=ANY\ntarget_host=$0\ntarget_port=8443\n")
+		"[[host]]\npattern=ANY\ntarget_host=${host}\ntarget_port=8443\n")
 	if route(t, c, "secret.x.com") != "DENY" || route(t, c, "public.x.com") != "public.x.com:8443" {
 		t.Fatal("the more specific rule must win")
 	}
@@ -278,8 +279,8 @@ func TestConfigRouting(t *testing.T) {
 	if d := none.Route("a.com"); d.Allow || d.RuleLine != 0 {
 		t.Fatalf("%+v", d)
 	}
-	re := mustParse(t, "[global]\nport=1\n[[host]]\npattern=www.*.example.*\ntarget_host=$1-$2.lan\n[[host]]\npattern=*.sample.*\ntarget_host=$1-$2.lan\n"+
-		"[[host]]\npattern=node*.x\ntarget_host=node${1}-mgmt\n[[host]]\npattern=*y\ntarget_host=got$1.lan\n")
+	re := mustParse(t, "[global]\nport=1\n[[host]]\npattern=www.*.example.*\ntarget_host=${1}-${2}.lan\n[[host]]\npattern=*.sample.*\ntarget_host=${1}-${2}.lan\n"+
+		"[[host]]\npattern=node*.x\ntarget_host=node${1}-mgmt\n[[host]]\npattern=*y\ntarget_host=got${1}.lan\n")
 	for sni, want := range map[string]string{
 		"www.shop.example.com": "shop-com.lan:443", "API.Sample.NET": "api-net.lan:443",
 		"a.b.example.com": "DENY", "node12.x": "node12-mgmt:443", "node.x": "node-mgmt:443", "node1.2.x": "DENY", "y": "got.lan:443", "xy": "gotx.lan:443",
@@ -292,7 +293,7 @@ func TestConfigRouting(t *testing.T) {
 
 func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern = NONE\ntarget_host = 10.0.0.99\ntarget_port = 8443\n"+
-		"[[host]]\npattern = *.ok\ntarget_host = $1.lan\n")
+		"[[host]]\npattern = *.ok\ntarget_host = ${1}.lan\n")
 	for sni, want := range map[string]string{
 		"": "10.0.0.99:8443", "a.ok": "a.lan:443",
 		"none":  "DENY", // a host literally named "none" is not "no SNI"
@@ -304,7 +305,7 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 	}
 	// Any letter case, quoted or not; and it can deny ahead of a catch-all allow.
 	for _, form := range []string{"none", "None", `"NONE"`, "'none'"} {
-		c := mustParse(t, "[global]\nport=1\n[[host]]\npattern="+form+"\naction=deny\n[[host]]\npattern=.*\ntarget_host=$0\n")
+		c := mustParse(t, "[global]\nport=1\n[[host]]\npattern="+form+"\naction=deny\n[[host]]\npattern=.*\ntarget_host=${host}\n")
 		if d := c.Route(""); d.Allow || d.RuleLine != 3 {
 			t.Errorf("%s: %+v", form, d)
 		}
@@ -317,12 +318,12 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 	if route(t, lit, "none") != "n.lan:443" || route(t, lit, "") != "DENY" {
 		t.Error("^none$ must match the host name, not a missing SNI")
 	}
-	// No groups to expand: $0 is empty (route error), $1 doesn't exist (load error).
-	if got := route(t, mustParse(t, "[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=$0\n"), ""); got != "ERROR" {
+	// No groups to expand: ${host} is empty (route error), ${1} doesn't exist (load error).
+	if got := route(t, mustParse(t, "[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=${host}\n"), ""); got != "ERROR" {
 		t.Error(got)
 	}
-	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=$1.lan\n"); err == nil {
-		t.Error("$1 with pattern NONE must be rejected")
+	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=${1}.lan\n"); err == nil {
+		t.Error("${1} with pattern NONE must be rejected")
 	}
 }
 
@@ -341,11 +342,11 @@ func TestConfigErrors(t *testing.T) {
 		"[global]\nbind=1.2.3.4\n", // no port
 		"[global]\nport=70000\n", "[global]\nport=0\n", "[global]\nport=abc\n", "port=1\n",
 		"[global]\nport=1\n[other]\n", "[global]\nport=1\nfoo=bar\n", "[global]\nport=1\nnovalue\n", "[global\nport=1\n",
-		"[global]\nport=1\nbuffer_size=100\n", "[global]\nport=1\nbuffer_size=99999999\n",
+		"[global]\nport=1\nbuffer_size=lots\n", "[global]\nport=1\nbuffer_size=-1\n",
 		"[global]\nport=1\nreload_interval=1\n", "[global]\nport=1\nreload_interval=4\n",
 		"[global]\nport=1\n[[host]]\npattern=a\n",                            // allow without target
 		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=10.0.0.1:8080\n", // the port belongs in target_port
-		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=[::1]:443\n", "[global]\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=$1:8080\n",
+		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=[::1]:443\n", "[global]\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=${1}:8080\n",
 		"[global]\nport=1\n[[host]]\npattern=a\naction=nope\n",
 		"[global]\nport=1\n[[host]]\npattern=\"abc\n", "[global]\nport=1\n[[host]]\npattern='abc\n",
 		"[global]\nport=1\n[[host]]\npattern=\"a\" junk\n",
@@ -353,7 +354,7 @@ func TestConfigErrors(t *testing.T) {
 		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=x\ntarget_port=0\n",
 		"[global]\nport=1\n[[host]]\ntarget_host=x\n", // no pattern
 		"[global]\nport=1\n[[host]]\npattern=a\ncolor=red\n",
-		"[global]\nport=1\n[[host]]\npattern=.*\ntarget_host=$3\n", // no such group
+		"[global]\nport=1\n[[host]]\npattern=.*\ntarget_host=${3}\n", // no such group
 	} {
 		if _, err := ParseConfig(text); err == nil {
 			t.Errorf("should fail: %q", text)
@@ -362,7 +363,8 @@ func TestConfigErrors(t *testing.T) {
 }
 
 // Every samples/*.toml (and config.toml) must parse, and every
-// "#> sni => target" line in it must route as documented.
+// "#> sni => target" line in it must route as documented ("#> name: sni =>
+// target" on the listener called name).
 func TestSamplesRouteAsDocumented(t *testing.T) {
 	files, _ := filepath.Glob("samples/*.toml")
 	files = append(files, "config.toml")
@@ -385,10 +387,18 @@ func TestSamplesRouteAsDocumented(t *testing.T) {
 				t.Fatalf("%s: bad expectation %q", path, line)
 			}
 			sni, want = strings.TrimSpace(sni), strings.TrimSpace(want)
+			on := cfg // "#> lab: sni => target" asks the listener named lab
+			if name, rest, ok := strings.Cut(sni, ": "); ok {
+				l := cfg.Listener(name)
+				if l == nil {
+					t.Fatalf("%s: no listener %s in %q", path, name, line)
+				}
+				on, sni = cfg.ForListener(l), rest
+			}
 			if sni == "<none>" {
 				sni = ""
 			}
-			if got := route(t, cfg, strings.ToLower(sni)); got != want {
+			if got := route(t, on, strings.ToLower(sni)); got != want {
 				t.Errorf("%s: routing %q: got %s want %s", path, sni, got, want)
 			}
 			checked++
@@ -434,8 +444,8 @@ func TestDocumentedDefaultsMatchCode(t *testing.T) {
 
 func fwd(host string) Decision { return Decision{Allow: true, Host: host, Port: 443, RuleLine: 1} }
 
-func TestLRUEvictsExactlyLeastRecentlyUsed(t *testing.T) {
-	c := newLRU[string](3)
+func TestClockCacheEvictsLeastRecentlyUsed(t *testing.T) {
+	c := newClock[string](3)
 	for _, k := range []string{"a", "b", "c"} {
 		c.Put(k, k)
 	}
@@ -449,7 +459,7 @@ func TestLRUEvictsExactlyLeastRecentlyUsed(t *testing.T) {
 	if v, _ := c.Get("a"); c.Contains("c") || c.Len() != 3 || v != "a2" {
 		t.Fatal("wrong eviction or update")
 	}
-	one := newLRU[int](1)
+	one := newClock[int](1)
 	one.Put("a", 1)
 	one.Put("b", 2)
 	if one.Contains("a") || !one.Contains("b") {
@@ -645,10 +655,10 @@ func TestPatternKinds(t *testing.T) {
 
 func TestWildcardsStayWithinALabel(t *testing.T) {
 	c := mustParse(t, "[global]\nport=1\n"+
-		"[[host]]\npattern=*.abc.com\ntarget_host=one-$1\n"+
-		"[[host]]\npattern=abc*.abc.com\ntarget_host=part-$1\n"+
-		"[[host]]\npattern=*.*.abc.com\ntarget_host=$2-$1-$0\n"+
-		"[[host]]\npattern=*-*.x.org\ntarget_host=$1.$2\n"+
+		"[[host]]\npattern=*.abc.com\ntarget_host=one-${1}\n"+
+		"[[host]]\npattern=abc*.abc.com\ntarget_host=part-${1}\n"+
+		"[[host]]\npattern=*.*.abc.com\ntarget_host=${2}-${1}-${host}\n"+
+		"[[host]]\npattern=*-*.x.org\ntarget_host=${1}.${2}\n"+
 		"[[host]]\npattern=*\ntarget_host=single\n")
 	for sni, want := range map[string]string{
 		"www.abc.com":   "one-www:443",
@@ -667,11 +677,11 @@ func TestWildcardsStayWithinALabel(t *testing.T) {
 		}
 	}
 	// A reference to a * that is not there is a load error, as it always was for groups.
-	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=$2.lan\n"); err == nil {
-		t.Error("$2 with one * should be rejected")
+	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=${2}.lan\n"); err == nil {
+		t.Error("${2} with one * should be rejected")
 	}
-	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=ANY\ntarget_host=$1.lan\n"); err == nil {
-		t.Error("$1 with ANY should be rejected: only $0 exists")
+	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=ANY\ntarget_host=${1}.lan\n"); err == nil {
+		t.Error("${1} with ANY should be rejected: only ${host} exists")
 	}
 }
 
@@ -680,10 +690,10 @@ func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
 	// The wildcard is a bare value: no quotes are needed after the "=".
 	c := mustParse(t, "[global]\nport=1\n"+
 		"[[host]]\npattern = ANY\ntarget_host=catchall\n"+
-		"[[host]]\npattern = *.*.wushilin.net\ntarget_host=deep-$1-$2\n"+
-		"[[host]]\npattern = *.wushilin.net   # one label\ntarget_host=wild-$1\n"+
-		"[[host]]\npattern = api-*.wushilin.net\ntarget_host=api-$1\n"+
-		"[[host]]\npattern = \"*.*.example.org\"\ntarget_host=$2-$1\n"+
+		"[[host]]\npattern = *.*.wushilin.net\ntarget_host=deep-${1}-${2}\n"+
+		"[[host]]\npattern = *.wushilin.net   # one label\ntarget_host=wild-${1}\n"+
+		"[[host]]\npattern = api-*.wushilin.net\ntarget_host=api-${1}\n"+
+		"[[host]]\npattern = \"*.*.example.org\"\ntarget_host=${2}-${1}\n"+
 		"[[host]]\npattern = VQ.Wushilin.Net\ntarget_host=literal\ntarget_port=8003\n"+
 		"[[host]]\npattern = blocked.wushilin.net\naction=deny\n"+
 		"[[host]]\npattern = none\ntarget_host=nosni\n")
@@ -730,6 +740,100 @@ func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
 	} {
 		if _, err := ParseConfig("[global]\nport=1\n" + text); err == nil {
 			t.Errorf("%s: should be rejected", name)
+		}
+	}
+}
+
+// Target references are always in braces: ${1}, ${2}, ... for the *s and
+// ${host} (or ${0}) for the whole name. Anything else after a $ is refused
+// at load time, so ${1}hello can never be read as ${1h}ello or $1 + hello.
+func TestTargetReferences(t *testing.T) {
+	for target, want := range map[string]string{
+		"${1}hello.lan": "apihello.lan",
+		"${host}":       "api.eu.example.com",
+		"${0}":          "api.eu.example.com",
+		"${2}-${1}.lan": "eu-api.lan",
+		"x${1}${2}.lan": "xapieu.lan",
+		"fixed.lan":     "fixed.lan",
+	} {
+		c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=*.*.example.com\ntarget_host="+target+"\n")
+		if got := route(t, c, "api.eu.example.com"); got != want+":443" {
+			t.Errorf("%s: %s, want %s", target, got, want)
+		}
+	}
+	for target, want := range map[string]string{
+		"$1.lan":     "write ${1}, not $1",
+		"$0":         "write ${0}, not $0",
+		"$12x.lan":   "write ${12}, not $12",
+		"$host":      "a $ must start",
+		"a$":         "a $ must start",
+		"$$":         "a $ must start",
+		"${1.lan":    "unterminated",
+		"${HOST}":    "unknown reference ${HOST}",
+		"${01}":      "unknown reference ${01}",
+		"${-1}":      "unknown reference ${-1}",
+		"${1|UPPER}": "unknown reference ${1|UPPER}",
+		"${3}.lan":   "${3} does not exist",
+	} {
+		_, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=*.*.example.com\ntarget_host=" + target + "\n")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", target, err, want)
+		}
+	}
+}
+
+// console/reference.json is generated from configReference, which must list
+// every key the parser accepts, under the section that accepts it.
+func TestConfigReference(t *testing.T) {
+	want, err := json.MarshalIndent(configReference, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+	if os.Getenv("UPDATE_REFERENCE") != "" {
+		if err := os.WriteFile("console/reference.json", want, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := os.ReadFile("console/reference.json"); string(got) != string(want) {
+		t.Fatal("console/reference.json is out of date: run UPDATE_REFERENCE=1 go test -run TestConfigReference")
+	}
+	documented := map[string]map[string]bool{}
+	for _, s := range configReference {
+		documented[s.Section] = map[string]bool{}
+		for _, k := range s.Keys {
+			documented[s.Section][k.Key] = true
+		}
+	}
+	// Every documented key, tried alone in its section: the parser must not
+	// call it unknown (as it does a made-up key, checked first).
+	for _, sec := range configReference {
+		if _, err := ParseConfig(sec.Section + "\nno_such_key = x\n"); err == nil || !strings.Contains(err.Error(), "unknown key") {
+			t.Fatalf("%s: a made-up key gives %v; this test can't tell known keys from unknown", sec.Section, err)
+		}
+		for _, k := range sec.Keys {
+			if _, err := ParseConfig(sec.Section + "\n" + k.Key + " = x\n"); err != nil && strings.Contains(err.Error(), "unknown key") {
+				t.Errorf("%s %s is documented but the parser does not know it: %v", sec.Section, k.Key, err)
+			}
+		}
+	}
+	// And the other way: every key the parser accepts is documented somewhere.
+	src, _ := os.ReadFile("config.go")
+	notOptions := map[string]bool{"global": true, "logging": true, "console": true, "host": true,
+		"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true}
+	for _, m := range regexp.MustCompile(`case ("[a-z_0-9]+"(?:, "[a-z_0-9]+")*):`).FindAllStringSubmatch(string(src), -1) {
+		for _, k := range strings.Split(m[1], ", ") {
+			k = strings.Trim(k, `"`)
+			if notOptions[k] {
+				continue
+			}
+			found := false
+			for _, keys := range documented {
+				found = found || keys[k]
+			}
+			if !found {
+				t.Errorf("the parser accepts %q, but the console's reference does not list it", k)
+			}
 		}
 	}
 }
