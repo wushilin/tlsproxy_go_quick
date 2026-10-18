@@ -23,6 +23,8 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-mod=vendor \
     mkdir -p /out/etc /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot
+LABEL org.opencontainers.image.source="https://github.com/wushilin/tlsproxy_go_quick" \
+      org.opencontainers.image.description="TLS SNI proxy: pass-through or terminate, ACME and local CAs, web console"
 COPY --from=build /out/tlsproxy /usr/local/bin/tlsproxy
 COPY --from=build --chown=65532:65532 /out/etc /etc/tlsproxy
 COPY --from=build --chown=65532:65532 /out/data /var/lib/tlsproxy

@@ -34,7 +34,9 @@ go test ./...                                          # ~50 s; needs no network
 
 Each release is also an image on Docker Hub,
 [`docker.io/wushilin/tlsproxy_go_quick`](https://hub.docker.com/r/wushilin/tlsproxy_go_quick),
-tagged with the version (`v1.2.0`) and `latest`, for `linux/amd64` and
+and the same image on the GitHub Container Registry,
+[`ghcr.io/wushilin/tlsproxy_go_quick`](https://github.com/wushilin/tlsproxy_go_quick/pkgs/container/tlsproxy_go_quick)
+(use either in the commands below), tagged with the version (`v1.2.0`) and `latest`, for `linux/amd64` and
 `linux/arm64`: the static binary on a distroless base (CA certificates,
 nothing else), running as uid 65532, about 12 MB.
 

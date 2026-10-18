@@ -2,7 +2,8 @@
 # every test run, in-process and offline), Windows, and a real FreeBSD VM.
 # Builds amd64 and arm64 binaries for all three operating systems and the
 # container image; tags push the image to docker.io/wushilin/tlsproxy_go_quick and
-# publish a GitHub Release, only after all checks pass.
+# ghcr.io/wushilin/tlsproxy_go_quick and publish a GitHub Release, only after
+# all checks pass.
 name: ci
 
 on:
@@ -115,8 +116,12 @@ jobs:
     needs: [test, windows, freebsd, build] # nothing is pushed unless everything passed
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io with the job's own token
     env:
       IMAGE: docker.io/wushilin/tlsproxy_go_quick
+      GHCR_IMAGE: ghcr.io/wushilin/tlsproxy_go_quick
     steps:
       - uses: actions/checkout@v4
         with:
@@ -134,6 +139,13 @@ jobs:
         with:
           username: wushilin
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Log in to GitHub Container Registry
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build (and, for a tag, push)
         uses: docker/build-push-action@v6
         with:
@@ -141,9 +153,14 @@ jobs:
           build-args: VERSION=${{ steps.version.outputs.version }}
           platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          # The source annotation links the ghcr.io package to this repository
+          # (its Packages list). Index annotations need a multi-platform push.
+          annotations: ${{ startsWith(github.ref, 'refs/tags/v') && format('index:org.opencontainers.image.source={0}/{1}', github.server_url, github.repository) || '' }}
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE }}:latest
+            ${{ env.GHCR_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.GHCR_IMAGE }}:latest
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
