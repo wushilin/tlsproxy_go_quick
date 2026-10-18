@@ -142,8 +142,9 @@ needs nothing but this repository (dependencies are vendored).
 
 ## Platforms
 
-Release builds cover **Windows, Linux and FreeBSD**, each on **amd64 and
-arm64**. Windows binaries end in `.exe`. The core proxy, TLS, ACME, console,
+Release builds cover **Linux and Windows** on **amd64 and arm64**, and
+**FreeBSD on amd64** (for FreeBSD on arm64, build it yourself:
+`GOOS=freebsd GOARCH=arm64 go build`). Windows binaries end in `.exe`. The core proxy, TLS, ACME, console,
 PROXY protocol and log rotation have no Linux-only dependency.
 
 - Linux and FreeBSD support `SIGUSR1` to dump connection state and
@@ -158,7 +159,7 @@ PROXY protocol and log rotation have no Linux-only dependency.
   account's directory permissions to protect keys and configuration.
 
 GitHub Actions tests on Linux and Windows and in a FreeBSD VM, cross-builds
-all six release binaries with `CGO_ENABLED=0`, builds the container image,
+all five release binaries with `CGO_ENABLED=0`, builds the container image,
 and for a tag, after all checks pass, pushes the image and attaches the
 binaries with `SHA256SUMS` and `config.toml` to the release.
 
@@ -510,7 +511,7 @@ target_host = 192.168.1.40
 | `acme_directory` | Let's Encrypt production | use `https://acme-staging-v02.api.letsencrypt.org/directory` while testing |
 | `acme_ca_file` | (none) | extra root for the ACME server's own HTTPS (private CA, Pebble) |
 | `public_ip_address` | (none) | `;`-separated, IPv4 and IPv6. A name is only sent to the CA if **all** its public addresses (A and AAAA) are among these; without it the check is skipped (with a warning) |
-| `dns_resolvers` | 1.1.1.1; 8.8.8.8 | resolvers for that check; deliberately not the local one, which may return LAN addresses |
+| `dns_resolvers` | (required with `cert = auto` and `public_ip_address`) | public DNS servers for that check, IP or IP:port, asked in order until one answers, e.g. `1.1.1.1; 8.8.8.8; 2606:4700:4700::1111`; deliberately not the local one, which may return LAN addresses |
 
 ### Your own CA (`cert = local-ca`)
 

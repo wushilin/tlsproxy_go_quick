@@ -206,7 +206,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			item(g, "cert_path", cfg.CertPath),
 			item(g, "expiry_threshold_days", strconv.Itoa(cfg.ExpiryThresholdDays)),
 			item(g, "public_ip_address", listOr(cfg.PublicIPs, "not checked")),
-			item(g, "dns_resolvers", listOr(cfg.DNSResolvers, "system")),
+			item(g, "dns_resolvers", listOr(cfg.DNSResolvers, "none (required when the pre-check runs)")),
 		}
 		out = append(out, certs)
 	}

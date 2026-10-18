@@ -47,7 +47,7 @@ var configReference = []sectionDoc{
 		{"acme_directory", "Let's Encrypt production", "ACME directory URL."},
 		{"acme_ca_file", "(none)", "Extra root CA for the ACME server's own HTTPS (a private CA, Pebble)."},
 		{"public_ip_address", "(not checked)", "cert = auto only asks the CA when the name resolves to one of these addresses, separated by ;."},
-		{"dns_resolvers", "1.1.1.1; 8.8.8.8", "Resolvers used for that check."},
+		{"dns_resolvers", "required with cert = auto and public_ip_address", "Public DNS servers for that check, IP or IP:port, asked in order: 1.1.1.1; 8.8.8.8; 2606:4700:4700::1111."},
 		{"io_model", "", "Legacy: accepted and ignored."},
 		{"worker_threads", "", "Legacy: accepted and ignored."},
 	}},

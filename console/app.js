@@ -2599,54 +2599,97 @@ $("ca-imp-form").addEventListener("submit", (ev) => {
 
 const CERT_STATUS = { ok: "chip ok", expiring: "chip warn", missing: "chip warn", expired: "chip bad", failing: "chip bad" };
 
+let certData = null;
+let certFilter = "";
+
 function loadCerts() {
-  return getJSON("api/certs").then(renderCerts);
+  return getJSON("api/certs").then((d) => { certData = d; renderCerts(d); });
 }
 
-function cell(tr, cls, text) {
-  const td = el("td", cls, text);
-  tr.appendChild(td);
-  return td;
+$("cert-filter").addEventListener("input", (ev) => {
+  certFilter = ev.target.value.trim().toLowerCase();
+  if (certData) renderCerts(certData);
+});
+
+// certMatches: the filter against the name, every name in the certificate,
+// the CA and the status.
+function certMatches(c) {
+  if (!certFilter) return true;
+  return [c.Name, ...(c.Names || []), c.Source === "auto" ? "acme" : c.CA, c.Status]
+    .some((s) => s && s.toLowerCase().includes(certFilter));
+}
+
+// removeButton archives the certificate after a second click to confirm.
+function removeButton(c) {
+  const [b, label] = actionButton("Remove", "danger");
+  b.title = c.Source === "auto"
+    ? "Move it to cert_path's _archive (deleted after 14 days) and request a new one"
+    : `Move it to CA ${c.CA}'s _archive (deleted after 14 days); a new one is issued when a client asks for it`;
+  let armed = 0;
+  b.addEventListener("click", () => {
+    if (!armed) {
+      b.classList.add("armed");
+      setText(label, "Confirm remove");
+      armed = setTimeout(() => { armed = 0; b.classList.remove("armed"); setText(label, "Remove"); }, ARM_MS);
+      return;
+    }
+    clearTimeout(armed);
+    b.disabled = true;
+    api("api/certs/remove", { source: c.Source, ca: c.CA || "", name: c.Name })
+      .then(() => { toast(`Removed ${c.Name}: moved to the archive`); return loadCerts(); })
+      .catch((e) => { b.disabled = false; toast(`Could not remove ${c.Name}: ${e.message}`, true); });
+  });
+  return b;
 }
 
 function renderCerts(d) {
   setText($("cert-meta"), `automatic ones live in ${d.certPath || "—"} · ${d.acmeDirectory || ""}`);
-  const body = $("certs");
-  body.replaceChildren();
-  const list = d.certs || [];
-  if (!list.length) {
-    const tr = el("tr");
-    const td = cell(tr, "empty-cell");
-    td.colSpan = 10;
+  const list = $("certs");
+  list.replaceChildren();
+  const all = d.certs || [];
+  const certs = all.filter(certMatches);
+  if (!certs.length) {
     const empty = el("div", "empty");
     const img = el("img");
     img.src = "logo-sleep.svg";
     img.alt = "";
-    empty.append(img, el("span", "", "No rule terminates TLS, so there are no certificates."));
-    td.appendChild(empty);
-    body.appendChild(tr);
+    empty.append(img, el("span", "", all.length ? `No certificate matches “${certFilter}”.` : "No rule terminates TLS, so there are no certificates."));
+    list.appendChild(empty);
     return;
   }
-  for (const c of list) {
-    const tr = el("tr");
-    const name = cell(tr, "mono", c.Name);
-    if (c.Names && c.Names.length && c.Names.join(", ") !== c.Name) name.appendChild(el("span", "sub", c.Names.join(", ")));
-    cell(tr, "", c.Source === "auto" ? "proxy (ACME, automatic)" : `proxy (CA ${c.CA}, automatic)`);
-    cell(tr, "").appendChild(el("span", CERT_STATUS[c.Status] || "chip", c.Status));
-    cell(tr, "", c.Issuer || "—");
-    cell(tr, "num", c.NotAfter || "—");
-    cell(tr, "r num" + (c.NotAfter && c.DaysLeft < 8 ? " bad" : ""), c.NotAfter ? String(c.DaysLeft) : "—");
-    cell(tr, "num", c.RenewFrom || "—");
-    cell(tr, "", (c.RuleLines || []).map((l) => "line " + l).join(", ") || "—");
-    const det = cell(tr, "wide");
-    if (c.LastError) {
-      det.appendChild(el("span", "bad", `Last attempt failed: ${c.LastError}`));
-      det.appendChild(el("span", "sub", `next attempt ${c.NextAttempt || "—"}`));
-    } else {
-      det.appendChild(el("span", "", c.Detail || ""));
+  for (const c of certs) {
+    const card = el("div", "ca-card" + (c.LastError ? " broken" : ""));
+    const main = el("div", "ca-main");
+    const head = el("div", "ca-head");
+    head.append(el("span", "ca-name mono", c.Name), el("span", CERT_STATUS[c.Status] || "chip", c.Status));
+    head.appendChild(el("span", c.Source === "auto" ? "chip tls" : "chip", c.Source === "auto" ? "ACME" : `local CA ${c.CA}`));
+    if (c.NotAfter) {
+      const exp = el("span", c.DaysLeft < 8 ? "chip bad" : c.DaysLeft < 30 ? "chip warn" : "chip ok", `until ${c.NotAfter} · ${c.DaysLeft} days`);
+      if (c.RenewFrom) exp.title = `Renewed automatically from ${c.RenewFrom}`;
+      head.appendChild(exp);
     }
-    if (c.Dir) det.appendChild(el("span", "sub mono", c.Dir));
-    const act = cell(tr, "");
+    main.appendChild(head);
+    if (c.Names && c.Names.length && c.Names.join(", ") !== c.Name) {
+      const names = el("div", "ca-line");
+      names.append(el("span", "ca-k", "names"), el("span", "mono", c.Names.join(", ")));
+      main.appendChild(names);
+    }
+    const facts = el("div", "ca-line ca-facts");
+    facts.append(el("span", "ca-k", "issuer"), el("span", "", c.Issuer || "—"),
+      el("span", "ca-k", "renews from"), el("span", "num", c.RenewFrom || "—"),
+      el("span", "ca-k", "used by"), el("span", "", (c.RuleLines || []).map((l) => "line " + l).join(", ") || "no rule"));
+    main.appendChild(facts);
+    if (c.LastError) {
+      main.appendChild(el("div", "ca-line bad", `Last attempt failed: ${c.LastError}`));
+      const next = el("div", "ca-line");
+      next.append(el("span", "ca-k", "next attempt"), el("span", "num", c.NextAttempt || "—"));
+      main.appendChild(next);
+    } else if (c.Detail) {
+      main.appendChild(el("div", "ca-line", c.Detail));
+    }
+    if (c.Dir) main.appendChild(el("div", "ca-line mono ca-fp", c.Dir));
+    card.appendChild(main);
+    const act = el("div", "ca-actions");
     if (c.Source === "auto" && c.LastError) {
       const [b] = actionButton("Retry now", "");
       b.addEventListener("click", () => {
@@ -2657,7 +2700,9 @@ function renderCerts(d) {
       });
       act.appendChild(b);
     }
-    body.appendChild(tr);
+    if (c.Removable) act.appendChild(removeButton(c));
+    if (act.childElementCount) card.appendChild(act);
+    list.appendChild(card);
   }
 }
 

@@ -223,7 +223,7 @@ func (m *CertManager) Apply(cfg *Config) error {
 	// again after a restart, so they keep being renewed.
 	if entries, err := os.ReadDir(cfg.CertPath); err == nil {
 		for _, e := range entries {
-			if d := e.Name(); e.IsDir() && !m.dynamic[d] && scriptFor(cfg, d) != "" {
+			if d := e.Name(); e.IsDir() && validDomain(d) && !m.dynamic[d] && scriptFor(cfg, d) != "" {
 				m.candidates[d] = true
 			}
 		}
@@ -308,11 +308,13 @@ func (m *CertManager) reloadLocalCAConfigs() {
 // renewLocalCAs is the local CAs' renewal pass, run at start and every
 // localRenewInterval: each CA's own certificate when due, every certificate
 // it issued that is due (and a rule still issues for), and archives over 14
-// days old (each CA's, and ca_root's own of deleted CAs).
+// days old (each CA's, ca_root's own of deleted CAs, and cert_path's of
+// removed automatic certificates).
 func (m *CertManager) renewLocalCAs() {
 	cfg := m.current().cfg
 	if cfg != nil {
 		pruneArchiveDir(filepath.Join(cfg.CARoot, localArchiveName))
+		pruneArchiveDir(filepath.Join(cfg.CertPath, localArchiveName))
 	}
 	m.localCAs.Range(func(_ string, l *localCA) bool {
 		if err := l.renewCA(); err != nil {
@@ -1043,7 +1045,7 @@ func checkDNS(ctx context.Context, cfg *Config, domain string) error {
 	if len(cfg.PublicIPs) == 0 {
 		return nil
 	}
-	var lastErr error
+	var errs []string
 	for _, server := range cfg.DNSResolvers {
 		if _, _, err := net.SplitHostPort(server); err != nil {
 			server = net.JoinHostPort(server, "53")
@@ -1053,7 +1055,19 @@ func checkDNS(ctx context.Context, cfg *Config, domain string) error {
 		}}
 		addrs, err := r.LookupNetIP(ctx, "ip", domain)
 		if err != nil {
-			lastErr = err
+			// The error names the system's resolver (Dial ignores the address
+			// it is given), not the one asked.
+			var de *net.DNSError
+			var oe *net.OpError
+			switch {
+			case errors.As(err, &de) && de.IsNotFound: // an answer, not a failure: another resolver won't change it
+				return fmt.Errorf("DNS pre-check: %s does not exist (resolver %s: %s)", domain, server, de.Err)
+			case errors.As(err, &oe):
+				err = oe.Err // "read: connection refused", without the addresses again
+			case de != nil:
+				err = errors.New(de.Err)
+			}
+			errs = append(errs, fmt.Sprintf("%s: %v", server, err))
 			continue
 		}
 		// Every address must be ours, A and AAAA alike: the CA picks one itself
@@ -1078,7 +1092,7 @@ func checkDNS(ctx context.Context, cfg *Config, domain string) error {
 		return permanentError{fmt.Errorf("DNS pre-check: %s resolves to %s, of which %s is not in public_ip_address (%s)%s; not asking the CA",
 			domain, strings.Join(got, ", "), strings.Join(foreign, ", "), strings.Join(cfg.PublicIPs, ", "), hint)}
 	}
-	return fmt.Errorf("DNS pre-check: cannot resolve %s: %w", domain, lastErr)
+	return fmt.Errorf("DNS pre-check: cannot resolve %s; no resolver answered (%s)", domain, strings.Join(errs, "; "))
 }
 
 func (m *CertManager) acmeClient(cfg *Config) (*acme.Client, error) {
@@ -1340,6 +1354,7 @@ type CertInfo struct {
 	NotBefore   string
 	NotAfter    string
 	DaysLeft    int
+	Removable   bool   // RemoveCertificate accepts it: local-ca always, auto only when something is wrong
 	RenewFrom   string // auto only
 	LastError   string // auto only: why the last attempt failed
 	NextAttempt string // auto only: when it is retried
@@ -1412,6 +1427,7 @@ func (m *CertManager) Snapshot() []CertInfo {
 					info.Status = "failing"
 				}
 			}
+			info.Removable = autoRemovable(c, m.lastError[k], info.Dir, now)
 		}
 		out = append(out, info)
 	}
@@ -1427,7 +1443,7 @@ func (m *CertManager) Snapshot() []CertInfo {
 		sort.Slice(leaves, func(i, j int) bool { return leaves[i].Leaf.DNSNames[0] < leaves[j].Leaf.DNSNames[0] })
 		for _, c := range leaves {
 			name := c.Leaf.DNSNames[0]
-			info := CertInfo{Name: name, Source: "local-ca", CA: l.id, Dir: filepath.Join(dir, name), RuleLines: lines}
+			info := CertInfo{Name: name, Source: "local-ca", CA: l.id, Dir: filepath.Join(dir, name), RuleLines: lines, Removable: true}
 			fill(&info, c)
 			if info.Status == "expiring" || info.Status == "ok" {
 				info.Status = "ok" // the renewal pass takes care of it
@@ -1439,6 +1455,67 @@ func (m *CertManager) Snapshot() []CertInfo {
 		return true
 	})
 	return out
+}
+
+// autoRemovable says whether an automatic certificate may be removed: only
+// when something is wrong with it (expired, its last attempt failed, or its
+// files are there but unusable). A valid one that renews normally may not.
+func autoRemovable(c *tls.Certificate, lastError, dir string, now time.Time) bool {
+	if c == nil || c.Leaf == nil {
+		_, err := os.Stat(dir)
+		return err == nil
+	}
+	return lastError != "" || now.After(c.Leaf.NotAfter)
+}
+
+// RemoveCertificate archives a certificate (local-ca: of CA ca) and forgets
+// it. A local CA issues the name again when a client asks; an automatic name
+// is requested again at once (a script-accepted one: when a client asks and
+// the script agrees again).
+func (m *CertManager) RemoveCertificate(source, ca, name string) error {
+	if source == "local-ca" {
+		cfg := m.current().cfg
+		l := (*localCA)(nil)
+		if cfg != nil {
+			l = m.LocalCA(cfg, ca)
+		}
+		if l == nil {
+			return fmt.Errorf("no rule uses a CA %q", ca)
+		}
+		return l.remove(name)
+	}
+	m.lock()
+	cfg := m.cfg
+	switch {
+	case cfg == nil || !slices.Contains(m.managedLocked(cfg), name):
+		m.unlock()
+		return fmt.Errorf("%s is not an automatic certificate name", name)
+	case m.inFlight[name]:
+		m.unlock()
+		return fmt.Errorf("%s is being requested right now; try again in a moment", name)
+	case !autoRemovable(m.auto[name], m.lastError[name], autoDir(cfg, name), time.Now()):
+		m.unlock()
+		if m.auto[name] == nil {
+			return fmt.Errorf("%s has no certificate yet: nothing to remove", name)
+		}
+		return fmt.Errorf("%s is valid and renews normally: nothing to remove", name)
+	}
+	to, err := moveToArchive(cfg.CertPath, name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		m.unlock()
+		return err
+	}
+	delete(m.auto, name)
+	delete(m.dynamic, name)
+	delete(m.nextTry, name)
+	delete(m.lastError, name)
+	m.unlock()
+	logf("cert: %s: removed from the console; moved to %s, deleted after 14 days; requested again if a rule still asks for it", name, to)
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // RetryNow clears a name's wait and wakes the worker. False if the name is

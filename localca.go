@@ -81,8 +81,24 @@ type caState struct {
 
 type localLeaf struct {
 	name string
-	cert atomic.Pointer[tls.Certificate] // read without a lock
-	mu   sync.Mutex                      // held to load, issue, renew or write this name's certificate
+	cur  atomic.Pointer[leafState] // read without a lock
+	mu   sync.Mutex                // held to load, issue, renew or write this name's certificate
+}
+
+// leafState is a certificate in memory and the CA state it was checked
+// against. When the CA's state is replaced (renewed, or its files changed on
+// disk), the certificate is checked again, once, before it is served.
+type leafState struct {
+	cert *tls.Certificate
+	ca   *caState
+}
+
+// current is the certificate in memory, nil if none.
+func (e *localLeaf) current() *tls.Certificate {
+	if st := e.cur.Load(); st != nil {
+		return st.cert
+	}
+	return nil
 }
 
 // caLocks serialises the operations on one CA (by its folder): making it,
@@ -341,31 +357,45 @@ func renewDue(c *x509.Certificate) time.Time {
 // certificate returns the certificate for name, loading it from disk or
 // issuing it on first use and renewing it when due.
 //
-// The usual case, a current certificate in memory, takes no lock. Loading,
-// issuing and renewing hold the name's lock: a second handshake for the same
-// new name waits for the first (well under a millisecond) and gets its
-// certificate, so only one is ever issued and its files are written once.
+// The usual case, a current certificate in memory that was checked against
+// the CA as it is now, takes no lock and reads no file. Loading, issuing,
+// renewing and checking again hold the name's lock: a second handshake for
+// the same new name waits for the first (well under a millisecond) and gets
+// its certificate, so only one is ever issued and its files are written once.
 func (l *localCA) certificate(name string) (*tls.Certificate, error) {
 	e := l.entry(name)
 	if e == nil {
 		return nil, errLocalCAFull
 	}
-	if cur := e.cert.Load(); cur != nil && time.Now().Before(l.leafRenewDue(cur.Leaf)) {
-		return cur, nil
+	ca := l.ca.Load()
+	if st := e.cur.Load(); st != nil && st.ca == ca && time.Now().Before(l.leafRenewDue(st.cert.Leaf)) {
+		return st.cert, nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	cur := e.cert.Load() // again: the handshake we waited for may have done it
-	if cur != nil && time.Now().Before(l.leafRenewDue(cur.Leaf)) {
-		return cur, nil
+	ca = l.ca.Load()
+	var cur *tls.Certificate
+	if st := e.cur.Load(); st != nil { // again: the handshake we waited for may have done it
+		cur = st.cert
+		if st.ca != ca { // the CA changed since: is this still its certificate?
+			if cur = withChain(cur, ca); cur == nil {
+				l.archive(name, "not issued by the CA's current certificate")
+				e.cur.Store(nil)
+			} else {
+				e.cur.Store(&leafState{cert: cur, ca: ca})
+			}
+		}
+		if cur != nil && time.Now().Before(l.leafRenewDue(cur.Leaf)) {
+			return cur, nil
+		}
 	}
 	if cur == nil { // first use in this process: a certificate from an earlier run?
-		if c := l.fromDisk(name); c != nil {
-			e.cert.Store(c)
+		if c := l.fromDisk(name, ca); c != nil {
+			e.cur.Store(&leafState{cert: c, ca: ca})
 			return c, nil
 		}
 	}
-	c, err := l.issue(name)
+	c, err := l.issue(name, ca)
 	if err != nil {
 		if cur != nil {
 			return cur, nil // keep serving the old one; renewal is tried again next time
@@ -375,7 +405,7 @@ func (l *localCA) certificate(name string) (*tls.Certificate, error) {
 	if err := l.save(name, c); err != nil {
 		errorf("cert: CA %s: %s: issued, but could not be saved (it is issued again after a restart): %v", l.id, name, err)
 	}
-	e.cert.Store(c)
+	e.cur.Store(&leafState{cert: c, ca: ca})
 	logf("cert: CA %s: %s %s, valid until %s", l.id, map[bool]string{true: "renewed", false: "issued"}[cur != nil], name,
 		c.Leaf.NotAfter.UTC().Format("2006-01-02"))
 	return c, nil
@@ -405,10 +435,33 @@ func (l *localCA) entry(name string) *localLeaf {
 	return nil
 }
 
-// fromDisk loads name's certificate if this CA issued it, it covers exactly
-// that name and it is not due for renewal. Anything else in the folder is
-// moved to the archive, so it is never used.
-func (l *localCA) fromDisk(name string) *tls.Certificate {
+// find is name's slot, nil if it has none (unlike entry, it never adds one).
+func (l *localCA) find(name string) *localLeaf {
+	h := maphash.String(l.seed, name)
+	for i := range uint64(localTableSize) {
+		e := l.slot[(h+i)&(localTableSize-1)].Load()
+		if e == nil || e.name == name {
+			return e
+		}
+	}
+	return nil
+}
+
+// withChain is c, checked against ca: nil if ca did not issue it, else c
+// sent with ca's chain as it is now (an intermediate may have been replaced).
+func withChain(c *tls.Certificate, ca *caState) *tls.Certificate {
+	if c.Leaf.CheckSignatureFrom(ca.cert) != nil {
+		return nil
+	}
+	out := *c
+	out.Certificate = append([][]byte{c.Certificate[0]}, ca.chain...)
+	return &out
+}
+
+// fromDisk loads name's certificate if ca issued it, it covers exactly that
+// name and it is not due for renewal. Anything else in the folder is moved to
+// the archive, so it is never used.
+func (l *localCA) fromDisk(name string, ca *caState) *tls.Certificate {
 	dir := filepath.Join(l.dir, name)
 	if _, err := os.Stat(dir); err != nil {
 		return nil // nothing there: issue one
@@ -418,14 +471,14 @@ func (l *localCA) fromDisk(name string) *tls.Certificate {
 	switch {
 	case err != nil:
 		why = err.Error()
-	case c.Leaf.CheckSignatureFrom(l.ca.Load().cert) != nil:
+	case c.Leaf.CheckSignatureFrom(ca.cert) != nil:
 		why = "not issued by this CA"
 	case len(c.Leaf.DNSNames) != 1 || c.Leaf.DNSNames[0] != name:
 		why = fmt.Sprintf("it is for %v, not %s", c.Leaf.DNSNames, name)
 	case !time.Now().Before(l.leafRenewDue(c.Leaf)):
 		return nil // ours, but due: issue a new one (it overwrites this)
 	default:
-		return &c
+		return withChain(&c, ca)
 	}
 	l.archive(name, why)
 	return nil
@@ -433,15 +486,47 @@ func (l *localCA) fromDisk(name string) *tls.Certificate {
 
 // archive moves name's folder aside, with the time in its name.
 func (l *localCA) archive(name, why string) {
-	to := filepath.Join(l.dir, localArchiveName, name+"-"+time.Now().UTC().Format("20060102150405"))
-	if err := os.MkdirAll(filepath.Join(l.dir, localArchiveName), 0o700); err == nil {
-		err = os.Rename(filepath.Join(l.dir, name), to)
-		if err == nil {
-			errorf("cert: CA %s: %s: the certificate on disk is not used (%s); moved to %s, deleted after 14 days; a new one is issued", l.id, name, why, to)
-			return
-		}
+	if to, err := moveToArchive(l.dir, name); err == nil {
+		errorf("cert: CA %s: %s: the certificate on disk is not used (%s); moved to %s, deleted after 14 days; a new one is issued", l.id, name, why, to)
+		return
 	}
 	errorf("cert: CA %s: %s: the certificate on disk is not used (%s), and could not be moved aside", l.id, name, why)
+}
+
+// moveToArchive renames dir/name to dir/_archive/<name>-<UTC time>, where
+// pruneArchiveDir deletes it after 14 days. A name archived twice in one
+// second takes the next free second.
+func moveToArchive(dir, name string) (string, error) {
+	if err := os.MkdirAll(filepath.Join(dir, localArchiveName), 0o700); err != nil {
+		return "", err
+	}
+	at := time.Now().UTC()
+	for range 60 {
+		to := filepath.Join(dir, localArchiveName, name+"-"+at.Format("20060102150405"))
+		if _, err := os.Lstat(to); errors.Is(err, os.ErrNotExist) {
+			return to, os.Rename(filepath.Join(dir, name), to)
+		}
+		at = at.Add(time.Second)
+	}
+	return "", fmt.Errorf("%s: no free name in %s", name, filepath.Join(dir, localArchiveName))
+}
+
+// remove archives name's certificate (from the console) and forgets it: the
+// next client that asks for the name gets a new one, if a rule still issues it.
+func (l *localCA) remove(name string) error {
+	e := l.find(name)
+	if e == nil || e.current() == nil {
+		return fmt.Errorf("CA %s has no certificate for %s", l.id, name)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	to, err := moveToArchive(l.dir, name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	e.cur.Store(nil)
+	logf("cert: CA %s: %s: removed from the console; moved to %s, deleted after 14 days; a new one is issued when a client asks for it", l.id, name, to)
+	return nil
 }
 
 // renewAll renews, ahead of expiry, every certificate in the CA's folder that
@@ -498,8 +583,8 @@ func (l *localCA) leafRenewDue(c *x509.Certificate) time.Time {
 	return renewDue(c)
 }
 
-func (l *localCA) issue(name string) (*tls.Certificate, error) {
-	ca, conf := l.ca.Load(), l.config().Cert
+func (l *localCA) issue(name string, ca *caState) (*tls.Certificate, error) {
+	conf := l.config().Cert
 	key, err := newKey(conf.KeyAlgorithm, conf.KeyBits)
 	if err != nil {
 		return nil, err
@@ -569,7 +654,7 @@ func (l *localCA) leaves() []*tls.Certificate {
 	var out []*tls.Certificate
 	for i := range l.slot {
 		if e := l.slot[i].Load(); e != nil {
-			if c := e.cert.Load(); c != nil {
+			if c := e.current(); c != nil {
 				out = append(out, c)
 			}
 		}
