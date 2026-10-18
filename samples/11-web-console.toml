@@ -15,6 +15,7 @@ port = 443
 cert_path = /var/db/tlsproxy/certs
 acme_agree_tos = true
 public_ip_address = 203.0.113.7
+dns_resolvers = 1.1.1.1; 8.8.8.8
 
 [console]
 listen = 127.0.0.1                 # default. Anything else logs a warning: plain HTTP on the network

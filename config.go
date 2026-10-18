@@ -58,7 +58,7 @@ type Config struct {
 	CARoot              string   // where the local CAs (caNNN) and what they issued live
 	ExpiryThresholdDays int      // renew this many days before expiry
 	PublicIPs           []string // auto-issue only if the name resolves to one of these
-	DNSResolvers        []string // public resolvers for that check (host or host:port)
+	DNSResolvers        []string // public resolvers for that check (IP or IP:port); required when it runs
 	AcmeEmail           string   // optional contact for the ACME account
 	AcmeAgreeTOS        bool     // must be true before anything is issued
 	AcmeDirectory       string   // ACME directory URL
@@ -560,7 +560,6 @@ func ParseConfig(text string) (*Config, error) {
 		CertPath:            "./certs",
 		CARoot:              "./ca",
 		ExpiryThresholdDays: 15,
-		DNSResolvers:        []string{"1.1.1.1", "8.8.8.8"},
 		AcmeDirectory:       LetsEncryptDirectory,
 	}
 	poolMaxIdle := -1
@@ -722,6 +721,12 @@ func ParseConfig(text string) (*Config, error) {
 			case "dns_resolvers":
 				if cfg.DNSResolvers = splitList(value); len(cfg.DNSResolvers) == 0 {
 					err = fail("dns_resolvers must not be empty")
+				}
+				for _, server := range cfg.DNSResolvers {
+					if !resolverAddress(server) {
+						err = fail("dns_resolvers: %q is not an IP address or IP:port (an IPv6 one with a port is [2606:4700:4700::1111]:53)", server)
+						break
+					}
 				}
 			case "acme_email":
 				cfg.AcmeEmail = value
@@ -967,6 +972,11 @@ func ParseConfig(text string) (*Config, error) {
 			cfg.Warnings = append(cfg.Warnings, "cert = auto without public_ip_address: the DNS pre-check is skipped, so a misconfigured name will burn CA rate limits")
 		}
 	}
+	if len(cfg.PublicIPs) > 0 && len(cfg.DNSResolvers) == 0 && slices.ContainsFunc(cfg.Rules, func(r Rule) bool { return r.Cert == "auto" }) {
+		return nil, fmt.Errorf("cert = auto with public_ip_address needs dns_resolvers in [global]: the public DNS servers that check each name resolves here " +
+			"before the CA is asked (not the local resolver, which may answer with LAN addresses). " +
+			"For example: dns_resolvers = 1.1.1.1; 8.8.8.8; 2606:4700:4700::1111; 2001:4860:4860::8888")
+	}
 	return cfg, nil
 }
 
@@ -984,6 +994,17 @@ func parseBinds(value string) ([]string, error) {
 		return nil, fmt.Errorf("bind must not be empty")
 	}
 	return binds, nil
+}
+
+// resolverAddress is an IP address, or IP:port, of a DNS server. Names are
+// refused: looking one up would need the system's resolver, which is what
+// dns_resolvers avoids.
+func resolverAddress(v string) bool {
+	if _, err := netip.ParseAddr(v); err == nil {
+		return true
+	}
+	_, err := netip.ParseAddrPort(v)
+	return err == nil
 }
 
 // parsePrefixes reads proxy_protocol_from: addresses or networks.

@@ -415,7 +415,7 @@ func TestCertDirectoryIsRefused(t *testing.T) {
 }
 
 func TestCertConfigValidation(t *testing.T) {
-	auto := "[global]\nbind=::\nport=443\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\n"
+	auto := "[global]\nbind=::\nport=443\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\ndns_resolvers=1.1.1.1\n"
 	c := mustParse(t, auto+"[[host]]\npattern=nas\\.example\\.com\ncert=auto\ntarget_host=10.0.0.5\n"+
 		"[[host]]\npattern=*.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=${1}.lan\n"+
 		"[[host]]\npattern=plain\\.example\\.com\ntarget_host=10.0.0.6\n")
@@ -471,7 +471,7 @@ func TestRenewalScheduleAndPriority(t *testing.T) {
 		t.Fatal(got)
 	}
 	m := NewCertManager()
-	m.cfg = mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=*.t\\.com\ncert=auto\n"+
+	m.cfg = mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\npattern=*.t\\.com\ncert=auto\n"+
 		"cert_domains=fresh.t.com,due-later.t.com,missing.t.com,due-sooner.t.com,expired.t.com,backoff.t.com\ntarget_host=x.lan\n")
 	m.auto["fresh.t.com"] = leaf(90*day, 10*day)
 	m.auto["due-later.t.com"] = leaf(90*day, 80*day)
@@ -620,10 +620,22 @@ func TestDNSPreCheckUsesTheConfiguredResolvers(t *testing.T) {
 	if err := checkDNS(ctx, cfg("203.0.113.7; 2001:DB8::BAD"), "www.example.test"); err != nil {
 		t.Fatalf("both addresses listed (in any spelling): %v", err)
 	}
+	// Resolvers are asked in order until one answers; when none does, the
+	// error names each one asked and what went wrong there.
+	dead := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	both := mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s; %s\npublic_ip_address=203.0.113.7; 2001:db8::bad\n", dead, dns))
+	if err := checkDNS(ctx, both, "www.example.test"); err != nil {
+		t.Fatalf("the second resolver answers: %v", err)
+	}
+	none := mustParse(t, fmt.Sprintf("[global]\nport=443\ndns_resolvers=%s; %s\npublic_ip_address=203.0.113.7\n", dead, dead))
+	err = checkDNS(ctx, none, "www.example.test")
+	if err == nil || !strings.Contains(err.Error(), "("+dead+": ") || !strings.Contains(err.Error(), "; "+dead+": ") || !strings.Contains(err.Error(), "no resolver answered") {
+		t.Fatalf("every resolver's failure must be named: %v", err)
+	}
 }
 
 func TestIssuanceRetriesAndLogging(t *testing.T) {
-	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=*.retry\\.test\ncert=auto\n"+
+	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\npattern=*.retry\\.test\ncert=auto\n"+
 		"cert_domains=flaky.retry.test,wrongdns.retry.test,down.retry.test\ntarget_host=x.lan\n")
 	m := NewCertManager()
 	m.cfg = cfg
@@ -809,7 +821,7 @@ func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
 // Names are independent: several jobs run at once, but never two for one name.
 func TestCertificateJobsRunInParallelPerName(t *testing.T) {
 	names := []string{"a.par.test", "b.par.test", "c.par.test", "d.par.test", "e.par.test", "f.par.test"}
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n[[host]]\npattern=*.par\\.test\ncert=auto\ncert_domains=%s\ntarget_host=x.lan\n",
+	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n[[host]]\npattern=*.par\\.test\ncert=auto\ncert_domains=%s\ntarget_host=x.lan\n",
 		t.TempDir(), strings.Join(names, ",")))
 	m := NewCertManager()
 	var mu sync.Mutex
@@ -878,7 +890,7 @@ func clientHelloALPN(sni, proto string) []byte {
 // An automatic certificate that is due is renewed: the worker's job gets a
 // new one, which is then what clients are given.
 func TestAutomaticRenewalReplacesTheCertificate(t *testing.T) {
-	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=renew.t.com\ncert=auto\ntarget_host=x.lan\n")
+	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\npattern=renew.t.com\ncert=auto\ntarget_host=x.lan\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)

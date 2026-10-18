@@ -106,6 +106,7 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("GET /api/connections", c.authed(c.connections))
 	mux.HandleFunc("GET /api/certs", c.authed(c.certs))
 	mux.HandleFunc("POST /api/certs/retry", c.authed(c.certRetry))
+	mux.HandleFunc("POST /api/certs/remove", c.authed(c.certRemove))
 	mux.HandleFunc("GET /api/cas", c.authed(c.caList))
 	mux.HandleFunc("GET /api/cas/cert", c.authed(c.caCert))
 	mux.HandleFunc("POST /api/cas/generate", c.authed(c.caGenerate))
@@ -436,6 +437,19 @@ func (c *Console) certRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logf("console: retry requested for certificate %s", req.Domain)
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (c *Console) certRemove(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Source, CA, Name string }
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		fail(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if err := c.srv.certs.RemoveCertificate(req.Source, req.CA, req.Name); err != nil {
+		fail(w, http.StatusBadRequest, "%s", err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

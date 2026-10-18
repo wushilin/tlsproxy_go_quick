@@ -2,8 +2,27 @@
 
 ## Unreleased
 
+Breaking:
+- `dns_resolvers` has no default any more: `cert = auto` with
+  `public_ip_address` needs it, or the config is refused with an error that
+  says what to add (e.g. `dns_resolvers = 1.1.1.1; 8.8.8.8; 2606:4700:4700::1111`).
+  Entries must be IP addresses or IP:port.
+
+- Console: certificates are cards, with a filter (name, CA, status) and a
+  Remove button. A local CA's certificate can always be removed (archived;
+  the next client gets a new one); an ACME one only when something is wrong
+  with it (expired, last attempt failed, unusable files). The server enforces
+  the same rule. Removed ACME certificates go to `<cert_path>/_archive`,
+  deleted after 14 days.
+- A local CA's certificate in memory is checked again (once) whenever its CA
+  changes, and served with the CA's current chain; one the CA did not sign is
+  archived and replaced. Serving still reads no file.
+- DNS pre-check errors name the resolver actually asked (not the system one),
+  stop at a definite "no such host", and list every resolver that failed.
 - Releases also push the image to `ghcr.io/wushilin/tlsproxy_go_quick`
   (listed under the repository's Packages); v1.2.0 is copied there as is.
+- Release binaries no longer include FreeBSD arm64 (build it with
+  `GOOS=freebsd GOARCH=arm64 go build`).
 
 ## v1.2.0
 

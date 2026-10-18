@@ -47,7 +47,7 @@ acme_email = admin@example.com           # optional account contact
 acme_directory = https://acme-staging-v02.api.letsencrypt.org/directory   # default: Let's Encrypt production
 acme_ca_file = /usr/local/etc/ssl/private-ca.pem   # extra root for the ACME server's own HTTPS
 public_ip_address = 203.0.113.7; 2001:db8::1       # only ask the CA for names resolving to one of these
-dns_resolvers = 9.9.9.9; 1.1.1.1:53                # resolvers for that check (host or host:port)
+dns_resolvers = 9.9.9.9; 1.1.1.1:53                # resolvers for that check (IP or IP:port); required with public_ip_address
 
 # Legacy keys, accepted so older config files keep loading, and ignored:
 io_model = events

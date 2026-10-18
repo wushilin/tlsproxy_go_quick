@@ -546,7 +546,7 @@ func TestLocalCACertificateLifecycle(t *testing.T) {
 
 	// Time passes: what is in memory is now due.
 	due := dueCert(t, l, "life.test")
-	l.entry("life.test").cert.Store(due)
+	l.entry("life.test").cur.Store(&leafState{cert: due, ca: l.ca.Load()})
 	renewed, err := l.certificate("life.test")
 	if err != nil {
 		t.Fatal(err)

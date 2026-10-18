@@ -62,7 +62,7 @@ func TestCertValidateScriptConfig(t *testing.T) {
 func TestCertValidateScriptDecidesIssuanceAndRenewal(t *testing.T) {
 	dir := t.TempDir()
 	script := validateScript(t, dir, acceptOK)
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n"+
+	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
 		"[[host]]\npattern=*.s\\.test\ncert=auto\ncert_domains=listed.s.test\ncert_validate_script=%s\ntarget_host=x.lan\n", filepath.Join(dir, "certs"), script))
 	rule := &cfg.Rules[0]
 	m := NewCertManager()
@@ -180,7 +180,7 @@ func TestCertValidateScriptAdoptsCertificatesOnDisk(t *testing.T) {
 	os.MkdirAll(filepath.Join(certPath, "other.example.org"), 0o700) // not covered by the rule
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "cert.pem"), certPEM, 0o600)
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "key.pem"), keyPEM, 0o600)
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ncert_path=%s\n"+
+	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
 		"[[host]]\npattern=*.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\n", certPath, script))
 	m := NewCertManager()
 	m.issueFunc = func(context.Context, *Config, string) error { t.Error("nothing needs issuing"); return nil }
@@ -221,7 +221,7 @@ func TestCertValidateScriptTimeoutCountsAsRefusal(t *testing.T) {
 // A flood of random names must not cost a key and a certificate each: names the
 // configuration does not list share one placeholder per rule.
 func TestPlaceholderIsSharedForClientChosenNames(t *testing.T) {
-	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n"+
+	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n"+
 		"[[host]]\npattern=*.s3.test\ncert=auto\ncert_domains=www.s3.test\ncert_validate_script=/nonexistent\ntarget_host=x.lan\n"+
 		"[[host]]\npattern=*.re\\.test\ncert=auto\ncert_validate_script=/nonexistent\ntarget_host=y.lan\n")
 	m := NewCertManager()

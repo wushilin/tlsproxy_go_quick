@@ -108,13 +108,12 @@
         <div class="panel-head">
           <h2>Certificates</h2>
           <span class="sub mono" id="cert-meta"></span>
+          <div class="search">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <input id="cert-filter" type="search" placeholder="Filter by name, CA or status" aria-label="Filter certificates">
+          </div>
         </div>
-        <div class="scroll">
-          <table class="grid">
-            <thead><tr><th>Name</th><th>Managed by</th><th>Status</th><th>Issuer</th><th>Valid until</th><th class="r">Days left</th><th>Renews from</th><th>Rules</th><th>Details</th><th></th></tr></thead>
-            <tbody id="certs"></tbody>
-          </table>
-        </div>
+        <div class="ca-list" id="certs"></div>
       </div>
     </section>
 
