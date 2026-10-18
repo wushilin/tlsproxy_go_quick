@@ -32,36 +32,111 @@ go test ./...                                          # ~50 s; needs no network
 
 ### Docker
 
-Each release is also an image, `docker.io/wushilin/tlsproxy_go_quick:<version>` (and
-`:latest`), for `linux/amd64` and `linux/arm64`: the static binary on a
-distroless base (CA certificates, nothing else), running as uid 65532.
+Each release is also an image on Docker Hub,
+[`docker.io/wushilin/tlsproxy_go_quick`](https://hub.docker.com/r/wushilin/tlsproxy_go_quick),
+tagged with the version (`v1.2.0`) and `latest`, for `linux/amd64` and
+`linux/arm64`: the static binary on a distroless base (CA certificates,
+nothing else), running as uid 65532, about 12 MB.
+
+These steps were run as written against the published `v1.2.0` image.
+
+**1. A folder for the configuration and one for state:**
 
 ```sh
 mkdir -p /srv/tlsproxy/etc /srv/tlsproxy/data
-cp config.toml /srv/tlsproxy/etc/                      # your configuration
-chown -R 65532:65532 /srv/tlsproxy                      # the container's user writes both
+```
+
+**2. A configuration.** A small one to start from (the image also carries
+the full reference as `/etc/tlsproxy/config.toml.example`):
+
+```sh
+cat > /srv/tlsproxy/etc/config.toml <<'CONFIG'
+[global]
+port = 443
+
+[console]
+listen = 0.0.0.0          # inside the container; publish it on the host's loopback only
+port = 9443
+password = change-me      # replaced by password_hash on first start
+
+# Pass TLS for this name through to a backend, untouched.
+[[host]]
+pattern = www.example.com
+target_host = 192.0.2.10
+target_port = 443
+
+# Everything else is refused.
+[[host]]
+pattern = ANY
+action = deny
+CONFIG
+```
+
+**3. Let the container's user own both** (it writes the config: the
+password becomes a hash, and the console saves edits; and its state:
+certificates, CAs):
+
+```sh
+sudo chown -R 65532:65532 /srv/tlsproxy
+```
+
+**4. Run it:**
+
+```sh
 docker run -d --name tlsproxy --restart unless-stopped \
   -p 443:443 -p 127.0.0.1:9443:9443 \
-  -v /srv/tlsproxy/etc:/etc/tlsproxy -v /srv/tlsproxy/data:/var/lib/tlsproxy \
+  -v /srv/tlsproxy/etc:/etc/tlsproxy:Z \
+  -v /srv/tlsproxy/data:/var/lib/tlsproxy:Z \
   docker.io/wushilin/tlsproxy_go_quick:latest
 ```
 
-- `/etc/tlsproxy/config.toml` is the configuration. It must be writable: the
-  proxy replaces a plain `password` with its hash, and the console saves
-  edits there. The image carries the documented example as
-  `config.toml.example`.
-- `/var/lib/tlsproxy` is the working directory, so the default `cert_path`
-  (`./certs`) and `ca_root` (`./ca`) live there; keep it on a volume.
-- The console must listen on `0.0.0.0` inside the container to be reached
-  through `-p`; publish it on the host's loopback (as above) and keep the
-  password strong.
-- Port 443 as a non-root user: Docker allows it in containers by default.
-  Rootless Podman and Kubernetes don't; add
-  `--sysctl net.ipv4.ip_unprivileged_port_start=0` (Podman) or the same
-  sysctl in the pod's `securityContext`, or listen on a high port inside and
-  map 443 to it.
-- Build it yourself with `docker build --build-arg VERSION=$(git describe --tags) -t tlsproxy .`:
-  it needs nothing but this repository (dependencies are vendored).
+`:Z` lets the container use the folders on SELinux hosts (Fedora, RHEL and
+the like); elsewhere it does nothing. Without it, SELinux refuses with
+`open /etc/tlsproxy/config.toml: permission denied`.
+
+**5. Check it:**
+
+```sh
+docker logs tlsproxy
+#   listening on default 0.0.0.0:443 with 1 listener(s), 2 rules (...)
+#   console: replaced the plaintext password in /etc/tlsproxy/config.toml with its hash
+#   console: listening on http://0.0.0.0:9443/tlsproxy_quick/ (plain HTTP; password required)
+```
+
+The console is at `http://127.0.0.1:9443/` on the host (it redirects to
+`/tlsproxy_quick/`); sign in with the password from step 2. A warning that
+the console listens on `0.0.0.0` is expected inside a container: the port is
+only published on the host's loopback.
+
+**Everyday commands:**
+
+```sh
+# Where would these names go? (a dry run with the same config)
+docker run --rm -v /srv/tlsproxy/etc:/etc/tlsproxy:Z docker.io/wushilin/tlsproxy_go_quick:latest \
+  /etc/tlsproxy/config.toml --test www.example.com other.example
+#   www.example.com -> 192.0.2.10:443 (rule line 10, literal: www.example.com)
+#   other.example -> DENY (rule line 16, catch-all: ANY)
+
+# A password_hash line for [console], without the password in a file
+echo 'my secret' | docker run --rm -i docker.io/wushilin/tlsproxy_go_quick:latest --hash-password
+
+# Upgrade: the configuration and state stay in the folders
+docker pull docker.io/wushilin/tlsproxy_go_quick:latest
+docker rm -f tlsproxy   # then step 4 again
+```
+
+**Port 443 and other runtimes.** The container runs as a non-root user.
+Docker lets containers bind ports below 1024 by default; rootless Podman and
+Kubernetes don't. With Podman add
+`--sysctl net.ipv4.ip_unprivileged_port_start=0` to step 4 (a rootless user
+also can't publish host port 443 itself: use e.g. `-p 8443:443` and forward,
+and `podman unshare chown -R 65532:65532 /srv/tlsproxy` in step 3); in
+Kubernetes set the same sysctl in the pod's `securityContext`, or listen on a
+high port inside and map 443 to it.
+
+**Build it yourself:**
+`docker build --build-arg VERSION=$(git describe --tags) -t tlsproxy .`
+needs nothing but this repository (dependencies are vendored).
 
 ## Platforms
 
