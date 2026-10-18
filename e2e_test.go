@@ -32,6 +32,19 @@ func startProxy(t *testing.T, global, rules string) *proxyUnderTest {
 
 func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 	t.Helper()
+	if !strings.Contains(text, "ca_root") { // the run's shared CAs (see testCA.localCA)
+		withRoot := strings.Replace(text, "[global]\n", "[global]\nca_root = "+testCARoot()+"\n", 1)
+		// The file must say what was parsed (reloads and the password
+		// rewrite compare the two), so it gets the same line.
+		if path != "" {
+			if onDisk, err := os.ReadFile(path); err == nil && string(onDisk) == text {
+				if err := os.WriteFile(path, []byte(withRoot), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		text = withRoot
+	}
 	cfg, err := ParseConfig(text)
 	if err != nil {
 		t.Fatalf("bad test config: %v\n%s", err, text)
@@ -45,7 +58,14 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 		t.Fatalf("server: %v", err)
 	}
 	go srv.Serve(l, path)
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() {
+		l.Close()
+		srv.listenersMu.Lock() // and any further listener the config opened
+		for _, live := range srv.listeners {
+			live.close()
+		}
+		srv.listenersMu.Unlock()
+	})
 	return &proxyUnderTest{addr: l.Addr().String(), srv: srv}
 }
 
@@ -177,7 +197,7 @@ func TestRoutesBySNI(t *testing.T) {
 	p := startProxy(t, "", fmt.Sprintf(
 		"[[host]]\npattern=*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=*.*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 			"[[host]]\npattern=b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=*.b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=vip.*\ntarget_host=$0\n[[host]]\npattern=ANY\naction=deny\n", a, a, b, b))
+			"[[host]]\npattern=vip.*\ntarget_host=${host}\n[[host]]\npattern=ANY\naction=deny\n", a, a, b, b))
 	roundtrip(t, p, "x.a.test", "A")
 	roundtrip(t, p, "y.z.a.test", "A")
 	roundtrip(t, p, "b.test", "B")
@@ -191,7 +211,7 @@ func TestRoutesBySNI(t *testing.T) {
 func TestCaptureGroupBuildsTarget(t *testing.T) {
 	t.Parallel()
 	port := echoBackend(t, "C")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=*.*.*.*.fwd.test\ntarget_host=$1.$2.$3.$4\ntarget_port=%d\n", port))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=*.*.*.*.fwd.test\ntarget_host=${1}.${2}.${3}.${4}\ntarget_port=%d\n", port))
 	roundtrip(t, p, "127.0.0.1.fwd.test", "C")      // four captures, left to right
 	expectDenied(t, p, clientHello("nomatch.test")) // no rule matched
 }
@@ -244,7 +264,7 @@ func TestNonTLSIsDroppedWithoutReply(t *testing.T) {
 
 func TestHelloShapes(t *testing.T) {
 	t.Parallel()
-	p := startProxy(t, "buffer_size=512", allowAll(echoBackend(t, ""))) // tiny buffer forces the spill path
+	p := startProxy(t, "buffer_size=4096", allowAll(echoBackend(t, ""))) // the smallest buffer: big hellos spill
 	frag, big, slow := "frag.test", "pq.test", "slow.test"
 	for name, hello := range map[string][]byte{
 		"fragmented":   wrapRecords(buildClientHello(&frag, 0), 10),
@@ -289,7 +309,8 @@ func TestCachedRoutesBehaveLikeUncached(t *testing.T) {
 
 func TestLargeBidirectionalTransferIntegrity(t *testing.T) {
 	t.Parallel()
-	for _, global := range []string{"", "buffer_size=512\nbuffer_pool_max_idle=1"} {
+	// On Linux the first two are spliced; splice=false keeps the buffered copy.
+	for _, global := range []string{"", "buffer_size=4096\nbuffer_pool_max_idle=1", "splice=false", "splice=false\nbuffer_size=4096\nbuffer_pool_max_idle=1"} {
 		p := startProxy(t, global, allowAll(echoBackend(t, "")))
 		hello, data := clientHello("bulk.test"), pattern(16<<20, 42)
 		c := dial(t, p)
@@ -640,14 +661,13 @@ func TestStatsTrackConnectionsGoroutinesAndBytes(t *testing.T) {
 			t.Fatalf("totals: up=%d down=%d, want %d each", st.BytesUp.Load(), st.BytesDown.Load(), want)
 		}
 	}
-	st.mu.Lock()
-	for _, c := range st.conns {
+	registry, _ := st.connList(0)
+	for _, c := range registry {
 		if sni, dst, _ := c.info(); sni != "ok.test" || dst == "" || c.BytesUp.Load() != int64(len(hello)+1000) || c.BytesDown.Load() != int64(len(hello)+1000) {
 			t.Errorf("conn #%d: sni=%q dst=%q up=%d down=%d", c.ID, sni, dst, c.BytesUp.Load(), c.BytesDown.Load())
 		}
 	}
-	registered := len(st.conns)
-	st.mu.Unlock()
+	registered := len(registry)
 	if registered != 3 {
 		t.Fatal(registered)
 	}

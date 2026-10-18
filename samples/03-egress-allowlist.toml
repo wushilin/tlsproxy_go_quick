@@ -1,6 +1,6 @@
 # Egress allowlist: clients (e.g. IoT VLAN, redirected by a pfSense NAT port
 # forward on :443) may only reach approved sites; the proxy connects to the
-# real hostname ($0 = the whole SNI).
+# real hostname (${host} = the whole SNI).
 #
 # A * is one label, so every depth that is allowed is written down: github.com,
 # its direct subdomains, and nothing deeper. That is a feature here: one more
@@ -25,27 +25,27 @@ max_connections = 256
 
 [[host]]
 pattern = github.com
-target_host = $0
+target_host = ${host}
 
 [[host]]
 pattern = *.github.com
-target_host = $0
+target_host = ${host}
 
 [[host]]
 pattern = *.githubusercontent.com
-target_host = $0
+target_host = ${host}
 
 [[host]]
 pattern = time.apple.com
-target_host = $0
+target_host = ${host}
 
 [[host]]
 pattern = deb.debian.org
-target_host = $0
+target_host = ${host}
 
 [[host]]
 pattern = security.debian.org
-target_host = $0
+target_host = ${host}
 
 [[host]]
 pattern = ANY

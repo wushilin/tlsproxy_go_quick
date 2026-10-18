@@ -16,7 +16,6 @@ import (
 	"math/big"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +29,27 @@ type testCA struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey
 	pool *x509.CertPool
+
+	refOnce sync.Once
+	ref     string // this CA imported into testCARoot: local-ca:caNNN
+}
+
+// testCARoot is the ca_root every test proxy uses (startProxyText sets it),
+// shared by the whole run and removed by TestMain.
+var (
+	testCARootOnce sync.Once
+	testCARootDir  string
+)
+
+func testCARoot() string {
+	testCARootOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "tlsproxy-test-ca-")
+		if err != nil {
+			panic(err)
+		}
+		testCARootDir = dir
+	})
+	return testCARootDir
 }
 
 func newTestCA(t *testing.T) *testCA {
@@ -45,7 +65,7 @@ func newTestCA(t *testing.T) *testCA {
 	cert, _ := x509.ParseCertificate(der)
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
-	return &testCA{cert, key, pool}
+	return &testCA{cert: cert, key: key, pool: pool}
 }
 
 // issue returns PEM for a leaf valid for names (and 127.0.0.1) with the given life.
@@ -66,14 +86,27 @@ func (ca *testCA) issue(t *testing.T, life time.Duration, names ...string) (cert
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 }
 
-// certDir writes cert.pem + key.pem for names into a fresh directory.
-func (ca *testCA) certDir(t *testing.T, names ...string) string {
+// localCA imports this test CA into testCARoot (once) and returns what a
+// rule says to terminate with it: local-ca:caNNN. Clients that trust ca.pool
+// accept what the proxy issues for any name.
+func (ca *testCA) localCA(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	certPEM, keyPEM := ca.issue(t, 12*time.Hour, names...)
-	os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0o600)
-	os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0o600)
-	return dir
+	ca.refOnce.Do(func() {
+		root := testCARoot()
+		unlock := lockCARoot(root)
+		defer unlock()
+		id, dir, err := nextCADir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyDER, _ := x509.MarshalPKCS8PrivateKey(ca.key)
+		if _, err := importCA(dir, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.cert.Raw}),
+			pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})); err != nil {
+			t.Fatal(err)
+		}
+		ca.ref = "local-ca:" + id
+	})
+	return ca.ref
 }
 
 // tlsBackend is a TLS echo server (tag first) offering the given ALPN protocols.
@@ -108,7 +141,7 @@ func TestTerminateWithPlaintextUpstream(t *testing.T) {
 		fmt.Fprintf(c, "plain backend got %q", data)
 	})
 	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=app\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
-		ca.certDir(t, "app.test"), port))
+		ca.localCA(t), port))
 	tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "app.test", NextProtos: []string{"h2", "http/1.1"}})
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
@@ -143,7 +176,7 @@ func TestTerminateSendsProxyProtocolToPlaintextUpstream(t *testing.T) {
 				fmt.Fprintf(c, "backend got %q", data)
 			})
 			p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=proxy.test\ncert=%s\nupstream_tls=false\nproxy=true\nproxy_version=%d\ntarget_host=127.0.0.1\ntarget_port=%d\n",
-				ca.certDir(t, "proxy.test"), version, port))
+				ca.localCA(t), version, port))
 
 			raw := dial(t, p)
 			originalSource := raw.LocalAddr().String()
@@ -184,7 +217,7 @@ func TestTerminateSendsProxyProtocolBeforeUpstreamTLS(t *testing.T) {
 		upstream.CloseWrite()
 	})
 	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=proxy-tls.test\ncert=%s\nupstream_tls_verify=false\nproxy=true\nproxy_version=2\ntarget_host=127.0.0.1\ntarget_port=%d\n",
-		clientCA.certDir(t, "proxy-tls.test"), port))
+		clientCA.localCA(t), port))
 	raw := dial(t, p)
 	originalSource := raw.LocalAddr().String()
 	tc := tls.Client(raw, &tls.Config{RootCAs: clientCA.pool, ServerName: "proxy-tls.test"})
@@ -207,7 +240,7 @@ func TestTerminateWithTLSUpstreamNegotiatesALPNEndToEnd(t *testing.T) {
 	ca := newTestCA(t)
 	port := ca.tlsBackend(t, "B", "h2", "http/1.1")
 	rule := func(name, extra string) string {
-		return fmt.Sprintf("[[host]]\npattern=%s\ncert=%s\n%starget_host=127.0.0.1\ntarget_port=%d\n", strings.ReplaceAll(name, ".", `\.`), ca.certDir(t, name), extra, port)
+		return fmt.Sprintf("[[host]]\npattern=%s\ncert=%s\n%starget_host=127.0.0.1\ntarget_port=%d\n", strings.ReplaceAll(name, ".", `\.`), ca.localCA(t), extra, port)
 	}
 	p := startProxy(t, "", rule("noverify.test", "upstream_tls_verify=false\n")+rule("verify.test", ""))
 
@@ -248,7 +281,7 @@ func TestTerminationAndPassThroughSideBySide(t *testing.T) {
 	port := backendCA.tlsBackend(t, "P")
 	p := startProxy(t, "", fmt.Sprintf(
 		"[[host]]\npattern=term\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.certDir(t, "term.test"), port, port))
+			"[[host]]\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), port, port))
 	// Terminated: the client sees OUR certificate.
 	tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "term.test"})
 	if err != nil || tc.ConnectionState().PeerCertificates[0].Subject.CommonName != "term.test" {
@@ -272,7 +305,7 @@ func TestTerminatedTransferIntegrity(t *testing.T) {
 	ca := newTestCA(t)
 	plain := echoBackend(t, "")
 	secure := ca.tlsBackend(t, "")
-	dir := ca.certDir(t, "a.test", "b.test")
+	dir := ca.localCA(t)
 	p := startProxy(t, "buffer_size=4096", fmt.Sprintf(
 		"[[host]]\npattern=a\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 			"[[host]]\npattern=b\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", dir, plain, dir, secure))
@@ -317,16 +350,16 @@ func TestPlaceholderUntilAutomaticCertificateExists(t *testing.T) {
 func TestAnswersTLSALPN01Challenge(t *testing.T) {
 	t.Parallel()
 	ca := newTestCA(t)
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=.*\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.certDir(t, "x.test"), echoBackend(t, "")))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=.*\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), echoBackend(t, "")))
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	answer, err := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("token-123", "x.test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := p.srv.certs
-	m.mu.Lock()
+	m.lock()
 	m.challenges["x.test"] = &answer
-	m.mu.Unlock()
+	m.unlock()
 
 	// What the CA does: connect with ALPN acme-tls/1 and look at the certificate.
 	tc, err := tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: "x.test", NextProtos: []string{acme.ALPNProto}})
@@ -351,55 +384,40 @@ func TestAnswersTLSALPN01Challenge(t *testing.T) {
 	}
 }
 
-func TestDirectoryCertificateIsReloadedAndRequiredAtStartup(t *testing.T) {
+// A passed-through name's TLS-ALPN-01 challenges go to its target, even
+// while one of ours is pending for the same name: they are its backend's.
+func TestPassThroughForwardsTLSALPN01Challenges(t *testing.T) {
 	t.Parallel()
-	ca := newTestCA(t)
-	dir := ca.certDir(t, "old.test")
-	rules := fmt.Sprintf("[[host]]\npattern=.*\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", dir, echoBackend(t, ""))
-	p := startProxy(t, "", rules)
-	served := func() string {
-		tc, err := tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: "whatever.test"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer tc.Close()
-		return tc.ConnectionState().PeerCertificates[0].Subject.CommonName
-	}
-	if served() != "old.test" {
-		t.Fatal("initial certificate")
-	}
-	oldStat, err := os.Stat(filepath.Join(dir, "cert.pem"))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=x.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "P:")))
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	answer, err := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("token-123", "x.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, keyPEM := ca.issue(t, time.Hour, "new.test")
-	os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0o600)
-	os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0o600)
-	if err := os.Chtimes(filepath.Join(dir, "cert.pem"), oldStat.ModTime(), oldStat.ModTime()); err != nil {
-		t.Fatal(err)
+	m := p.srv.certs
+	m.lock()
+	m.challenges["x.test"] = &answer
+	m.unlock()
+	conn := dial(t, p)
+	conn.Write(clientHelloALPN("x.test", acme.ALPNProto))
+	if got := string(readN(t, conn, 2)); got != "P:" {
+		t.Fatalf("the challenge was not passed through: %q", got)
 	}
-	p.srv.certs.refreshFileCerts()
-	if served() != "new.test" {
-		t.Fatal("changed files were not picked up")
-	}
-	// A broken update keeps the previous certificate.
-	os.WriteFile(filepath.Join(dir, "cert.pem"), []byte("garbage"), 0o600)
-	os.Chtimes(filepath.Join(dir, "cert.pem"), time.Now(), time.Now().Add(2*time.Minute))
-	p.srv.certs.refreshFileCerts()
-	if served() != "new.test" {
-		t.Fatal("a broken file must not replace a working certificate")
-	}
+}
 
-	cfg := mustParse(t, "[global]\nport=1\n[[host]]\npattern=.*\ncert=/nonexistent/dir\ntarget_host=x.lan\n")
-	if _, err := NewServer(cfg); err == nil || !strings.Contains(err.Error(), "line 3") {
-		t.Fatalf("a missing certificate directory must be a startup error: %v", err)
+// cert = <dir> is gone: only auto (ACME) and local-ca terminate TLS, and
+// the error says what to do instead.
+func TestCertDirectoryIsRefused(t *testing.T) {
+	_, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=a.test\ncert=/etc/ssl/mine\ntarget_host=h\n")
+	if err == nil || !strings.Contains(err.Error(), "no longer supported") || !strings.Contains(err.Error(), "cert = local-ca") {
+		t.Fatalf("want a refusal naming the way forward: %v", err)
 	}
 }
 
 func TestCertConfigValidation(t *testing.T) {
 	auto := "[global]\nbind=::\nport=443\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\n"
 	c := mustParse(t, auto+"[[host]]\npattern=nas\\.example\\.com\ncert=auto\ntarget_host=10.0.0.5\n"+
-		"[[host]]\npattern=*.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=$1.lan\n"+
+		"[[host]]\npattern=*.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=${1}.lan\n"+
 		"[[host]]\npattern=plain\\.example\\.com\ntarget_host=10.0.0.6\n")
 	if got := fmt.Sprint(c.AutoDomains()); got != "[nas.example.com a.wushilin.net b.wushilin.net]" {
 		t.Fatal(got) // literal pattern derived; list lowercased and de-duplicated
@@ -418,7 +436,7 @@ func TestCertConfigValidation(t *testing.T) {
 		t.Fatal(c.Warnings)
 	}
 	for name, text := range map[string]string{
-		"regex without cert_domains": auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ntarget_host=$1.lan\n",
+		"regex without cert_domains": auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ntarget_host=${1}.lan\n",
 		"tos not agreed":             "[global]\nport=443\n[[host]]\npattern=a\\.x\\.com\ncert=auto\ntarget_host=x.lan\n",
 		"domain outside the pattern": auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ncert_domains=a.y.com\ntarget_host=x.lan\n",
 		"wildcard":                   auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ncert_domains=*.x.com\ntarget_host=x.lan\n",
@@ -474,11 +492,65 @@ func TestRenewalScheduleAndPriority(t *testing.T) {
 // is given (with no records otherwise).
 func fakeDNS(t *testing.T, ip string, ip6 ...string) string {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	return fakeDNSWith(t, ip, nil, ip6...)
+}
+
+// fakeDNSWith is fakeDNS, but the names in other get their own A address.
+// It answers over UDP and TCP on one port (Pebble asks over TCP).
+func fakeDNSWith(t *testing.T, ip string, other map[string]string, ip6 ...string) string {
+	t.Helper()
+	// One port for both: take a free UDP one, and try again if another test
+	// holds the same number for TCP.
+	var pc net.PacketConn
+	var tl net.Listener
+	for try := 0; ; try++ {
+		var err error
+		if pc, err = net.ListenPacket("udp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		if tl, err = net.Listen("tcp", pc.LocalAddr().String()); err == nil {
+			break
+		}
+		pc.Close()
+		if try == 20 {
+			t.Fatalf("no port free for both UDP and TCP: %v", err)
+		}
 	}
-	t.Cleanup(func() { pc.Close() })
+	t.Cleanup(func() { pc.Close(); tl.Close() })
+	answer := func(q []byte) []byte {
+		n := len(q)
+		end := 12 // skip the question name
+		for end < n && q[end] != 0 {
+			end += int(q[end]) + 1
+		}
+		end += 5
+		if n < 12 || end > n {
+			return nil
+		}
+		var labels []string
+		for i := 12; i < end-5 && q[i] != 0; i += int(q[i]) + 1 {
+			labels = append(labels, string(q[i+1:i+1+int(q[i])]))
+		}
+		addr := ip
+		if a, ok := other[strings.ToLower(strings.Join(labels, "."))]; ok {
+			addr = a
+		}
+		resp := append([]byte(nil), q[:end]...)
+		resp[2], resp[3] = 0x81, 0x80 // response, recursion available
+		binary.BigEndian.PutUint16(resp[6:], 0)
+		binary.BigEndian.PutUint16(resp[8:], 0)
+		binary.BigEndian.PutUint16(resp[10:], 0)
+		if binary.BigEndian.Uint16(q[end-4:]) == 1 { // type A
+			binary.BigEndian.PutUint16(resp[6:], 1)
+			resp = append(resp, 0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
+			resp = append(resp, net.ParseIP(addr).To4()...)
+		} else if binary.BigEndian.Uint16(q[end-4:]) == 28 && len(ip6) > 0 { // type AAAA
+			binary.BigEndian.PutUint16(resp[6:], 1)
+			resp = append(resp, 0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16)
+			resp = append(resp, net.ParseIP(ip6[0]).To16()...)
+		}
+		return resp
+	}
 	go func() {
 		buf := make([]byte, 1500)
 		for {
@@ -486,30 +558,35 @@ func fakeDNS(t *testing.T, ip string, ip6 ...string) string {
 			if err != nil {
 				return
 			}
-			q := buf[:n]
-			end := 12 // skip the question name
-			for end < n && q[end] != 0 {
-				end += int(q[end]) + 1
+			if resp := answer(buf[:n]); resp != nil {
+				pc.WriteTo(resp, addr)
 			}
-			end += 5
-			if n < 12 || end > n {
-				continue
+		}
+	}()
+	go func() { // DNS over TCP: each message after a two-byte length
+		for {
+			c, err := tl.Accept()
+			if err != nil {
+				return
 			}
-			resp := append([]byte(nil), q[:end]...)
-			resp[2], resp[3] = 0x81, 0x80 // response, recursion available
-			binary.BigEndian.PutUint16(resp[6:], 0)
-			binary.BigEndian.PutUint16(resp[8:], 0)
-			binary.BigEndian.PutUint16(resp[10:], 0)
-			if binary.BigEndian.Uint16(q[end-4:]) == 1 { // type A
-				binary.BigEndian.PutUint16(resp[6:], 1)
-				resp = append(resp, 0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
-				resp = append(resp, net.ParseIP(ip).To4()...)
-			} else if binary.BigEndian.Uint16(q[end-4:]) == 28 && len(ip6) > 0 { // type AAAA
-				binary.BigEndian.PutUint16(resp[6:], 1)
-				resp = append(resp, 0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16)
-				resp = append(resp, net.ParseIP(ip6[0]).To16()...)
-			}
-			pc.WriteTo(resp, addr)
+			go func() {
+				defer c.Close()
+				for {
+					var l [2]byte
+					if _, err := io.ReadFull(c, l[:]); err != nil {
+						return
+					}
+					q := make([]byte, binary.BigEndian.Uint16(l[:]))
+					if _, err := io.ReadFull(c, q); err != nil {
+						return
+					}
+					resp := answer(q)
+					if resp == nil {
+						return
+					}
+					c.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(resp))), resp...))
+				}
+			}()
 		}
 	}()
 	return pc.LocalAddr().String()
@@ -649,7 +726,7 @@ func TestUpstreamSNIDefaultsToTheClientsName(t *testing.T) {
 			tc.CloseWrite()
 		}
 	})
-	dir := ca.certDir(t, "app.sni.test", "other.sni.test")
+	dir := ca.localCA(t)
 	p := startProxy(t, "", fmt.Sprintf(
 		"[[host]]\npattern=app\\.sni\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 			"[[host]]\npattern=other\\.sni\\.test\ncert=%s\nupstream_sni=Override.Internal\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
@@ -684,7 +761,7 @@ func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
 		tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{upstreamAnswer}, NextProtos: []string{acme.ALPNProto}})
 		tc.Handshake()
 	})
-	dir := ca.certDir(t, "vq.test", "plain.test")
+	dir := ca.localCA(t)
 	p := startProxy(t, "", fmt.Sprintf(
 		"[[host]]\npattern=vq\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 			"[[host]]\npattern=plain\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
@@ -712,9 +789,9 @@ func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
 	// Once WE have a challenge pending for the name, we answer it ourselves.
 	ours, _ := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("our-token", "vq.test")
 	m := p.srv.certs
-	m.mu.Lock()
+	m.lock()
 	m.challenges["vq.test"] = &ours
-	m.mu.Unlock()
+	m.unlock()
 	if tc, err = challenge("vq.test"); err != nil || !bytes.Equal(tc.ConnectionState().PeerCertificates[0].Raw, ours.Certificate[0]) {
 		t.Fatalf("our own pending challenge must be answered here: %v", err)
 	}
@@ -747,9 +824,9 @@ func TestCertificateJobsRunInParallelPerName(t *testing.T) {
 		mu.Unlock()
 		time.Sleep(150 * time.Millisecond)
 		nb := time.Now()
-		m.mu.Lock()
+		m.lock()
 		m.auto[domain] = &tls.Certificate{Leaf: &x509.Certificate{NotBefore: nb, NotAfter: nb.Add(90 * 24 * time.Hour)}}
-		m.mu.Unlock()
+		m.unlock()
 		mu.Lock()
 		delete(running, domain)
 		done[domain]++
@@ -781,5 +858,58 @@ func TestCertificateJobsRunInParallelPerName(t *testing.T) {
 		if done[d] != 1 {
 			t.Errorf("%s issued %d times", d, done[d])
 		}
+	}
+}
+
+// clientHelloALPN is clientHello offering one ALPN protocol.
+func clientHelloALPN(sni, proto string) []byte {
+	hs := buildClientHello(&sni, 0)
+	ext := append([]byte{0x00, 0x10, 0, byte(len(proto) + 3), 0, byte(len(proto) + 1), byte(len(proto))}, proto...)
+	extLen := 4 + 2 + 32 + 1 + 4 + 2 // type+length, version, random, session id, ciphers, compression
+	n := int(hs[extLen])<<8 | int(hs[extLen+1])
+	n += len(ext)
+	hs[extLen], hs[extLen+1] = byte(n>>8), byte(n)
+	hs = append(hs, ext...)
+	body := len(hs) - 4
+	hs[1], hs[2], hs[3] = byte(body>>16), byte(body>>8), byte(body)
+	return wrapRecords(hs, 16384)
+}
+
+// An automatic certificate that is due is renewed: the worker's job gets a
+// new one, which is then what clients are given.
+func TestAutomaticRenewalReplacesTheCertificate(t *testing.T) {
+	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\n[[host]]\npattern=renew.t.com\ncert=auto\ntarget_host=x.lan\n")
+	m := NewCertManager()
+	if err := m.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	day := 24 * time.Hour
+	old := &tls.Certificate{Leaf: &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-80 * day), NotAfter: time.Now().Add(10 * day)}}
+	m.lock()
+	m.auto["renew.t.com"] = old
+	m.unlock()
+	var issued int
+	m.issueFunc = func(_ context.Context, _ *Config, domain string) error {
+		issued++
+		m.lock()
+		m.auto[domain] = &tls.Certificate{Leaf: &x509.Certificate{SerialNumber: big.NewInt(2), NotBefore: time.Now(), NotAfter: time.Now().Add(90 * day)}}
+		m.unlock()
+		return nil
+	}
+	rule := &cfg.Rules[0]
+	if c, _ := m.CertificateFor(rule, "renew.t.com"); c != old {
+		t.Fatal("before renewal the current certificate is served")
+	}
+	for _, job := range m.pendingJobs(time.Now()) {
+		m.runJob(cfg, job)
+	}
+	if issued != 1 {
+		t.Fatalf("a due certificate must be renewed once, got %d", issued)
+	}
+	if c, _ := m.CertificateFor(rule, "renew.t.com"); c.Leaf.SerialNumber.Int64() != 2 {
+		t.Fatal("after renewal clients must get the new certificate")
+	}
+	if jobs := m.pendingJobs(time.Now()); len(jobs) != 0 {
+		t.Fatalf("nothing is due after renewal: %v", jobs)
 	}
 }

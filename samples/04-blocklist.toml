@@ -47,4 +47,4 @@ action = deny
 
 [[host]]
 pattern = ANY
-target_host = $0
+target_host = ${host}

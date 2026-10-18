@@ -37,17 +37,20 @@ func (w *stalledWriter) Write(p []byte) (int, error) {
 
 func TestAsyncLoggingNeverBlocksTheCaller(t *testing.T) {
 	flushMu.Lock() // no other test logs into our writer halfway
+	flushLocked()  // what is queued belongs to the old writers
 	logMu.Lock()
-	oldOut, oldErr, oldAsync := logOut, logErr, logAsync
+	oldOut, oldErr, oldAsync := logOut, logErr, logAsync.Load()
 	w := &stalledWriter{release: make(chan struct{})}
-	logOut, logErr, logAsync = w, w, true
-	pending, segments, droppedLog = nil, nil, 0
+	logOut, logErr = w, w
+	logAsync.Store(true)
+	droppedLog.Store(0)
 	logMu.Unlock()
 	flushMu.Unlock()
 	defer func() {
 		FlushLogs()
 		logMu.Lock()
-		logOut, logErr, logAsync = oldOut, oldErr, oldAsync
+		logOut, logErr = oldOut, oldErr
+		logAsync.Store(oldAsync)
 		logMu.Unlock()
 	}()
 
@@ -64,21 +67,12 @@ func TestAsyncLoggingNeverBlocksTheCaller(t *testing.T) {
 	if got := RecentLog(10, " fourth"); len(got) != 1 || !strings.HasSuffix(got[0], " fourth") {
 		t.Fatalf("the console's recent log is filled at once: %q", got)
 	}
-	logMu.Lock()
-	segs := len(segments)
-	logMu.Unlock()
-	if segs != 3 { // out, problem, out+out: consecutive lines of a stream are written together
-		t.Fatalf("%d segments", segs)
-	}
-
 	// Beyond maxPendingLog lines are counted, not kept: memory stays bounded.
 	big := strings.Repeat("x", 64<<10)
 	for i := 0; i < maxPendingLog/(64<<10)+10; i++ {
 		logf("%s", big)
 	}
-	logMu.Lock()
-	held, dropped := len(pending), droppedLog
-	logMu.Unlock()
+	held, dropped := pendingBytes.Load(), droppedLog.Load()
 	if held > maxPendingLog || dropped < 5 {
 		t.Fatalf("%d bytes held, %d dropped", held, dropped)
 	}
@@ -107,9 +101,7 @@ func TestRateLimitedLog(t *testing.T) {
 	if n := strings.Count(testLog.String()[mark:], "flood-line"); n != 1 {
 		t.Fatalf("%d lines in one second", n)
 	}
-	r.mu.Lock()
-	r.last = time.Now().Add(-2 * time.Second)
-	r.mu.Unlock()
+	r.last.Store(time.Now().Add(-2 * time.Second).UnixNano())
 	r.logf("flood-line again")
 	if log := testLog.String()[mark:]; !strings.Contains(log, "flood-line again (and 999 more like this in the last second, not logged)") {
 		t.Fatalf("suppressed lines must be counted:\n%s", log)
@@ -338,11 +330,11 @@ func TestIPAddressIsNotAnSNI(t *testing.T) {
 		t.Fatalf("a name made of numbers is still a name: %q %v", sni, err)
 	}
 	// A catch-all that follows the client's SNI is an open relay: say so.
-	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=.*\ntarget_host=$0\n")
+	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=.*\ntarget_host=${host}\n")
 	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "connects to whatever name a client sends") {
 		t.Fatalf("%q", c.Warnings)
 	}
-	if c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=*.example\\.com\ntarget_host=$0\n[[host]]\npattern=.*\ntarget_host=fixed.lan\n"); len(c.Warnings) != 0 {
+	if c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=*.example\\.com\ntarget_host=${host}\n[[host]]\npattern=.*\ntarget_host=fixed.lan\n"); len(c.Warnings) != 0 {
 		t.Fatalf("%q", c.Warnings)
 	}
 }
@@ -352,7 +344,7 @@ func TestIPAddressIsNotAnSNI(t *testing.T) {
 func TestConnectionEndingInsideATLSRecord(t *testing.T) {
 	ca := newTestCA(t)
 	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=nonotify.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
-		ca.certDir(t, "nonotify.test"), echoBackend(t, "")))
+		ca.localCA(t), echoBackend(t, "")))
 	raw, err := net.DialTimeout("tcp", p.addr, T)
 	if err != nil {
 		t.Fatal(err)

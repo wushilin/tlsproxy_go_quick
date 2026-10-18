@@ -1,0 +1,357 @@
+[
+  {
+    "section": "[global]",
+    "about": "Settings for the whole proxy. Listeners may override some of them.",
+    "keys": [
+      {
+        "key": "bind",
+        "default": "0.0.0.0",
+        "meaning": "Listen address of the implicit listener: 0.0.0.0 all IPv4, :: all IPv6 and IPv4, or addresses separated by ;. Not allowed with [[listener]] sections."
+      },
+      {
+        "key": "port",
+        "default": "(required without [[listener]])",
+        "meaning": "Listen port of the implicit listener. Not allowed with [[listener]] sections."
+      },
+      {
+        "key": "handshake_timeout",
+        "default": "10",
+        "meaning": "Seconds to receive the whole ClientHello; a slow trickle can't extend it."
+      },
+      {
+        "key": "connect_timeout",
+        "default": "10",
+        "meaning": "Seconds to resolve and connect to the target."
+      },
+      {
+        "key": "idle_timeout",
+        "default": "600",
+        "meaning": "Close after N seconds with no traffic either way. 0 = never."
+      },
+      {
+        "key": "half_close_timeout",
+        "default": "30",
+        "meaning": "After one side closes, the other side gets N seconds. 0 = unlimited."
+      },
+      {
+        "key": "max_connections",
+        "default": "1024",
+        "meaning": "Open connections at most; more are rejected."
+      },
+      {
+        "key": "max_handshakes_per_ip",
+        "default": "64",
+        "meaning": "Connections from one source (IPv4 address or IPv6 /64) still sending their ClientHello. 0 = unlimited."
+      },
+      {
+        "key": "proxy_protocol_from",
+        "default": "(nobody)",
+        "meaning": "Addresses or networks that may send a PROXY protocol header (v1 or v2), separated by ;."
+      },
+      {
+        "key": "buffer_size",
+        "default": "65536",
+        "meaning": "Bytes moved per step in each direction: the splice pipe size, or the size of each pooled buffer. Clamped to 4096..131072."
+      },
+      {
+        "key": "buffer_pool_max_idle",
+        "default": "2 × max_connections",
+        "meaning": "Free buffers kept for reuse."
+      },
+      {
+        "key": "splice",
+        "default": "true",
+        "meaning": "Linux: relay passed-through connections with splice(2), without copying them through the proxy."
+      },
+      {
+        "key": "short_read_delay_us",
+        "default": "0",
+        "meaning": "Pause N microseconds after a short read so data batches up. 0 = off."
+      },
+      {
+        "key": "allow_cache_size",
+        "default": "4096",
+        "meaning": "Cached allowed name → target decisions. 0 = off."
+      },
+      {
+        "key": "deny_cache_size",
+        "default": "4096",
+        "meaning": "Cached denied names, kept apart from the allowed ones. 0 = off."
+      },
+      {
+        "key": "reload_interval",
+        "default": "5",
+        "meaning": "Check the file every N seconds and apply changes (minimum 5). 0 = only on console saves."
+      },
+      {
+        "key": "stats_interval",
+        "default": "60",
+        "meaning": "Log a one-line summary every N seconds. 0 = never."
+      },
+      {
+        "key": "cert_path",
+        "default": "./certs",
+        "meaning": "Where automatic certificates and the ACME account key are stored."
+      },
+      {
+        "key": "ca_root",
+        "default": "./ca",
+        "meaning": "Where your own CAs live, one folder each (ca001, ca002, ...), with the certificates they issued: see cert = local-ca."
+      },
+      {
+        "key": "expiry_threshold_days",
+        "default": "15",
+        "meaning": "Renew this many days before expiry (or at a third of the lifetime left, if later)."
+      },
+      {
+        "key": "acme_agree_tos",
+        "default": "false",
+        "meaning": "Must be true for cert = auto: you accept the CA's terms of service."
+      },
+      {
+        "key": "acme_email",
+        "default": "(none)",
+        "meaning": "Contact address for the ACME account."
+      },
+      {
+        "key": "acme_directory",
+        "default": "Let's Encrypt production",
+        "meaning": "ACME directory URL."
+      },
+      {
+        "key": "acme_ca_file",
+        "default": "(none)",
+        "meaning": "Extra root CA for the ACME server's own HTTPS (a private CA, Pebble)."
+      },
+      {
+        "key": "public_ip_address",
+        "default": "(not checked)",
+        "meaning": "cert = auto only asks the CA when the name resolves to one of these addresses, separated by ;."
+      },
+      {
+        "key": "dns_resolvers",
+        "default": "1.1.1.1; 8.8.8.8",
+        "meaning": "Resolvers used for that check."
+      },
+      {
+        "key": "io_model",
+        "default": "",
+        "meaning": "Legacy: accepted and ignored."
+      },
+      {
+        "key": "worker_threads",
+        "default": "",
+        "meaning": "Legacy: accepted and ignored."
+      }
+    ]
+  },
+  {
+    "section": "[[listener]]",
+    "about": "A port with its own rules. Without any, one listener named default is made from [global] bind and port. Overrides apply to this listener only.",
+    "keys": [
+      {
+        "key": "name",
+        "default": "(required)",
+        "meaning": "Up to 64 letters, digits, spaces and -_@#~()[]\u003c\u003e\"'; unique ignoring case. What listener = in a rule refers to."
+      },
+      {
+        "key": "bind",
+        "default": "0.0.0.0",
+        "meaning": "Listen address, as in [global]."
+      },
+      {
+        "key": "port",
+        "default": "(required)",
+        "meaning": "Listen port. Two listeners can't share a port on the same or a wildcard address."
+      },
+      {
+        "key": "proxy_protocol_from",
+        "default": "[global]",
+        "meaning": "Overrides [global] for this listener."
+      },
+      {
+        "key": "max_connections",
+        "default": "(no own limit)",
+        "meaning": "A cap for this listener, on top of the global one."
+      },
+      {
+        "key": "handshake_timeout",
+        "default": "[global]",
+        "meaning": "Overrides [global] for this listener."
+      },
+      {
+        "key": "idle_timeout",
+        "default": "[global]",
+        "meaning": "Overrides [global] for this listener."
+      },
+      {
+        "key": "half_close_timeout",
+        "default": "[global]",
+        "meaning": "Overrides [global] for this listener."
+      },
+      {
+        "key": "max_aggregated_speed",
+        "default": "unlimited",
+        "meaning": "Shared by every connection on this listener, each direction, on top of each rule's limits. E.g. 1Gbit, 100MB/s, 64MiB/s."
+      },
+      {
+        "key": "max_single_connection_speed",
+        "default": "unlimited",
+        "meaning": "For each connection on this listener, each direction."
+      }
+    ]
+  },
+  {
+    "section": "[[host]]",
+    "about": "A rule. The most specific pattern wins: literal names, then wildcards (more fixed characters first), then ANY. A name no rule matches is denied.",
+    "keys": [
+      {
+        "key": "listener",
+        "default": "(the only one)",
+        "meaning": "The [[listener]] this rule belongs to; required when there are several."
+      },
+      {
+        "key": "pattern",
+        "default": "(required)",
+        "meaning": "A host name with * wildcards (a * never crosses a dot; as a whole label it is exactly one label), NONE for clients without SNI, or ANY for everything."
+      },
+      {
+        "key": "action",
+        "default": "allow",
+        "meaning": "allow or deny. deny answers with a TLS access_denied alert."
+      },
+      {
+        "key": "target_host",
+        "default": "(required for allow)",
+        "meaning": "Where to connect. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces."
+      },
+      {
+        "key": "target_port",
+        "default": "443",
+        "meaning": "Target port."
+      },
+      {
+        "key": "cert",
+        "default": "(pass through)",
+        "meaning": "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in ca_root, made on the CAs page, issuing one certificate per name on first use)."
+      },
+      {
+        "key": "cert_domains",
+        "default": "the literal pattern",
+        "meaning": "cert = auto: exact names to issue, separated by , or ;. cert = local-ca: names or globs (*.dev.example.com, several) that get a certificate; any other name is refused (default: every name the rule matches)."
+      },
+      {
+        "key": "cert_validate_script",
+        "default": "(none)",
+        "meaning": "cert = auto: a script that decides per name not in cert_domains; exit 0 = issue."
+      },
+      {
+        "key": "cert_validate_args",
+        "default": "[\"${host}\"]",
+        "meaning": "The script's arguments, a TOML array of strings with ${1}, ${host} ... filled in."
+      },
+      {
+        "key": "upstream_tls",
+        "default": "true",
+        "meaning": "Terminated rules: speak TLS to the target; false = plaintext."
+      },
+      {
+        "key": "upstream_tls_verify",
+        "default": "true",
+        "meaning": "Verify the target's certificate."
+      },
+      {
+        "key": "upstream_sni",
+        "default": "the client's name",
+        "meaning": "SNI sent to the target and checked in its certificate."
+      },
+      {
+        "key": "proxy",
+        "default": "false",
+        "meaning": "Send the target a PROXY protocol header with the client's address."
+      },
+      {
+        "key": "proxy_version",
+        "default": "2",
+        "meaning": "PROXY protocol version, 1 or 2."
+      },
+      {
+        "key": "max_aggregated_speed",
+        "default": "unlimited",
+        "meaning": "Shared by every connection of this rule, each direction. E.g. 1Gbit, 100MB/s, 64MiB/s."
+      },
+      {
+        "key": "max_single_connection_speed",
+        "default": "unlimited",
+        "meaning": "For each connection of this rule, each direction."
+      }
+    ]
+  },
+  {
+    "section": "[logging]",
+    "about": "Where the two log streams go: activity (stdout) and problems (stderr).",
+    "keys": [
+      {
+        "key": "stdout",
+        "default": "the process's stdout",
+        "meaning": "File for activity: accepted, route, connected, closed, stats, reloads."
+      },
+      {
+        "key": "stderr",
+        "default": "the process's stderr",
+        "meaning": "File for problems."
+      },
+      {
+        "key": "max_size",
+        "default": "15MiB",
+        "meaning": "Rotate a file once it reaches this size (K, M, G)."
+      },
+      {
+        "key": "max_keep",
+        "default": "10",
+        "meaning": "Rotated generations kept: file.1 (newest) .. file.N."
+      },
+      {
+        "key": "compress_after",
+        "default": "3",
+        "meaning": "Generations above this number are gzip-compressed."
+      }
+    ]
+  },
+  {
+    "section": "[console]",
+    "about": "This web console. Hidden from this editor: change it in the file itself. listen and port need a restart.",
+    "keys": [
+      {
+        "key": "listen",
+        "default": "127.0.0.1",
+        "meaning": "Bind address. The console is plain HTTP; keep it on loopback."
+      },
+      {
+        "key": "port",
+        "default": "(required)",
+        "meaning": "Console port."
+      },
+      {
+        "key": "password",
+        "default": "",
+        "meaning": "Plain text; replaced by password_hash when the proxy starts."
+      },
+      {
+        "key": "password_hash",
+        "default": "",
+        "meaning": "pbkdf2-sha256$...; make one with tlsproxy --hash-password."
+      },
+      {
+        "key": "secure_cookie",
+        "default": "false",
+        "meaning": "Mark the session cookie Secure; set true when the console is published through HTTPS."
+      },
+      {
+        "key": "hostnames",
+        "default": "(none)",
+        "meaning": "Names the console may be addressed by, besides IP addresses and localhost."
+      }
+    ]
+  }
+]

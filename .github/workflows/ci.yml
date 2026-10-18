@@ -1,6 +1,8 @@
-# Tests on Linux (race detector, live sites, a Pebble ACME CA), Windows, and
-# a real FreeBSD VM. Builds amd64 and arm64 binaries for all three operating
-# systems; tags publish a GitHub Release only after all checks pass.
+# Tests on Linux (race detector, live sites; Pebble, the ACME test CA, runs in
+# every test run, in-process and offline), Windows, and a real FreeBSD VM.
+# Builds amd64 and arm64 binaries for all three operating systems and the
+# container image; tags push the image to docker.io/wushilin/tlsproxy_go_quick and
+# publish a GitHub Release, only after all checks pass.
 name: ci
 
 on:
@@ -32,10 +34,9 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l $(git ls-files '*.go' ':!vendor'))" || { gofmt -l $(git ls-files '*.go' ':!vendor'); exit 1; }
       - run: go vet ./...
-      - name: Test (race detector; live sites and a Pebble ACME CA included)
+      - name: Test (race detector; live sites included)
         env:
           TLSPROXY_LIVE: "1"
-          TLSPROXY_PEBBLE: "1"
         run: go test -race -count=1 ./...
 
   windows:
@@ -106,9 +107,47 @@ jobs:
             SHA256SUMS
             config.toml
 
+  # The container image (Dockerfile). Every run builds it, so a change that
+  # breaks the image fails here; a "v*" tag also pushes it, for linux/amd64
+  # and linux/arm64, tagged with the version and as latest. The Go build is
+  # cross-compiled in the Dockerfile, so no emulation is needed.
+  docker:
+    needs: [test, windows, freebsd, build] # nothing is pushed unless everything passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: docker.io/wushilin/tlsproxy_go_quick
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe needs the tags
+      - name: Version
+        id: version
+        run: |
+          version=$(git describe --tags --always --dirty)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version=$GITHUB_REF_NAME; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to Docker Hub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          username: wushilin
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build (and, for a tag, push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE }}:latest
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, windows, freebsd, build] # nothing is published unless everything passed
+    needs: [test, windows, freebsd, build, docker] # nothing is published unless everything passed
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

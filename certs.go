@@ -35,6 +35,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -44,17 +45,20 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/acme"
 )
 
 const (
-	certRetryInterval = 6 * time.Hour
-	certCheckInterval = 10 * time.Minute
-	certJobTimeout    = 5 * time.Minute
+	certRetryInterval  = 6 * time.Hour
+	certCheckInterval  = 10 * time.Minute
+	localRenewInterval = 6 * time.Hour // local CAs: renew what is due, empty old archives
+	certJobTimeout     = 5 * time.Minute
 
 	maxParallelJobs = 4 // names being validated / issued at the same time
 
@@ -90,13 +94,20 @@ type fileCert struct {
 }
 
 type CertManager struct {
-	applyMu      sync.Mutex // serialises config changes with certificate file commits
-	cfgCtx       context.Context
-	cfgCancel    context.CancelFunc
+	applyMu   sync.Mutex // serialises config changes with certificate file commits
+	cfgCtx    context.Context
+	cfgCancel context.CancelFunc
+	// mu guards the maps below for the worker, reloads and the console.
+	// Writers take it with lock/unlock, and unlock publishes a read-only copy
+	// of what a handshake needs in view: handshakes never take mu.
 	mu           sync.RWMutex
+	view         atomic.Pointer[certView]
+	proposals    *ring[string]             // names a handshake asks to put to the script; the worker takes them
+	localCAs     syncMap[string, *localCA] // by dir (<ca_root>/caNNN); handshakes read it without a lock
+	localLog     rateLimitedLog
+	localRenewed time.Time // when the local CAs were last gone through
 	cfg          *Config
 	auto         map[string]*tls.Certificate // by domain
-	files        map[string]*fileCert        // by directory
 	challenges   map[string]*tls.Certificate // pending TLS-ALPN-01 answers, by domain
 	placeholders map[string]*tls.Certificate
 	nextTry      map[string]time.Time
@@ -122,11 +133,10 @@ type CertManager struct {
 
 func NewCertManager() *CertManager {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &CertManager{
+	m := &CertManager{
 		cfgCtx:        ctx,
 		cfgCancel:     cancel,
 		auto:          map[string]*tls.Certificate{},
-		files:         map[string]*fileCert{},
 		challenges:    map[string]*tls.Certificate{},
 		placeholders:  map[string]*tls.Certificate{},
 		nextTry:       map[string]time.Time{},
@@ -137,9 +147,44 @@ func NewCertManager() *CertManager {
 		rejected:      map[string]time.Time{},
 		inFlight:      map[string]bool{},
 		wake:          make(chan struct{}, 1),
+		proposals:     newRing[string](maxCandidates),
 		retryInterval: certRetryInterval,
 		checkInterval: certCheckInterval,
 	}
+	m.localCAs.init() // ready before the first handshake reads it
+	return m
+}
+
+// certView is what handshakes read: copies of the maps, never changed once
+// published (an ArcSwap: readers load a pointer, writers swap in a new one).
+type certView struct {
+	cfg              *Config
+	auto, challenges map[string]*tls.Certificate
+	dynamic          map[string]bool
+	candidates       map[string]bool
+	rejected         map[string]time.Time
+	placeholders     map[string]*tls.Certificate
+}
+
+func (m *CertManager) lock() { m.mu.Lock() }
+
+// unlock publishes the maps as they are now, then releases mu.
+func (m *CertManager) unlock() {
+	m.view.Store(&certView{
+		cfg:  m.cfg,
+		auto: maps.Clone(m.auto), challenges: maps.Clone(m.challenges),
+		dynamic: maps.Clone(m.dynamic), candidates: maps.Clone(m.candidates), rejected: maps.Clone(m.rejected),
+		placeholders: maps.Clone(m.placeholders),
+	})
+	m.mu.Unlock()
+}
+
+// current is the published view (an empty one before the first publish).
+func (m *CertManager) current() *certView {
+	if v := m.view.Load(); v != nil {
+		return v
+	}
+	return &certView{}
 }
 
 // Apply validates cfg's certificate settings and makes them current. Directory
@@ -149,19 +194,18 @@ func NewCertManager() *CertManager {
 func (m *CertManager) Apply(cfg *Config) error {
 	m.applyMu.Lock()
 	defer m.applyMu.Unlock()
-	loaded, err := loadDirCerts(cfg)
-	if err != nil {
+	if err := m.openLocalCAs(cfg); err != nil {
 		return err
 	}
 	if err := checkScripts(cfg); err != nil {
 		return err
 	}
-	m.mu.Lock()
+	m.lock()
 	if m.cfgCancel != nil {
-		m.cfgCancel()
+		m.cfgCancel() // jobs of the previous configuration stop
 	}
 	m.cfgCtx, m.cfgCancel = context.WithCancel(context.Background())
-	m.cfg, m.files = cfg, loaded
+	m.cfg = cfg
 	// The rules or the script may have changed: forget refusals, and let go of
 	// accepted names that no rule with a script covers any more.
 	m.rejected = map[string]time.Time{}
@@ -184,7 +228,7 @@ func (m *CertManager) Apply(cfg *Config) error {
 			}
 		}
 	}
-	m.mu.Unlock()
+	m.unlock()
 	for _, d := range cfg.AutoDomains() {
 		m.loadAutoFromDisk(cfg, d)
 	}
@@ -199,10 +243,87 @@ func (m *CertManager) Apply(cfg *Config) error {
 // Check reports whether cfg's directory certificates can be loaded, without
 // changing anything (the console validates unsaved text with it).
 func (m *CertManager) Check(cfg *Config) error {
-	if _, err := loadDirCerts(cfg); err != nil {
-		return err
+	// Every CA a rule names must exist (made on the CAs page) and load.
+	for i := range cfg.Rules {
+		if id := cfg.Rules[i].LocalCA(); id != "" {
+			if _, err := openLocalCA(id, filepath.Join(cfg.CARoot, id), false); err != nil {
+				return fmt.Errorf("[[host]] at line %d: cert = local-ca:%s: %w", cfg.Rules[i].Line, id, err)
+			}
+		}
 	}
 	return checkScripts(cfg)
+}
+
+// openLocalCAs opens every CA a rule of cfg uses; each must exist already
+// (made on the CAs page). One already open stays open: its certificates are
+// kept.
+func (m *CertManager) openLocalCAs(cfg *Config) error {
+	for i := range cfg.Rules {
+		id := cfg.Rules[i].LocalCA()
+		if id == "" {
+			continue
+		}
+		dir := filepath.Join(cfg.CARoot, id)
+		if _, ok := m.localCAs.Load(dir); ok {
+			continue
+		}
+		l, err := openLocalCA(id, dir, false)
+		if err != nil {
+			return fmt.Errorf("[[host]] at line %d: cert = local-ca:%s: %w", cfg.Rules[i].Line, id, err)
+		}
+		m.localCAs.Store(dir, l)
+	}
+	return nil
+}
+
+// localCAIssues reports whether a rule of cfg would have CA id issue for
+// name: one using that CA matches the name, and its cert_domains allow it.
+func localCAIssues(cfg *Config, id, name string) bool {
+	for i := range cfg.Rules {
+		r := &cfg.Rules[i]
+		if r.LocalCA() != id || !r.LocalCAIssues(name) {
+			continue
+		}
+		if r.Kind == kindCatchAll || (r.Pattern != nil && r.Pattern.MatchString(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// LocalCA is the open CA id in cfg's ca_root, nil if no rule uses it.
+func (m *CertManager) LocalCA(cfg *Config, id string) *localCA {
+	l, _ := m.localCAs.Load(filepath.Join(cfg.CARoot, id))
+	return l
+}
+
+// reloadLocalCAConfigs picks up edits of the CAs' config.toml files.
+func (m *CertManager) reloadLocalCAConfigs() {
+	m.localCAs.Range(func(_ string, l *localCA) bool {
+		l.loadConfig()
+		return true
+	})
+}
+
+// renewLocalCAs is the local CAs' renewal pass, run at start and every
+// localRenewInterval: each CA's own certificate when due, every certificate
+// it issued that is due (and a rule still issues for), and archives over 14
+// days old (each CA's, and ca_root's own of deleted CAs).
+func (m *CertManager) renewLocalCAs() {
+	cfg := m.current().cfg
+	if cfg != nil {
+		pruneArchiveDir(filepath.Join(cfg.CARoot, localArchiveName))
+	}
+	m.localCAs.Range(func(_ string, l *localCA) bool {
+		if err := l.renewCA(); err != nil {
+			errorf("cert: CA %s: %v", l.id, err)
+		}
+		if cfg != nil {
+			l.renewAll(func(name string) bool { return localCAIssues(cfg, l.id, name) })
+		}
+		l.pruneArchive()
+		return true
+	})
 }
 
 // checkScripts makes sure every cert_validate_script is there and executable.
@@ -247,6 +368,33 @@ func scriptFor(cfg *Config, domain string) string {
 	return d.Rule.CertValidateScript
 }
 
+// scriptArgs are the arguments the script in charge of domain is run with:
+// its rule's cert_validate_args with the captures filled in.
+func scriptArgs(cfg *Config, domain string) []string {
+	d := cfg.Route(domain)
+	if d.Rule == nil {
+		return []string{domain}
+	}
+	m := []int{0, len(domain)}
+	if d.Rule.Pattern != nil {
+		if got := d.Rule.Pattern.FindStringSubmatchIndex(domain); got != nil {
+			m = got
+		}
+	}
+	var out []string
+	for _, a := range d.Rule.CertValidateArgs {
+		v, err := expand(a, domain, m)
+		if err != nil { // checked at load time; never hand the script half an argument
+			return []string{domain}
+		}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return []string{domain}
+	}
+	return out
+}
+
 // managedLocked lists every name with an automatic certificate: those from
 // cert_domains, then those a script accepted.
 func (m *CertManager) managedLocked(cfg *Config) []string {
@@ -264,16 +412,16 @@ func (m *CertManager) managedLocked(cfg *Config) []string {
 // runValidateScript asks a cert_validate_script about one name. Exit status 0
 // accepts it. detail describes the outcome for the log; err is set when the
 // script could not give an answer at all (which counts as a refusal).
-func runValidateScript(script, domain string) (accepted bool, detail string, err error) {
-	return runValidateScriptContext(context.Background(), script, domain)
+func runValidateScript(script string, args []string) (accepted bool, detail string, err error) {
+	return runValidateScriptContext(context.Background(), script, args)
 }
 
-func runValidateScriptContext(parent context.Context, script, domain string) (accepted bool, detail string, err error) {
+func runValidateScriptContext(parent context.Context, script string, args []string) (accepted bool, detail string, err error) {
 	ctx, cancel := context.WithTimeout(parent, validateScriptTimeout)
 	defer cancel()
 	start := time.Now()
 	out := &cappedBuffer{max: 300}
-	cmd := exec.CommandContext(ctx, script, domain)
+	cmd := exec.CommandContext(ctx, script, args...)
 	cmd.Stdout, cmd.Stderr = out, out
 	cmd.WaitDelay = 2 * time.Second // a child holding the pipes open can't stall us
 	runErr := cmd.Run()
@@ -295,6 +443,18 @@ func runValidateScriptContext(parent context.Context, script, domain string) (ac
 	}
 }
 
+// quoteArgs shows arguments for the log, quoting those that need it.
+func quoteArgs(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = a
+		if a == "" || strings.ContainsAny(a, " \t\"'\\$") {
+			out[i] = strconv.Quote(a)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 // cappedBuffer keeps the first max bytes written to it.
 type cappedBuffer struct {
 	b   []byte
@@ -308,26 +468,10 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func loadDirCerts(cfg *Config) (map[string]*fileCert, error) {
-	loaded := map[string]*fileCert{}
-	for i := range cfg.Rules {
-		dir := cfg.Rules[i].Cert
-		if dir == "" || dir == "auto" || loaded[dir] != nil {
-			continue
-		}
-		fc, err := loadDirCert(dir)
-		if err != nil {
-			return nil, fmt.Errorf("[[host]] at line %d: cert = %s: %w", cfg.Rules[i].Line, dir, err)
-		}
-		loaded[dir] = fc
-	}
-	return loaded, nil
-}
-
 // Start launches the background worker (once).
 func (m *CertManager) Start() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lock()
+	defer m.unlock()
 	if !m.started {
 		m.started = true
 		go m.worker()
@@ -378,9 +522,9 @@ func (m *CertManager) loadAutoFromDisk(cfg *Config, domain string) {
 	if err != nil {
 		return
 	}
-	m.mu.Lock()
+	m.lock()
 	m.auto[domain] = fc.cert
-	m.mu.Unlock()
+	m.unlock()
 }
 
 // CertificateFor returns what to present for a terminating rule and SNI.
@@ -391,29 +535,35 @@ func (m *CertManager) loadAutoFromDisk(cfg *Config, domain string) {
 // would cost a key generation and a signature each. Only a name from
 // cert_domains (a list the configuration bounds) gets its own; every other name
 // shares one placeholder per rule, a wildcard where the pattern allows it.
+//
+// It runs in every terminated handshake and takes no lock: it reads the
+// published view, which may be a moment behind the worker.
 func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, error) {
-	m.mu.RLock()
+	if id := rule.LocalCA(); id != "" {
+		return m.localCertificate(rule, id, sni) // no placeholder: a name it doesn't issue for is refused
+	}
+	v := m.current()
 	var cert *tls.Certificate
 	propose := false
 	if rule.Cert == "auto" {
-		cert = m.auto[sni]
+		cert = v.auto[sni]
 		// A name only the rule's script can vouch for, seen for the first time.
 		// The connection is not held up: the worker asks the script, and
 		// clients get the placeholder until a certificate is there.
 		propose = cert == nil && rule.CertValidateScript != "" && !slices.Contains(rule.CertDomains, sni) &&
-			!m.dynamic[sni] && !m.candidates[sni] && time.Now().After(m.rejected[sni])
-	} else if fc := m.files[rule.Cert]; fc != nil {
-		cert = fc.cert
+			!v.dynamic[sni] && !v.candidates[sni] && time.Now().After(v.rejected[sni])
 	}
 	key, name := placeholderFor(rule, sni)
 	if cert == nil {
-		if cert = m.placeholders[key]; cert != nil && time.Now().After(cert.Leaf.NotAfter.Add(-time.Hour)) {
+		if cert = v.placeholders[key]; cert != nil && time.Now().After(cert.Leaf.NotAfter.Add(-time.Hour)) {
 			cert = nil // about to expire: make a new one
 		}
 	}
-	m.mu.RUnlock()
-	if propose {
-		m.propose(sni)
+	if propose && m.proposals.TryPush(sni) { // full: it is proposed again when next requested
+		select {
+		case m.wake <- struct{}{}:
+		default:
+		}
 	}
 	if cert != nil {
 		return cert, nil
@@ -422,13 +572,42 @@ func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, 
 	if err != nil {
 		return nil, err
 	}
-	m.mu.Lock()
-	if len(m.placeholders) > 256 { // keys come from the configuration; a backstop all the same
-		m.placeholders = map[string]*tls.Certificate{}
+	// Keep it for the next handshake, unless the worker holds the lock right
+	// now: then the next one makes its own, rather than this one waiting.
+	if m.mu.TryLock() {
+		if len(m.placeholders) > 256 { // keys come from the configuration; a backstop all the same
+			m.placeholders = map[string]*tls.Certificate{}
+		}
+		m.placeholders[key] = ph
+		m.unlock()
 	}
-	m.placeholders[key] = ph
-	m.mu.Unlock()
 	return ph, nil
+}
+
+// localCertificate is a cert = local-ca rule's certificate for sni. A name
+// it does not issue for (outside cert_domains), a full CA or a failure is an
+// error: the handshake fails and the client is refused, with no placeholder.
+func (m *CertManager) localCertificate(rule *Rule, id, sni string) (*tls.Certificate, error) {
+	if !validDomain(sni) {
+		return nil, fmt.Errorf("CA %s: %q is not a host name to issue for", id, sni)
+	}
+	if !rule.LocalCAIssues(sni) {
+		return nil, fmt.Errorf("CA %s does not issue for %s: it matches none of cert_domains (%s)", id, sni, strings.Join(rule.CertDomains, ", "))
+	}
+	cfg := m.current().cfg
+	l := (*localCA)(nil)
+	if cfg != nil {
+		l = m.LocalCA(cfg, id)
+	}
+	if l == nil {
+		return nil, fmt.Errorf("CA %s is not open", id)
+	}
+	c, err := l.certificate(sni)
+	if err != nil {
+		m.localLog.logf("cert: CA %s: %s refused: %v", id, sni, err)
+		return nil, fmt.Errorf("CA %s: %v", id, err)
+	}
+	return c, nil
 }
 
 // placeholderFor says which placeholder serves sni under rule: the key it is
@@ -447,24 +626,40 @@ func placeholderFor(rule *Rule, sni string) (key, name string) {
 	return key, "placeholder.invalid" // several *, or ANY: no one certificate name fits
 }
 
+// takeProposals moves the names handshakes asked about into candidates.
+func (m *CertManager) takeProposals() {
+	for {
+		sni, ok := m.proposals.TryPop()
+		if !ok {
+			return
+		}
+		m.mu.RLock()
+		known := m.candidates[sni] || m.dynamic[sni]
+		m.mu.RUnlock()
+		if !known {
+			m.propose(sni)
+		}
+	}
+}
+
 // propose queues a client-requested name for the rule's cert_validate_script.
 func (m *CertManager) propose(sni string) {
-	m.mu.Lock()
+	m.lock()
 	cfg := m.cfg
 	switch {
 	case cfg == nil || scriptFor(cfg, sni) == "":
-		m.mu.Unlock()
+		m.unlock()
 		return
 	case len(m.candidates) >= maxCandidates:
 		if time.Since(m.queueFull) > time.Minute {
 			m.queueFull = time.Now()
 			errorf("cert: %s: %d names are already waiting for a cert_validate_script decision; this one is not queued (it is considered again when it is next requested)", sni, maxCandidates)
 		}
-		m.mu.Unlock()
+		m.unlock()
 		return
 	}
 	m.candidates[sni] = true
-	m.mu.Unlock()
+	m.unlock()
 	logf("cert: %s: requested by a client, not in cert_domains and no certificate yet; cert_validate_script %s will be asked", sni, scriptFor(cfg, sni))
 	select {
 	case m.wake <- struct{}{}:
@@ -474,9 +669,7 @@ func (m *CertManager) propose(sni string) {
 
 // Challenge returns the pending TLS-ALPN-01 answer for a name, if any.
 func (m *CertManager) Challenge(sni string) *tls.Certificate {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.challenges[sni]
+	return m.current().challenges[sni] // no lock: the published view
 }
 
 func selfSigned(name string, life time.Duration) (*tls.Certificate, error) {
@@ -527,8 +720,8 @@ type certJob struct {
 // (it is asked at renewal), and one no script covers any more is dropped. The
 // rest stay candidates and become urgent jobs.
 func (m *CertManager) adoptCandidates(cfg *Config) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lock()
+	defer m.unlock()
 	if m.cfg != cfg {
 		return
 	}
@@ -603,8 +796,8 @@ func certStatus(c *tls.Certificate, thresholdDays int, now time.Time) string {
 // announce logs each name's status when it is new or has changed (so a name
 // added by a reload, or one that has entered its renewal window, shows up).
 func (m *CertManager) announce(cfg *Config, now time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lock()
+	defer m.unlock()
 	if m.cfg != cfg {
 		return
 	}
@@ -633,7 +826,12 @@ func (m *CertManager) announce(cfg *Config, now time.Time) {
 
 func (m *CertManager) worker() {
 	for {
-		m.refreshFileCerts()
+		m.takeProposals()
+		m.reloadLocalCAConfigs()
+		if time.Since(m.localRenewed) >= localRenewInterval {
+			m.localRenewed = time.Now() // only this goroutine reads or writes it
+			m.renewLocalCAs()
+		}
 		m.mu.RLock()
 		cfg := m.cfg
 		m.mu.RUnlock()
@@ -657,19 +855,19 @@ func (m *CertManager) worker() {
 
 // startJob runs a job in its own goroutine. False if every slot is taken.
 func (m *CertManager) startJob(cfg *Config, job certJob) bool {
-	m.mu.Lock()
+	m.lock()
 	if cfg == nil || m.cfg != cfg || m.inFlight[job.domain] || len(m.inFlight) >= maxParallelJobs {
-		m.mu.Unlock()
+		m.unlock()
 		return false
 	}
 	ctx := m.cfgCtx
 	m.inFlight[job.domain] = true // pendingJobs skips it until the job is done
-	m.mu.Unlock()
+	m.unlock()
 	go func() {
 		defer func() {
-			m.mu.Lock()
+			m.lock()
 			delete(m.inFlight, job.domain)
-			m.mu.Unlock()
+			m.unlock()
 			select {
 			case m.wake <- struct{}{}:
 			default:
@@ -745,8 +943,8 @@ func (m *CertManager) runJobContext(jobCtx context.Context, cfg *Config, job cer
 			errorf("cert: %s: attempt %d/%d failed: %v", job.domain, attempt, certAttempts, err)
 		}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lock()
+	defer m.unlock()
 	if m.cfg != cfg || jobCtx.Err() != nil {
 		return
 	}
@@ -789,21 +987,22 @@ func (m *CertManager) scriptAllows(ctx context.Context, cfg *Config, job certJob
 		why = "its certificate has expired"
 	}
 	if script == "" { // the config changed under us
-		m.mu.Lock()
+		m.lock()
 		if m.cfg != cfg || ctx.Err() != nil {
-			m.mu.Unlock()
+			m.unlock()
 			return false
 		}
 		delete(m.candidates, domain)
 		delete(m.dynamic, domain)
-		m.mu.Unlock()
+		m.unlock()
 		logf("cert: %s: no rule with a cert_validate_script covers this name any more; nothing is requested", domain)
 		return false
 	}
-	logf("cert: %s: %s; asking cert_validate_script: %s %s", domain, why, script, domain)
-	accepted, detail, err := runValidateScriptContext(ctx, script, domain)
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	args := scriptArgs(cfg, domain)
+	logf("cert: %s: %s; asking cert_validate_script: %s %s", domain, why, script, quoteArgs(args))
+	accepted, detail, err := runValidateScriptContext(ctx, script, args)
+	m.lock()
+	defer m.unlock()
 	if m.cfg != cfg || ctx.Err() != nil {
 		return false
 	}
@@ -837,38 +1036,6 @@ func (m *CertManager) scriptAllows(ctx context.Context, cfg *Config, job certJob
 	errorf("cert: %s: REFUSED by cert_validate_script %s (%s); no certificate is requested and clients get the self-signed placeholder. The script is asked again if the name is requested after %s, or after a config reload",
 		domain, script, detail, humanDuration(validateRejectTTL))
 	return false
-}
-
-// refreshFileCerts re-reads cert = <dir> certificates whose files changed.
-func (m *CertManager) refreshFileCerts() {
-	m.mu.RLock()
-	dirs := make(map[string]*fileCert, len(m.files))
-	for dir, fc := range m.files {
-		dirs[dir] = fc
-	}
-	m.mu.RUnlock()
-	for dir, old := range dirs {
-		files, digests, err := readCertFiles(dir)
-		if err == nil && digests == old.digests {
-			continue
-		}
-		var fc *fileCert
-		if err == nil {
-			fc, err = parseDirCert(files, digests)
-		}
-		if err != nil {
-			errorf("cert: %s changed but cannot be loaded, keeping the previous one: %v", dir, err)
-			continue
-		}
-		m.mu.Lock()
-		if m.files[dir] != old { // a config reload already replaced or removed it
-			m.mu.Unlock()
-			continue
-		}
-		m.files[dir] = fc
-		m.mu.Unlock()
-		logf("cert: reloaded %s (expires %s)", dir, fc.cert.Leaf.NotAfter.UTC().Format("2006-01-02"))
-	}
 }
 
 // checkDNS makes sure domain publicly resolves to one of our addresses.
@@ -1046,17 +1213,17 @@ func (m *CertManager) issue(ctx context.Context, cfg *Config, domain string) err
 		if err != nil {
 			return err
 		}
-		m.mu.Lock()
+		m.lock()
 		if m.cfg != cfg || ctx.Err() != nil {
-			m.mu.Unlock()
+			m.unlock()
 			return context.Canceled
 		}
 		m.challenges[domain] = &answer
-		m.mu.Unlock()
+		m.unlock()
 		defer func() {
-			m.mu.Lock()
+			m.lock()
 			delete(m.challenges, domain)
-			m.mu.Unlock()
+			m.unlock()
 		}()
 		logf("cert: %s: order created, TLS-ALPN-01 answer ready; asking the CA to validate on port 443", domain)
 		if _, err := client.Accept(ctx, chal); err != nil {
@@ -1125,11 +1292,11 @@ func (m *CertManager) installCertificate(ctx context.Context, cfg *Config, domai
 	if err != nil {
 		return err
 	}
-	m.mu.Lock()
+	m.lock()
 	m.auto[domain] = fc.cert
 	delete(m.placeholders, domain)
 	m.announced[domain] = "issued" // the next pass logs the new validity
-	m.mu.Unlock()
+	m.unlock()
 	leaf := fc.cert.Leaf
 	logf("cert: %s: ISSUED by %q, serial %x, valid %s to %s, renews from %s, saved in %s", domain, leaf.Issuer.CommonName,
 		leaf.SerialNumber, leaf.NotBefore.UTC().Format("2006-01-02"), leaf.NotAfter.UTC().Format("2006-01-02"),
@@ -1161,8 +1328,9 @@ func writeFileAtomic(path string, data []byte) error {
 
 // CertInfo describes one certificate for the console.
 type CertInfo struct {
-	Name        string // the managed name, or the certificate's names for a directory
-	Source      string // "auto" or "directory"
+	Name        string // the name it is for
+	Source      string // "auto" or "local-ca"
+	CA          string // local-ca: which CA issued it
 	Dir         string // where it lives on disk
 	RuleLines   []int  // rules using it
 	Status      string // ok | expiring | expired | missing | failing
@@ -1209,8 +1377,8 @@ func (m *CertManager) Snapshot() []CertInfo {
 	for i := range m.cfg.Rules {
 		r := &m.cfg.Rules[i]
 		keys := r.CertDomains
-		if r.Cert != "" && r.Cert != "auto" {
-			keys = []string{"dir:" + r.Cert}
+		if r.LocalCA() != "" {
+			continue // listed below, from what each CA issued
 		}
 		for _, k := range keys {
 			if _, seen := lines[k]; !seen {
@@ -1227,16 +1395,7 @@ func (m *CertManager) Snapshot() []CertInfo {
 	var out []CertInfo
 	for _, k := range order {
 		info := CertInfo{RuleLines: lines[k]}
-		if dir, isDir := strings.CutPrefix(k, "dir:"); isDir {
-			info.Source, info.Dir, info.Name = "directory", dir, dir
-			if fc := m.files[dir]; fc != nil {
-				fill(&info, fc.cert)
-				info.Detail = "loaded from " + dir + "; re-read when certificate files change (you renew this one)"
-				if len(info.Names) > 0 {
-					info.Name = strings.Join(info.Names, ", ")
-				}
-			}
-		} else {
+		{
 			info.Source, info.Name, info.Dir = "auto", k, autoDir(m.cfg, k)
 			c := m.auto[k]
 			fill(&info, c)
@@ -1256,13 +1415,36 @@ func (m *CertManager) Snapshot() []CertInfo {
 		}
 		out = append(out, info)
 	}
+	// What each local CA issued, by name.
+	m.localCAs.Range(func(dir string, l *localCA) bool {
+		var lines []int
+		for i := range m.cfg.Rules {
+			if r := &m.cfg.Rules[i]; filepath.Join(m.cfg.CARoot, r.LocalCA()) == dir && r.LocalCA() != "" {
+				lines = append(lines, r.Line)
+			}
+		}
+		leaves := l.leaves()
+		sort.Slice(leaves, func(i, j int) bool { return leaves[i].Leaf.DNSNames[0] < leaves[j].Leaf.DNSNames[0] })
+		for _, c := range leaves {
+			name := c.Leaf.DNSNames[0]
+			info := CertInfo{Name: name, Source: "local-ca", CA: l.id, Dir: filepath.Join(dir, name), RuleLines: lines}
+			fill(&info, c)
+			if info.Status == "expiring" || info.Status == "ok" {
+				info.Status = "ok" // the renewal pass takes care of it
+			}
+			info.RenewFrom = day(renewDue(c.Leaf))
+			info.Detail = fmt.Sprintf("issued by CA %s on first use; renewed automatically from %s (checked every 6 hours)", l.id, info.RenewFrom)
+			out = append(out, info)
+		}
+		return true
+	})
 	return out
 }
 
 // RetryNow clears a name's wait and wakes the worker. False if the name is
 // not an automatic certificate.
 func (m *CertManager) RetryNow(domain string) bool {
-	m.mu.Lock()
+	m.lock()
 	known := false
 	if m.cfg != nil {
 		known = slices.Contains(m.managedLocked(m.cfg), domain)
@@ -1270,7 +1452,7 @@ func (m *CertManager) RetryNow(domain string) bool {
 	if known {
 		delete(m.nextTry, domain)
 	}
-	m.mu.Unlock()
+	m.unlock()
 	if known {
 		select {
 		case m.wake <- struct{}{}:

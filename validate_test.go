@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,12 +77,13 @@ func TestCertValidateScriptDecidesIssuanceAndRenewal(t *testing.T) {
 	var issued []string
 	m.issueFunc = func(_ context.Context, _ *Config, domain string) error {
 		issued = append(issued, domain)
-		m.mu.Lock()
+		m.lock()
 		m.auto[domain] = leaf(0)
-		m.mu.Unlock()
+		m.unlock()
 		return nil
 	}
 	pass := func() { // one round of the worker
+		m.takeProposals()
 		m.adoptCandidates(cfg)
 		for _, job := range m.pendingJobs(time.Now()) {
 			m.runJob(cfg, job)
@@ -138,9 +140,9 @@ func TestCertValidateScriptDecidesIssuanceAndRenewal(t *testing.T) {
 	// Renewal time: the script is asked again. It now refuses, so the
 	// certificate is kept but not renewed, and the name waits for the next try.
 	validateScript(t, dir, "echo 'subscription ended'; exit 1\n")
-	m.mu.Lock()
+	m.lock()
 	m.auto["ok.s.test"] = leaf(80 * day)
-	m.mu.Unlock()
+	m.unlock()
 	mark = len(testLog.String())
 	pass()
 	if got := calls(); got != "bad.s.test ok.s.test ok.s.test" || len(issued) != 2 {
@@ -207,11 +209,11 @@ func TestCertValidateScriptTimeoutCountsAsRefusal(t *testing.T) {
 	validateScriptTimeout = 200 * time.Millisecond
 	defer func() { validateScriptTimeout = old }()
 	start := time.Now()
-	ok, _, err := runValidateScript(script, "slow.s.test")
+	ok, _, err := runValidateScript(script, []string{"slow.s.test"})
 	if ok || err == nil || !strings.Contains(err.Error(), "no answer within 200ms") || time.Since(start) > 5*time.Second {
 		t.Fatalf("ok=%v err=%v after %s", ok, err, time.Since(start))
 	}
-	if ok, _, err := runValidateScript(filepath.Join(dir, "missing.sh"), "x.s.test"); ok || err == nil {
+	if ok, _, err := runValidateScript(filepath.Join(dir, "missing.sh"), []string{"x.s.test"}); ok || err == nil {
 		t.Fatalf("a script that cannot run refuses: %v %v", ok, err)
 	}
 }
@@ -257,9 +259,9 @@ func TestPlaceholderIsSharedForClientChosenNames(t *testing.T) {
 		t.Fatalf("%d placeholders, %d names queued", n, queued)
 	}
 	// An expiring placeholder is replaced, not served for ever.
-	m.mu.Lock()
+	m.lock()
 	first.Leaf.NotAfter = time.Now().Add(time.Minute)
-	m.mu.Unlock()
+	m.unlock()
 	if c, _ := m.CertificateFor(&cfg.Rules[0], "random-1.s3.test"); c == first || time.Until(c.Leaf.NotAfter) < 6*24*time.Hour {
 		t.Fatal("placeholder not renewed")
 	}
@@ -323,5 +325,66 @@ func TestCertificateReloadDiscardsScriptDecision(t *testing.T) {
 				t.Fatal("obsolete script removed a current candidate or restored a removed one")
 			}
 		})
+	}
+}
+
+// cert_validate_args: each argument is expanded like target_host; without
+// it the script gets the name alone.
+func TestCertValidateScriptArgs(t *testing.T) {
+	auto := "[global]\nport=443\nacme_agree_tos=true\n"
+	c := mustParse(t, auto+"[[host]]\npattern=*.*.x.com\ncert=auto\ncert_validate_script=/opt/d.sh\n"+
+		`cert_validate_args = ["--customer", "aaa-${1}", 'env ${2}', "${host}"]   # who asks`+"\ntarget_host=x.lan\n"+
+		"[[host]]\npattern=*.y.com\ncert=auto\ncert_validate_script=/opt/d.sh\ntarget_host=y.lan\n")
+	if got := scriptArgs(c, "acme.prod.x.com"); !slices.Equal(got, []string{"--customer", "aaa-acme", "env prod", "acme.prod.x.com"}) {
+		t.Errorf("args: %q", got)
+	}
+	if got := scriptArgs(c, "b.y.com"); !slices.Equal(got, []string{"b.y.com"}) {
+		t.Errorf("default args: %q", got)
+	}
+	for text, want := range map[string]string{
+		`cert_validate_args = "${host}"`:   "expected an array of strings",
+		`cert_validate_args = [${host}]`:   "expected an array of quoted strings",
+		`cert_validate_args = ["a" "b"]`:   "expected , or ]",
+		`cert_validate_args = ["a"] extra`: "unexpected text after array",
+		`cert_validate_args = ["a`:         "unterminated string",
+		`cert_validate_args = []`:          "at least one argument",
+		`cert_validate_args = ["$1"]`:      "write ${1}, not $1",
+		`cert_validate_args = ["${3}"]`:    "${3} does not exist",
+		"cert_validate_args = [\"x\"]\n#":  "", // fine, for the comment-after check below
+	} {
+		_, err := ParseConfig(auto + "[[host]]\npattern=*.*.x.com\ncert=auto\ncert_validate_script=/opt/d.sh\n" + text + "\ntarget_host=x.lan\n")
+		if want == "" {
+			if err != nil {
+				t.Errorf("%s: %v", text, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", text, err, want)
+		}
+	}
+	if _, err := ParseConfig(auto + "[[host]]\npattern=a.x.com\ncert=auto\ncert_validate_args=[\"${host}\"]\ntarget_host=x.lan\n"); err == nil || !strings.Contains(err.Error(), "needs a cert_validate_script") {
+		t.Errorf("args without a script: %v", err)
+	}
+
+	// The script really gets them, one argv entry each.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "args.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\nfor a in \"$@\"; do echo \"<$a>\"; done >> "+filepath.Join(dir, "argv")+"\n"), 0o755)
+	if ok, _, err := runValidateScript(script, scriptArgs(c, "acme.prod.x.com")); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "argv")); string(got) != "<--customer>\n<aaa-acme>\n<env prod>\n<acme.prod.x.com>\n" {
+		t.Fatalf("argv: %q", got)
+	}
+
+	// The console keeps the array as an array when it rewrites the rule.
+	text := auto + "[[host]]\npattern=*.*.x.com\ncert=auto\ncert_validate_script=/opt/d.sh\ncert_validate_args = ['a b', \"${1}\"] # note\ntarget_host=x.lan\n"
+	lines := strings.Split(text, "\n")
+	b := sectionBlocks(lines, "[[host]]")[0]
+	v := blockValues(lines, b)
+	if v["cert_validate_args"] != `["a b", "${1}"]` {
+		t.Fatalf("read back: %q", v["cert_validate_args"])
+	}
+	if f, err := fmtValue(v["cert_validate_args"]); err != nil || f != `["a b", "${1}"]` {
+		t.Fatalf("written: %q %v", f, err)
 	}
 }

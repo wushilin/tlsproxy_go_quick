@@ -1,65 +1,132 @@
 package main
 
-// End-to-end ACME test against Pebble, Let's Encrypt's official test CA, with
-// its companion DNS server. Pebble validates TLS-ALPN-01 by connecting to our
-// proxy exactly as Let's Encrypt would (only the port differs). Needs network
-// access to install the two tools, so it only runs with TLSPROXY_PEBBLE=1:
-//
-//	TLSPROXY_PEBBLE=1 go test -run Pebble -v ./...
+// End-to-end ACME tests against Pebble, Let's Encrypt's official test CA,
+// run in this process from its vendored packages: no download, no separate
+// program, no network beyond localhost, so they run in every go test on any
+// host. Pebble validates TLS-ALPN-01 by connecting to our proxy exactly as
+// Let's Encrypt would (only the port differs); its DNS is a fake server here.
 
 import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	pebbleca "github.com/letsencrypt/pebble/v2/ca"
+	pebbledb "github.com/letsencrypt/pebble/v2/db"
+	pebbleva "github.com/letsencrypt/pebble/v2/va"
+	pebblewfe "github.com/letsencrypt/pebble/v2/wfe"
 )
 
-const pebbleModule = "github.com/letsencrypt/pebble/v2"
+// pebble is Pebble running in this process: its ACME API on an HTTPS
+// server of its own, its DNS a fake server.
+type pebble struct {
+	api     *httptest.Server
+	handler atomic.Pointer[http.Handler] // set once the proxy's port is known
+	serve   sync.Mutex                   // one ACME request at a time: Pebble has races of its own
+	mgmt    http.Handler
+	caFile  string // trust for the API's own HTTPS (acme_ca_file)
+	dns     string
+	log     *bytes.Buffer
+	logMu   sync.Mutex
+}
+
+// newPebble starts the API's HTTPS server and the DNS (every name resolves
+// to 127.0.0.1, but those in other). Pebble itself starts with start, once
+// the proxy it validates against is listening.
+func newPebble(t *testing.T, other map[string]string) *pebble {
+	t.Helper()
+	pb := &pebble{dns: fakeDNSWith(t, "127.0.0.1", other), log: &bytes.Buffer{}}
+	pb.api = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h := pb.handler.Load(); h != nil {
+			// Pebble is the test's CA, not what is tested: serve it one request
+			// at a time. Built with -race in this process, its own unguarded
+			// shared state (two new-account requests at once) would otherwise
+			// fail the run.
+			pb.serve.Lock()
+			defer pb.serve.Unlock()
+			(*h).ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "not started yet", http.StatusServiceUnavailable)
+	}))
+	pb.api.StartTLS()
+	t.Cleanup(pb.api.Close)
+	pb.caFile = filepath.Join(t.TempDir(), "pebble-api.pem")
+	os.WriteFile(pb.caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: pb.api.Certificate().Raw}), 0o644)
+	t.Cleanup(func() {
+		if t.Failed() {
+			pb.logMu.Lock()
+			t.Logf("---- pebble ----\n%s", pb.log)
+			pb.logMu.Unlock()
+		}
+	})
+	return pb
+}
+
+// global is what a proxy's [global] needs to get certificates from it.
+func (pb *pebble) global(certPath string) string {
+	return fmt.Sprintf("cert_path=%s\nacme_agree_tos=true\nacme_email=admin@acme.test\n"+
+		"acme_directory=%s/dir\nacme_ca_file=%s\ndns_resolvers=%s\npublic_ip_address=127.0.0.1", certPath, pb.api.URL, pb.caFile, pb.dns)
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// start runs Pebble, validating TLS-ALPN-01 on the proxy's proxyPort.
+func (pb *pebble) start(t *testing.T, proxyPort string) {
+	t.Helper()
+	port, _ := strconv.Atoi(proxyPort)
+	logger := log.New(lockedWriter{&pb.logMu, pb.log}, "pebble ", log.LstdFlags)
+	db := pebbledb.NewMemoryStore()
+	ca := pebbleca.New(logger, db, "", "ecdsa", 0, 1, map[string]pebbleca.Profile{"default": {Description: "default"}})
+	va := pebbleva.New(logger, 5002, port, false, pb.dns, db)
+	wfe := pebblewfe.New(logger, db, va, ca, []string{"pebble.letsencrypt.org"}, false, false, 3, 5)
+	h := wfe.Handler()
+	pb.mgmt = wfe.ManagementHandler()
+	pb.handler.Store(&h)
+}
+
+// roots is the root Pebble issues under (a new one each run).
+func (pb *pebble) roots(t *testing.T) *x509.CertPool {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	pb.mgmt.ServeHTTP(rec, httptest.NewRequest("GET", "/roots/0", nil))
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(rec.Body.Bytes()) {
+		t.Fatalf("no root from Pebble: %s", rec.Body)
+	}
+	return pool
+}
 
 func freePort(t *testing.T) int {
 	l, port := listen(t)
 	l.Close()
 	return port
-}
-
-func runTool(t *testing.T, dir string, env []string, name string, args ...string) []byte {
-	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = append(append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"), env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
-	}
-	return out
-}
-
-func startDaemon(t *testing.T, logName string, env []string, bin string, args ...string) {
-	t.Helper()
-	logFile, _ := os.Create(filepath.Join(t.TempDir(), logName))
-	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(), env...)
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		if t.Failed() {
-			data, _ := os.ReadFile(logFile.Name())
-			t.Logf("---- %s ----\n%s", logName, data)
-		}
-	})
 }
 
 func waitForPort(t *testing.T, addr string) {
@@ -75,55 +142,20 @@ func waitForPort(t *testing.T, addr string) {
 }
 
 func TestPebbleIssuesOverTLSALPN01(t *testing.T) {
-	if os.Getenv("TLSPROXY_PEBBLE") == "" {
-		t.Skip("set TLSPROXY_PEBBLE=1 to run the ACME test against Pebble")
-	}
-	tools := t.TempDir()
-	runTool(t, tools, []string{"GOBIN=" + tools}, "go", "install", pebbleModule+"/cmd/pebble@latest")
-	runTool(t, tools, []string{"GOBIN=" + tools}, "go", "install", pebbleModule+"/cmd/pebble-challtestsrv@latest")
-	var mod struct{ Dir string }
-	if err := json.Unmarshal(runTool(t, tools, nil, "go", "mod", "download", "-json", pebbleModule+"@latest"), &mod); err != nil {
-		t.Fatal(err)
-	}
-	pebbleCerts := filepath.Join(mod.Dir, "test", "certs")
+	t.Parallel()
+	pb := newPebble(t, map[string]string{"elsewhere.acme.test": "198.51.100.9"}) // one name points elsewhere
 
 	// The proxy under test, terminating TLS for two names with cert = auto.
-	dnsPort, dnsMgmt, apiPort, apiMgmt := freePort(t), freePort(t), freePort(t), freePort(t)
 	certPath := t.TempDir()
-	p := startProxy(t, fmt.Sprintf("cert_path=%s\nacme_agree_tos=true\nacme_email=admin@acme.test\n"+
-		"acme_directory=https://127.0.0.1:%d/dir\nacme_ca_file=%s\ndns_resolvers=127.0.0.1:%d\npublic_ip_address=127.0.0.1",
-		certPath, apiPort, filepath.Join(pebbleCerts, "pebble.minica.pem"), dnsPort),
+	p := startProxy(t, pb.global(certPath),
 		fmt.Sprintf("[[host]]\npattern=*.acme\\.test\ncert=auto\ncert_domains=www.acme.test, api.acme.test, elsewhere.acme.test\n"+
 			"upstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
 	_, proxyPort, _ := net.SplitHostPort(p.addr)
 
-	// Fake public DNS: everything resolves to 127.0.0.1, except one name.
-	startDaemon(t, "challtestsrv.log", nil, filepath.Join(tools, "pebble-challtestsrv"),
-		"-defaultIPv4", "127.0.0.1", "-defaultIPv6", "", "-dnsserver", fmt.Sprintf("127.0.0.1:%d", dnsPort),
-		"-management", fmt.Sprintf("127.0.0.1:%d", dnsMgmt), "-http01", "", "-https01", "", "-tlsalpn01", "", "-doh", "")
-	waitForPort(t, fmt.Sprintf("127.0.0.1:%d", dnsMgmt))
-	body, _ := json.Marshal(map[string]any{"host": "elsewhere.acme.test", "addresses": []string{"198.51.100.9"}})
-	if resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/add-a", dnsMgmt), "application/json", bytes.NewReader(body)); err != nil || resp.StatusCode != 200 {
-		t.Fatalf("challtestsrv add-a: %v", err)
-	}
-
-	// The CA. tlsPort is where it connects for TLS-ALPN-01: our proxy.
-	pebbleCfg := filepath.Join(tools, "pebble.json")
-	os.WriteFile(pebbleCfg, []byte(fmt.Sprintf(`{"pebble": {"listenAddress": "127.0.0.1:%d", "managementListenAddress": "127.0.0.1:%d",
-		"certificate": %q, "privateKey": %q, "httpPort": 5002, "tlsPort": %s, "ocspResponderURL": "",
-		"externalAccountBindingRequired": false}}`, apiPort, apiMgmt,
-		filepath.Join(pebbleCerts, "localhost", "cert.pem"), filepath.Join(pebbleCerts, "localhost", "key.pem"), proxyPort)), 0o644)
-	startDaemon(t, "pebble.log", []string{"PEBBLE_VA_NOSLEEP=1", "PEBBLE_WFE_NONCEREJECT=0"}, filepath.Join(tools, "pebble"),
-		"-config", pebbleCfg, "-dnsserver", fmt.Sprintf("127.0.0.1:%d", dnsPort))
-	waitForPort(t, fmt.Sprintf("127.0.0.1:%d", apiPort))
-
-	// The worker's first pass ran before the CA was up and backed off; clear
-	// that and poke it, as a config reload would.
+	// The CA: validating through the proxy.
 	m := p.srv.certs
-	m.mu.Lock()
-	m.nextTry = map[string]time.Time{}
-	m.mu.Unlock()
-	m.wake <- struct{}{}
+	pb.start(t, proxyPort)
+	retryCertificatesNow(m)
 
 	issued := func(domain string) *tls.Certificate {
 		m.mu.RLock()
@@ -153,7 +185,9 @@ func TestPebbleIssuesOverTLSALPN01(t *testing.T) {
 		tc.Close()
 		for _, f := range []string{"cert.pem", "key.pem"} { // persisted, private
 			st, err := os.Stat(filepath.Join(certPath, name, f))
-			if err != nil || st.Mode().Perm() != 0o600 {
+			// Mode 0600 is Unix's notion of private; Windows has no mode bits
+			// (its ACLs come from the directory), so there only presence counts.
+			if err != nil || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o600) {
 				t.Fatalf("%s/%s: %v %v", name, f, err, st)
 			}
 		}
@@ -188,4 +222,13 @@ func TestPebbleIssuesOverTLSALPN01(t *testing.T) {
 	if jobs := fresh.pendingJobs(time.Now()); len(jobs) != 1 || jobs[0].domain != "elsewhere.acme.test" {
 		t.Fatalf("after a restart only the unissued name should be pending: %+v", jobs)
 	}
+}
+
+// retryCertificatesNow clears the worker's backoff (its first pass ran
+// before the CA was up) and pokes it, as a config reload would.
+func retryCertificatesNow(m *CertManager) {
+	m.lock()
+	m.nextTry = map[string]time.Time{}
+	m.unlock()
+	m.wake <- struct{}{}
 }

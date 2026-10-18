@@ -14,10 +14,12 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -31,11 +33,12 @@ import (
 	"time"
 )
 
-//go:embed console.html
-var consoleHTML []byte
+//go:embed console
+var consoleFiles embed.FS
 
 const (
 	sessionCookie   = "tlsproxy_session"
+	consolePath     = "/tlsproxy_quick" // every page and API lives under it; / redirects there
 	sessionLifetime = 12 * time.Hour
 	maxBackups      = 10
 	consoleHidden   = "# [console] is managed outside this editor (hidden here, kept as it is on save)"
@@ -77,6 +80,8 @@ type Console struct {
 	sessions     map[string]*session
 	failures     int
 	lockedUntil  time.Time
+
+	rules *ruleState // live state pushed to the rules page
 }
 
 func (s *Server) startConsole(cfg *ConsoleConfig) error {
@@ -84,13 +89,15 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	if err != nil {
 		return err
 	}
-	c := &Console{srv: s, addr: ln.Addr().String(), sessions: map[string]*session{}}
+	c := &Console{srv: s, addr: ln.Addr().String(), sessions: map[string]*session{}, rules: newRuleState()}
 	c.update(cfg)
 	s.console = c
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(consoleHTML)
+	static, _ := fs.Sub(consoleFiles, "console")
+	files := http.FileServerFS(static)
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache") // a new build is picked up at once
+		files.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("POST /api/login", c.login)
 	mux.HandleFunc("POST /api/logout", c.authed(c.logout))
@@ -99,6 +106,13 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("GET /api/connections", c.authed(c.connections))
 	mux.HandleFunc("GET /api/certs", c.authed(c.certs))
 	mux.HandleFunc("POST /api/certs/retry", c.authed(c.certRetry))
+	mux.HandleFunc("GET /api/cas", c.authed(c.caList))
+	mux.HandleFunc("GET /api/cas/cert", c.authed(c.caCert))
+	mux.HandleFunc("POST /api/cas/generate", c.authed(c.caGenerate))
+	mux.HandleFunc("POST /api/cas/import", c.authed(c.caImport))
+	mux.HandleFunc("POST /api/cas/delete", c.authed(c.caDelete))
+	mux.HandleFunc("GET /api/cas/config", c.authed(c.caConfigGet))
+	mux.HandleFunc("POST /api/cas/config", c.authed(c.caConfigSave))
 	mux.HandleFunc("GET /api/log", c.authed(c.recentLog))
 	mux.HandleFunc("GET /api/config", c.authed(c.configGet))
 	mux.HandleFunc("POST /api/config/validate", c.authed(c.configValidate))
@@ -106,8 +120,28 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("POST /api/config/save", c.authed(c.configSave))
 	mux.HandleFunc("GET /api/config/backups", c.authed(c.backups))
 	mux.HandleFunc("GET /api/config/backup", c.authed(c.backupGet))
-	server := &http.Server{Handler: c.guard(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
-	logf("console: listening on http://%s (plain HTTP; password required)", c.addr)
+	mux.HandleFunc("GET /api/state", c.authed(c.stateGet))
+	mux.HandleFunc("GET /api/ws", c.authed(c.stateSocket))
+	mux.HandleFunc("GET /api/flows", c.authed(c.flowSocket))
+	mux.HandleFunc("POST /api/rules/validate", c.authed(c.ruleValidate))
+	mux.HandleFunc("POST /api/rules/save", c.authed(c.ruleSave))
+	mux.HandleFunc("POST /api/rules/delete", c.authed(c.ruleDelete))
+	mux.HandleFunc("POST /api/rules/stop", c.authed(c.ruleStopStart(true)))
+	mux.HandleFunc("POST /api/rules/start", c.authed(c.ruleStopStart(false)))
+	mux.HandleFunc("POST /api/connections/stop", c.authed(c.connStop))
+	mux.HandleFunc("POST /api/listeners/validate", c.authed(c.listenerValidate))
+	mux.HandleFunc("POST /api/listeners/save", c.authed(c.listenerSave))
+	mux.HandleFunc("POST /api/listeners/delete", c.authed(c.listenerDelete))
+	mux.HandleFunc("POST /api/listeners/stop", c.authed(c.listenerStopStart(true)))
+	mux.HandleFunc("POST /api/listeners/start", c.authed(c.listenerStopStart(false)))
+	go c.broadcast()
+	root := http.NewServeMux()
+	root.Handle(consolePath+"/", http.StripPrefix(consolePath, mux))
+	root.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, consolePath+"/", http.StatusFound)
+	})
+	server := &http.Server{Handler: c.guard(root), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
+	logf("console: listening on http://%s%s/ (plain HTTP; password required)", c.addr, consolePath)
 	go func() {
 		if err := server.Serve(ln); err != nil {
 			errorf("console: stopped: %v", err)
@@ -176,7 +210,23 @@ func (c *Console) guard(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+		// connect-src names the WebSocket explicitly: older browsers don't
+		// count ws:// to the same host as 'self'. Only the checked name and a
+		// numeric port go into the header.
+		connect, origin := "'self'", ""
+		if name, port, err := net.SplitHostPort(r.Host); err != nil {
+			origin = r.Host // no port: the name alone, as checked above
+		} else if port != "" && strings.Trim(port, "0123456789") == "" {
+			if strings.Contains(name, ":") {
+				name = "[" + name + "]"
+			}
+			origin = name + ":" + port
+		}
+		if origin != "" {
+			connect += " ws://" + origin + " wss://" + origin
+		}
+		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src "+
+			connect+"; frame-ancestors 'none'")
 		if r.Method == http.MethodPost {
 			if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 				fail(w, http.StatusUnsupportedMediaType, "POST bodies must be application/json")
@@ -281,7 +331,7 @@ func (c *Console) login(w http.ResponseWriter, r *http.Request) {
 	}
 	s := &session{csrf: csrf, expires: time.Now().Add(sessionLifetime)}
 	c.sessions[id] = s
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, Secure: c.secureCookie || r.TLS != nil,
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: consolePath, HttpOnly: true, Secure: c.secureCookie || r.TLS != nil,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionLifetime.Seconds())})
 	logf("console: sign-in from %s", r.RemoteAddr)
 	writeJSON(w, 200, map[string]any{"ok": true, "csrf": s.csrf})
@@ -293,7 +343,7 @@ func (c *Console) logout(w http.ResponseWriter, r *http.Request) {
 		delete(c.sessions, ck.Value)
 		c.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: consolePath, MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -315,12 +365,11 @@ func (c *Console) status(w http.ResponseWriter, r *http.Request) {
 		Host                                          string
 		Active, Total, Terminated, BytesUp, BytesDown int64
 	}
-	st.mu.Lock()
-	hosts := make([]hostRow, 0, len(st.hosts))
-	for name, h := range st.hosts {
+	hosts := make([]hostRow, 0, st.hosts.Len())
+	st.hosts.Range(func(name string, h *HostStats) bool {
 		hosts = append(hosts, hostRow{name, h.Active.Load(), h.Total.Load(), h.Terminated.Load(), h.BytesUp.Load(), h.BytesDown.Load()})
-	}
-	st.mu.Unlock()
+		return true
+	})
 	sort.Slice(hosts, func(i, j int) bool {
 		if hosts[i].Active != hosts[j].Active {
 			return hosts[i].Active > hosts[j].Active
@@ -349,12 +398,7 @@ func (c *Console) status(w http.ResponseWriter, r *http.Request) {
 
 func (c *Console) connections(w http.ResponseWriter, r *http.Request) {
 	st := c.srv.stats
-	st.mu.Lock()
-	conns := make([]*ConnState, 0, len(st.conns))
-	for _, cs := range st.conns {
-		conns = append(conns, cs)
-	}
-	st.mu.Unlock()
+	conns, _ := st.connList(0)
 	sort.Slice(conns, func(i, j int) bool { return conns[i].ID > conns[j].ID })
 	state := func(v int32) string {
 		if v == dirOpen {
@@ -477,10 +521,12 @@ func fileHash(data []byte) string {
 
 // check validates editor text as the proxy would load it. Errors refer to
 // editor line numbers.
-func (c *Console) check(visible string, block []string) (full string, cfg *Config, err error) {
-	full, toEditor, err := showConsole(visible, block)
+// toEditor maps a line of the full file to the line the editor shows; the
+// warnings in cfg already use editor lines.
+func (c *Console) check(visible string, block []string) (full string, cfg *Config, toEditor func(int) int, err error) {
+	full, toEditor, err = showConsole(visible, block)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	translate := func(err error) error {
 		return fmt.Errorf("%s", lineRef.ReplaceAllStringFunc(err.Error(), func(m string) string {
@@ -489,12 +535,15 @@ func (c *Console) check(visible string, block []string) (full string, cfg *Confi
 		}))
 	}
 	if cfg, err = ParseConfig(full); err != nil {
-		return "", nil, translate(err)
+		return "", nil, nil, translate(err)
 	}
 	if err = c.srv.certs.Check(cfg); err != nil {
-		return "", nil, translate(err)
+		return "", nil, nil, translate(err)
 	}
-	return full, cfg, nil
+	for i, w := range cfg.Warnings {
+		cfg.Warnings[i] = translate(errors.New(w)).Error()
+	}
+	return full, cfg, toEditor, nil
 }
 
 // readConfig reads the file and its version. Callers that go on to write
@@ -539,13 +588,16 @@ func (c *Console) configValidate(w http.ResponseWriter, r *http.Request) {
 	}
 	var cfg *Config
 	if err == nil {
-		_, cfg, err = c.check(req.Text, block)
+		var toEditor func(int) int
+		var full string
+		full, cfg, toEditor, err = c.check(req.Text, block)
+		if err == nil {
+			writeJSON(w, 200, map[string]any{"ok": true, "warnings": cfg.Warnings, "problems": problemsOf(cfg.Warnings), "summary": cfg.Describe(),
+				"autoDomains": cfg.AutoDomains(), "tree": configTree(cfg, full, toEditor)})
+			return
+		}
 	}
-	if err != nil {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "warnings": cfg.Warnings, "summary": cfg.Describe(), "autoDomains": cfg.AutoDomains()})
+	writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "line": lineOf(err.Error())})
 }
 
 // configTest routes SNIs through the text in the editor, saved or not.
@@ -557,7 +609,7 @@ func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 	}
 	var cfg *Config
 	if err == nil {
-		_, cfg, err = c.check(req.Text, block)
+		_, cfg, _, err = c.check(req.Text, block)
 	}
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
@@ -569,16 +621,22 @@ func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 		if name == "<none>" || name == "none" {
 			name = ""
 		}
-		d := cfg.Route(name)
-		row := map[string]any{"sni": sni, "allow": d.Allow, "ruleLine": d.RuleLine, "error": d.Err}
-		if d.Rule != nil { // which rule won, and why it outranks the others
-			row["kind"], row["pattern"] = d.Rule.Kind.String(), d.Rule.Source
+		for i := range cfg.Listeners {
+			d := cfg.ForListener(&cfg.Listeners[i]).Route(name)
+			label := sni
+			if len(cfg.Listeners) > 1 {
+				label = cfg.Listeners[i].Name + ": " + sni // each listener has its own rules
+			}
+			row := map[string]any{"sni": label, "listener": cfg.Listeners[i].Name, "allow": d.Allow, "ruleLine": d.RuleLine, "error": d.Err}
+			if d.Rule != nil { // which rule won, and why it outranks the others
+				row["kind"], row["pattern"] = d.Rule.Kind.String(), d.Rule.Source
+			}
+			if d.Allow {
+				row["target"] = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+				row["terminated"] = d.Rule.Terminates()
+			}
+			results = append(results, row)
 		}
-		if d.Allow {
-			row["target"] = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
-			row["terminated"] = d.Rule.Terminates()
-		}
-		results = append(results, row)
 	}
 	// Rule lines refer to the full file; say so rather than mistranslate silently.
 	writeJSON(w, 200, map[string]any{"ok": true, "results": results})
@@ -605,39 +663,12 @@ func (c *Console) configSave(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "not saved: the config file was changed by someone else after you opened it. Copy your text if you need it, then use Discard & reload from disk")
 		return
 	}
-	full, cfg, err := c.check(req.Text, block)
+	full, cfg, _, err := c.check(req.Text, block)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	if full == string(onDisk) {
-		writeJSON(w, 200, map[string]any{"ok": true, "unchanged": true, "hash": ver.Hash, "mtime": ver.Mtime})
-		return
-	}
-	path := c.srv.configPath
-	backup := fmt.Sprintf("%s.%s.bak", path, time.Now().UTC().Format("20060102T150405.000Z"))
-	if err := writeFileAtomic(backup, onDisk); err != nil {
-		fail(w, 500, "cannot write the backup: %v", err)
-		return
-	}
-	if err := writeFileAtomic(path, []byte(full)); err != nil {
-		fail(w, 500, "cannot write %s: %v", path, err)
-		return
-	}
-	pruneBackups(path)
-	now, err := versionOf(path, []byte(full))
-	if err != nil {
-		fail(w, 500, "saved, but cannot stat %s: %v", path, err)
-		return
-	}
-	logf("console: config saved from %s (previous version kept as %s)", r.RemoteAddr, filepath.Base(backup))
-	select {
-	case c.srv.reloadNow <- struct{}{}: // apply now instead of at the next poll
-	default:
-	}
-	running := c.srv.runtime.Load().cfg
-	writeJSON(w, 200, map[string]any{"ok": true, "hash": now.Hash, "mtime": now.Mtime, "backup": filepath.Base(backup),
-		"warnings": cfg.Warnings, "restartNeeded": cfg.Bind != running.Bind || cfg.Port != running.Port})
+	c.commit(w, r, onDisk, full, cfg, "config saved")
 }
 
 func backupFiles(path string) []string {

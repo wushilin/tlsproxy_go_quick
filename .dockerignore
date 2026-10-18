@@ -1,0 +1,7 @@
+.git
+.github
+*.bak
+*.test
+tlsproxy
+tlsproxy-*
+SHA256SUMS

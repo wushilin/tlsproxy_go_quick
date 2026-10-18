@@ -264,7 +264,7 @@ func TestCmdClientAbortsMidDownload(t *testing.T) {
 	if err := c.SetLinger(0); err != nil {
 		t.Fatal(err)
 	}
-	send(c, "SERVER_DATA 200000000 41\n")
+	send(c, "SERVER_DATA 32000000 41\n") // far more than the socket buffers hold
 	if got := readN(t, c, 1_000_000); !bytes.Equal(got, pattern(1_000_000, 41)) {
 		t.Fatal("corrupt data before client abort")
 	}
@@ -316,7 +316,7 @@ func TestCmdBackpressureLosesNothing(t *testing.T) {
 
 func TestCmdInterleavedBothDirections(t *testing.T) {
 	t.Parallel()
-	p, _ := cmdProxy(t, "buffer_size=1024")
+	p, _ := cmdProxy(t, "buffer_size=4096")
 	c := cmdConnect(t, p, "mix.test")
 	for i := 0; i < 20; i++ {
 		up := pattern(10_000+i*3_000, uint64(i))
@@ -396,9 +396,7 @@ func TestCmdInterruptionStormLeaksNothing(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	st.mu.Lock()
-	left := len(st.conns)
-	st.mu.Unlock()
+	left := st.conns.Len()
 	if left != 0 {
 		t.Fatalf("%d connections left in the registry", left)
 	}

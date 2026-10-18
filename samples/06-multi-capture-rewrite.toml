@@ -1,6 +1,6 @@
 # Rewrite with several captures: <svc>.<env>.example.com -> <svc>.<env>.svc.cluster.local
-# Each * is a capture, numbered from the left: $1, $2, ... ($0 is the whole name).
-# The ${N} form is handy when a digit or letter follows the reference.
+# Each * is a capture, numbered from the left: ${1}, ${2}, ... (${host} is the whole name).
+# Braces are always required, so ${1}hello is exact.
 #
 #> web.prod.example.com     => web.prod.svc.cluster.local:443
 #> api-v2.dev.example.com   => api-v2.dev.svc.cluster.local:443
@@ -17,11 +17,11 @@ port = 443
 # Only these two environments: one rule each (there is no "dev or prod").
 [[host]]
 pattern = *.dev.example.com
-target_host = $1.dev.svc.cluster.local
+target_host = ${1}.dev.svc.cluster.local
 
 [[host]]
 pattern = *.prod.example.com
-target_host = $1.prod.svc.cluster.local
+target_host = ${1}.prod.svc.cluster.local
 
 # A * inside a label: node3, node12, ...
 [[host]]
@@ -32,7 +32,7 @@ target_port = 8443
 # Two captures in one label, used in the other order.
 [[host]]
 pattern = *-*.example.com
-target_host = $2.$1.lan
+target_host = ${2}.${1}.lan
 
 [[host]]
 pattern = ANY

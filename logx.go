@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,51 +14,45 @@ import (
 // problems (errorf). Each goes to the process's own stdout/stderr or, when
 // [logging] names a file for it, to a rotating file (see rotate.go).
 //
-// In the running proxy (StartAsyncLogging) a log call only appends the line to
-// a buffer in memory; a background goroutine writes the buffer out ten times a
-// second, and at once after a problem line. Connection handlers and the accept
-// loop therefore never wait for a disk or a stalled pipe. If the destination
-// cannot keep up, lines beyond maxPendingLog are dropped and counted rather
-// than held. Without StartAsyncLogging (tests, --test) lines are written
-// synchronously.
+// In the running proxy (StartAsyncLogging) a log call only puts the line in
+// a lock-free ring; a background goroutine writes the queued lines out ten
+// times a second, and at once after a problem line. Connection handlers and
+// the accept loop therefore never wait for a disk, a stalled pipe or each
+// other. If the destination cannot keep up, lines beyond maxPendingLog bytes
+// (or maxPendingLines) are dropped and counted rather than held. Without
+// StartAsyncLogging (tests, --test) lines are written synchronously.
 var (
-	flushMu sync.Mutex // serialises writers, keeps lines in order; taken before logMu
-	logMu   sync.Mutex
-	logOut  io.Writer = os.Stdout // where logf goes without a file (tests swap it)
-	logErr  io.Writer = os.Stderr
+	flushMu sync.Mutex             // serialises flushes, keeps lines in order; taken before logMu
+	logMu   sync.Mutex             // the destinations below, and synchronous writes
+	logOut  io.Writer  = os.Stdout // where logf goes without a file (tests swap it)
+	logErr  io.Writer  = os.Stderr
 	sinkCfg *LogConfig
 	sinkOut *FileLogger
 	sinkErr *FileLogger
 
-	logAsync   bool
-	pending    []byte       // lines not written yet, both streams, in order
-	segments   []logSegment // which stream each stretch of pending belongs to
-	droppedLog int
-	flushNow   = make(chan struct{}, 1)
+	logAsync      atomic.Bool
+	logQueue      = newRing[queuedLine](maxPendingLines) // both streams, in the order logged
+	pendingBytes  atomic.Int64
+	droppedLog    atomic.Int64
+	problemQueued atomic.Bool // a problem line is waiting: flushNow was sent
+	flushNow      = make(chan struct{}, 1)
 )
 
 const (
 	maxPendingLog    = 4 << 20
+	maxPendingLines  = 1 << 15
 	logFlushInterval = 100 * time.Millisecond
 )
 
-// logSegment says that pending[:end] (from the previous segment's end) belongs
-// to one stream. Consecutive lines of a stream share a segment, so a flush is a
-// few large writes and the two streams still come out in the order they were
-// logged when they share a destination.
-type logSegment struct {
+type queuedLine struct {
+	text    string
 	problem bool
-	end     int
 }
 
 // StartAsyncLogging moves writing out of the callers' way (see above). Call
 // FlushLogs before the process exits.
 func StartAsyncLogging() {
-	logMu.Lock()
-	already := logAsync
-	logAsync = true
-	logMu.Unlock()
-	if already {
+	if logAsync.Swap(true) {
 		return
 	}
 	go func() {
@@ -81,28 +76,40 @@ func FlushLogs() {
 }
 
 func flushLocked() {
+	problemQueued.Store(false)
 	logMu.Lock()
-	data, segs, dropped := pending, segments, droppedLog
-	pending, segments, droppedLog = nil, nil, 0
 	outFile, errFile, outW, errW := sinkOut, sinkErr, logOut, logErr
 	logMu.Unlock()
-	start := 0
-	for _, seg := range segs {
-		if seg.problem {
-			writeLog(errFile, errW, string(data[start:seg.end]))
+	// Consecutive lines of a stream are written together, so a flush is a few
+	// large writes, and the two streams come out in the order they were
+	// logged when they share a destination.
+	var buf strings.Builder
+	problem := false
+	write := func() {
+		if buf.Len() == 0 {
+			return
+		}
+		if problem {
+			writeLog(errFile, errW, buf.String())
 		} else {
-			writeLog(outFile, outW, string(data[start:seg.end]))
+			writeLog(outFile, outW, buf.String())
 		}
-		start = seg.end
+		buf.Reset()
 	}
-	if cap(data) <= 1<<20 { // reuse the buffer unless a burst made it huge
-		logMu.Lock()
-		if pending == nil {
-			pending = data[:0]
+	for {
+		l, ok := logQueue.TryPop()
+		if !ok {
+			break
 		}
-		logMu.Unlock()
+		pendingBytes.Add(-int64(len(l.text)))
+		if l.problem != problem || buf.Len() > 1<<20 {
+			write()
+			problem = l.problem
+		}
+		buf.WriteString(l.text)
 	}
-	if dropped > 0 {
+	write()
+	if dropped := droppedLog.Swap(0); dropped > 0 {
 		writeLog(errFile, errW, time.Now().UTC().Format("2006-01-02T15:04:05.000Z")+
 			fmt.Sprintf(" log: %d lines were dropped: the log destination could not keep up\n", dropped))
 	}
@@ -169,20 +176,31 @@ func ConfigureLogging(cfg LogConfig) error {
 const recentLogSize = 2000
 
 var (
-	recentLines [recentLogSize]string
-	recentNext  int // total lines ever stored; index = recentNext % size
+	recentLines [recentLogSize]atomic.Pointer[recentLine]
+	recentNext  atomic.Uint64 // lines ever stored; line n is in slot n % size
 )
+
+type recentLine struct {
+	n    uint64
+	text string
+}
 
 // RecentLog returns up to n of the newest lines (oldest first) that contain
 // filter ("" = all).
 func RecentLog(n int, filter string) []string {
-	logMu.Lock()
-	defer logMu.Unlock()
 	out := []string{} // never nil: the console's JSON says [] rather than null
-	start := max(0, recentNext-recentLogSize)
-	for i := recentNext - 1; i >= start && len(out) < n; i-- {
-		if line := recentLines[i%recentLogSize]; filter == "" || strings.Contains(line, filter) {
-			out = append(out, line)
+	next := recentNext.Load()
+	start := uint64(0)
+	if next > recentLogSize {
+		start = next - recentLogSize
+	}
+	for i := next; i > start && len(out) < n; i-- {
+		l := recentLines[(i-1)%recentLogSize].Load()
+		if l == nil || l.n != i-1 { // not written yet, or already overwritten by a newer line
+			continue
+		}
+		if filter == "" || strings.Contains(l.text, filter) {
+			out = append(out, l.text)
 		}
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
@@ -191,14 +209,14 @@ func RecentLog(n int, filter string) []string {
 	return out
 }
 
-// emit records one line. The text is built before the lock is taken.
+// emit records one line. In the running proxy it takes no lock.
 func emit(problem bool, format string, args []any) {
 	line := time.Now().UTC().Format("2006-01-02T15:04:05.000Z") + " " + fmt.Sprintf(format, args...) + "\n"
-	logMu.Lock()
-	defer logMu.Unlock()
-	recentLines[recentNext%recentLogSize] = strings.TrimSuffix(line, "\n")
-	recentNext++
-	if !logAsync {
+	n := recentNext.Add(1) - 1
+	recentLines[n%recentLogSize].Store(&recentLine{n: n, text: strings.TrimSuffix(line, "\n")})
+	if !logAsync.Load() {
+		logMu.Lock()
+		defer logMu.Unlock()
 		if problem {
 			writeLog(sinkErr, logErr, line)
 		} else {
@@ -206,17 +224,18 @@ func emit(problem bool, format string, args []any) {
 		}
 		return
 	}
-	if len(pending)+len(line) > maxPendingLog {
-		droppedLog++
+	if pendingBytes.Add(int64(len(line))) > maxPendingLog {
+		pendingBytes.Add(-int64(len(line)))
+		droppedLog.Add(1)
 		return
 	}
-	pending = append(pending, line...)
-	if n := len(segments); n > 0 && segments[n-1].problem == problem {
-		segments[n-1].end = len(pending)
-	} else {
-		segments = append(segments, logSegment{problem, len(pending)})
+	if !logQueue.TryPush(queuedLine{line, problem}) {
+		pendingBytes.Add(-int64(len(line)))
+		droppedLog.Add(1)
+		return
 	}
-	if problem { // problems are worth seeing at once
+	// Problems are worth seeing at once: wake the writer, once per flush.
+	if problem && problemQueued.CompareAndSwap(false, true) {
 		select {
 		case flushNow <- struct{}{}:
 		default:
