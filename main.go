@@ -13,8 +13,8 @@ import (
 	"strings"
 )
 
-// version is set at build time: -ldflags "-X main.version=v1.1.1".
-var version = "v1.1.1"
+// version is set at build time: -ldflags "-X main.version=v1.2.0".
+var version = "v1.2.0"
 
 func main() {
 	args := os.Args[1:]
