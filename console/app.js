@@ -865,6 +865,7 @@ function renderRows(rr) {
     if (r.kind === "removed") idle = `${r.pattern} is no longer in the config file.`;
     else if (r.stopped) idle = `${r.pattern} is stopped: matching names fall through to the next rule. Start it to route them here again.`;
     else if (!r.allow) idle = `Deny rule: clients asking for ${r.pattern} are refused, so no connection stays open.`;
+    else if (r.kind === "redirect") idle = "No open connections. Plain HTTP clients show up here while they are being redirected.";
     else if (r.kind === "no SNI") idle = "No open connections. Clients that send no name show up here.";
     else idle = `No open connections. Clients asking for ${r.pattern} show up here.`;
     setText(rr.emptyText, none ? idle : `No connections match “${ui.filter}”.`);
@@ -936,11 +937,14 @@ function paint() {
       wildcard: "Wildcard: among wildcards the one with more fixed characters wins",
       "no SNI": "Only clients that send no server name",
       "catch-all": "Everything else: used only when no other rule matches",
+      redirect: "Every name: the redirect does not look at the rules; HTTPS refuses the names it does not serve",
     }[r.kind] || "";
+    const redirect = r.kind === "redirect";
     rr.tls.hidden = removed || !r.allow;
-    setText(rr.tls, r.terminates ? `terminates TLS · ${r.cert}` : "passthrough");
+    setText(rr.tls, redirect ? "plain HTTP · 301 / 308" : r.terminates ? `terminates TLS · ${r.cert}` : "passthrough");
     rr.tls.className = r.terminates ? "chip tls" : "chip";
-    rr.tls.title = r.terminates ? `TLS is terminated here (cert = ${r.cert})` : "TLS passes through untouched; the upstream presents its own certificate";
+    rr.tls.title = redirect ? "Answers each request with a redirect to the same host and path on https://: 301 for GET and HEAD, 308 (keeps the method) for the others. Keep-alive is supported."
+      : r.terminates ? `TLS is terminated here (cert = ${r.cert})` : "TLS passes through untouched; the upstream presents its own certificate";
     rr.proxy.hidden = removed || !r.allow || !r.proxy;
     setText(rr.proxy, `PROXY v${r.proxyVersion || 2}`);
     rr.proxy.title = "Sends a PROXY protocol header with the client's address to the target";
@@ -980,9 +984,10 @@ function paint() {
 function paintListener(lr, l, now, file) {
   setText(lr.lname, l.name);
   setText(lr.listen, `[${listenAddrs(l)}]`);
-  lr.listen.title = l.implicit ? "bind and port from [global]" : `[[listener]] at line ${l.line} of the config file`;
+  lr.listen.title = l.redirect ? "http_to_https_redirect = true in [global]: port 80 on every address the other listeners use"
+    : l.implicit ? "bind and port from [global]" : `[[listener]] at line ${l.line} of the config file`;
   const n = l.rules.length;
-  setText(lr.target, `${n} rule${n === 1 ? "" : "s"}`);
+  setText(lr.target, l.redirect ? "https://" : `${n} rule${n === 1 ? "" : "s"}`);
   const out = l.stopped || !l.running;
   lr.card.classList.toggle("stopped", out);
 
@@ -1002,9 +1007,11 @@ function paintListener(lr, l, now, file) {
   }
   lr.err.hidden = !l.error;
   setText(lr.err, l.error ? `Could not open the port: ${l.error}` : "");
-  lr.implicit.hidden = !l.implicit;
-  setText(lr.implicit, "from [global]");
-  lr.implicit.title = "No [[listener]] section: bind and port come from [global]. Edit turns it into a [[listener]].";
+  lr.implicit.hidden = !l.implicit && !l.redirect;
+  setText(lr.implicit, l.redirect ? "HTTP → HTTPS redirect" : "from [global]");
+  lr.implicit.title = l.redirect
+    ? "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in [global]; it has no rules and cannot be edited here."
+    : "No [[listener]] section: bind and port come from [global]. Edit turns it into a [[listener]].";
   lr.ppf.hidden = !l.proxyProtocolFrom;
   setText(lr.ppf, `PROXY from ${l.proxyProtocolFrom || ""}`);
   lr.ppf.title = "Accepts a PROXY protocol header from these addresses (proxy_protocol_from)";
@@ -1048,7 +1055,8 @@ function paintListener(lr, l, now, file) {
   lr.editBtn.disabled = busy || !editable;
   lr.editBtn.title = !editable ? "Editing is off: see the note above"
     : l.implicit ? "Edit: saving turns it into a [[listener]] section" : "Edit this listener in the config file";
-  lr.delBtn.hidden = l.implicit;
+  lr.delBtn.hidden = l.implicit || l.redirect;
+  lr.addBtn.hidden = lr.editBtn.hidden = !!l.redirect;
   lr.delBtn.disabled = busy || !editable;
   lr.delBtn.title = editable ? "Delete this listener from the config file (only once no rule uses it)" : "Editing is off: see the note above";
   if (!editable && armedLDeletes.has(l.name)) disarmListenerDelete(l.name);
@@ -1087,7 +1095,7 @@ function paintConn(cr, now) {
   setLane(cr.p2c, c.bytesDown, downDone);
   setText(cr.fSni, c.sni || "none sent");
   setText(cr.fDst, c.dst || "—");
-  setText(cr.fMode, c.terminated ? c.mode : "passthrough (TLS untouched)");
+  setText(cr.fMode, c.terminated ? c.mode : cr.rule && cr.rule.kind === "redirect" ? "plain HTTP, redirected to https://" : "passthrough (TLS untouched)");
   setText(cr.opened, fmtClock(c.started));
   setText(cr.duration, fmtAge(now - c.started));
   setText(cr.idle, c.lastActivity ? fmtAge(now - c.lastActivity) : "—");
@@ -1185,7 +1193,7 @@ function confirmPending() {
 const armedDeletes = new Map(); // rule key -> disarm timer
 
 function paintRuleActions(rr, r, file) {
-  const removed = r.kind === "removed";
+  const removed = r.kind === "removed" || r.kind === "redirect"; // nothing to stop, edit or delete
   const editable = !!(file && file.editable && r.line > 0);
   const busy = pendingRules.has(r.key);
   rr.toggleBtn.hidden = removed;
@@ -1529,7 +1537,7 @@ function tryNames() {
 function quickChecks(v) {
   const out = [];
   const info = patternInfo($("f-pattern").value);
-  if (ui.state.listeners.length > 1 && !$("f-listener").value) out.push([0, "Choose the listener this rule belongs to."]);
+  if (ui.state.listeners.filter((l) => !l.redirect).length > 1 && !$("f-listener").value) out.push([0, "Choose the listener this rule belongs to."]);
   if (!v.pattern) out.push([0, "The pattern is required."]);
   else if (info.bad) out.push([0, info.text]);
   if (v.action !== "deny") {
@@ -1683,6 +1691,7 @@ function fillListenerSelect(selected) {
   const sel = $("f-listener");
   sel.replaceChildren();
   for (const l of ui.state.listeners) {
+    if (l.redirect) continue; // has no rules
     const o = el("option", "", `${l.name} [${listenAddrs(l)}]`);
     o.value = l.name;
     sel.appendChild(o);
@@ -1693,7 +1702,7 @@ function fillListenerSelect(selected) {
     if (selected) sel.appendChild(o);
   }
   sel.value = selected || (sel.options[0] && sel.options[0].value) || "";
-  sel.closest(".field").title = ui.state.listeners.length > 1 ? "Which port this rule answers on" : "The only listener";
+  sel.closest(".field").title = sel.options.length > 1 ? "Which port this rule answers on" : "The only listener";
 }
 
 function openEditor(r, listenerName) {
@@ -2143,7 +2152,9 @@ function flowIcon(name) {
 function flowTags(f) {
   const out = [];
   if (f.via) out.push(["t-via", "arrow", `via ${f.via.replace(/:\d+$/, "")}`, `A load balancer at ${f.via} sent a PROXY v${f.viaVersion} header with the client's address`]);
-  if (f.tls === "passthrough") {
+  if (f.tls === "http") {
+    out.push(["t-warn", "", "plain HTTP → https://", "http_to_https_redirect: each request was answered with a redirect to the same URL on https://"]);
+  } else if (f.tls === "passthrough") {
     out.push(["t-e2e", "lock", "end-to-end TLS", "Passed through: the TLS stream reaches the target untouched; the proxy never decrypts it"]);
   } else if (f.tls === "terminated") {
     out.push(["t-term", "broken", `terminated${f.clientTLS ? " · " + f.clientTLS : ""}`, `TLS ends here: the proxy decrypts with its own certificate${f.resumed ? " (resumed session)" : ""}`]);
@@ -2154,7 +2165,7 @@ function flowTags(f) {
   }
   if (f.alpn) out.push(["t-muted", "", f.tls === "terminated" ? f.alpn : `offers ${f.alpn.replaceAll(",", ", ")}`,
     f.tls === "terminated" ? "Application protocol agreed with the client (ALPN)" : "Application protocols the client offered (ALPN); the target chose"]);
-  if (f.tls) {
+  if (f.tls && f.tls !== "http") {
     out.push(f.proxyOut ? ["t-proxy", "", `PROXY v${f.proxyOut}`, `The target was told the client's address in a PROXY protocol v${f.proxyOut} header`]
       : ["t-muted", "", "no PROXY", "No PROXY protocol header is sent to the target"]);
   }

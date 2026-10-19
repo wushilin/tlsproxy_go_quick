@@ -63,8 +63,7 @@ func (s *Server) syncListeners(cfg *Config) (failed []string) {
 		s.listeners = map[string]*liveListener{}
 	}
 	want := map[string]bool{}
-	for i := range cfg.Listeners {
-		l := &cfg.Listeners[i]
+	for _, l := range cfg.PortListeners() {
 		want[l.Name] = true
 		live := s.listeners[l.Name]
 		addrs := l.Addrs()
@@ -127,7 +126,7 @@ func (s *Server) openLocked(live *liveListener, l *Listener) error {
 // listener.
 func (s *Server) setListenerStopped(name string, stop bool) error {
 	cfg := s.runtime.Load().cfg
-	l := cfg.Listener(name)
+	l := cfg.PortListener(name)
 	if l == nil {
 		return fmt.Errorf("no listener named %s in the running configuration", name)
 	}
@@ -189,4 +188,16 @@ func (s *Server) listenerState(name string) (addrs []string, open, stopped bool,
 		addrs = append(addrs, ln.Addr().String())
 	}
 	return addrs, live.open(), s.stoppedListeners[name], live.err
+}
+
+// anyOpen reports whether at least one of ls has its port open.
+func (s *Server) anyOpen(ls []Listener) bool {
+	s.listenersMu.Lock()
+	defer s.listenersMu.Unlock()
+	for i := range ls {
+		if live := s.listeners[ls[i].Name]; live != nil && live.open() {
+			return true
+		}
+	}
+	return false
 }

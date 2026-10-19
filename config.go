@@ -68,6 +68,10 @@ type Config struct {
 	Console   *ConsoleConfig // the [console] section; nil = no web console
 	Rules     []Rule         // in file order
 	Listeners []Listener     // in file order; one implicit "default" from [global] when the file has none
+	// Redirect is the port 80 listener of http_to_https_redirect = true, nil
+	// when off. It has no rules and is not in Listeners: it answers every
+	// plain HTTP request with a redirect to https:// (see redirect.go).
+	Redirect *Listener
 	// listener is set in the per-listener copies the proxy runs with (see
 	// ForListener): whose rules Route uses and whose overrides apply.
 	listener *Listener
@@ -88,6 +92,7 @@ type Listener struct {
 	MaxConnections                                  int // on top of [global] max_connections
 	HandshakeTimeout, IdleTimeout, HalfCloseTimeout *time.Duration
 	MaxAggregatedSpeed, MaxSingleConnectionSpeed    float64 // bytes per second, each direction
+	IsRedirect                                      bool    // the http_to_https_redirect listener
 
 	// How Route evaluates its rules: literal names by lookup, everything else
 	// in order of specificity.
@@ -130,6 +135,28 @@ func (c *Config) Listener(name string) *Listener {
 		}
 	}
 	return nil
+}
+
+// PortListener returns the listener named name that opens a port: one of
+// Listeners, or the redirect listener. Nil if there is none.
+func (c *Config) PortListener(name string) *Listener {
+	if c.Redirect != nil && c.Redirect.Name == name {
+		return c.Redirect
+	}
+	return c.Listener(name)
+}
+
+// PortListeners is every listener that opens a port: Listeners, then the
+// redirect listener if enabled.
+func (c *Config) PortListeners() []*Listener {
+	out := make([]*Listener, 0, len(c.Listeners)+1)
+	for i := range c.Listeners {
+		out = append(out, &c.Listeners[i])
+	}
+	if c.Redirect != nil {
+		out = append(out, c.Redirect)
+	}
+	return out
 }
 
 // ConsoleConfig is the [console] section: a web console on its own port.
@@ -564,6 +591,7 @@ func ParseConfig(text string) (*Config, error) {
 	}
 	poolMaxIdle := -1
 	globalListenLine := 0 // where [global] sets bind or port
+	httpRedirect := false
 	var raws []rawRule
 	section := ""
 
@@ -697,6 +725,10 @@ func ParseConfig(text string) (*Config, error) {
 			case "splice":
 				if cfg.Splice, err = parseBool(value); err != nil {
 					err = fail("splice: %v", err)
+				}
+			case "http_to_https_redirect":
+				if httpRedirect, err = parseBool(value); err != nil {
+					err = fail("http_to_https_redirect: %v", err)
 				}
 			case "cert_path":
 				cfg.CertPath = value
@@ -845,6 +877,11 @@ func ParseConfig(text string) (*Config, error) {
 	cfg.BufferPoolMaxIdle = poolMaxIdle
 	if err := cfg.resolveListeners(globalListenLine); err != nil {
 		return nil, err
+	}
+	if httpRedirect {
+		if err := cfg.makeRedirectListener(); err != nil {
+			return nil, err
+		}
 	}
 	for _, r := range raws {
 		fail := func(format string, a ...any) error {
@@ -1111,6 +1148,9 @@ func (c *Config) resolveListeners(globalListenLine int) error {
 		if l.Name == "" {
 			return fail("name is required")
 		}
+		if strings.EqualFold(l.Name, RedirectListenerName) {
+			return fail("the name %s is reserved for http_to_https_redirect", RedirectListenerName)
+		}
 		if l.Port == 0 {
 			return fail("port is required")
 		}
@@ -1132,6 +1172,47 @@ func (c *Config) resolveListeners(globalListenLine int) error {
 	}
 	// The first listener's values stand for "the" bind and port in messages.
 	c.Bind, c.Binds, c.Port = c.Listeners[0].Bind, c.Listeners[0].Binds, c.Listeners[0].Port
+	return nil
+}
+
+// makeRedirectListener sets up the http_to_https_redirect listener: port 80
+// on every address the other listeners bind (a wildcard address covers the
+// specific ones of its family).
+func (c *Config) makeRedirectListener() error {
+	var binds []string
+	any4, any6 := false, false
+	for i := range c.Listeners {
+		for _, b := range c.Listeners[i].Binds {
+			if !slices.Contains(binds, b) {
+				binds = append(binds, b)
+			}
+			if a, err := netip.ParseAddr(b); err == nil && a.IsUnspecified() {
+				any4, any6 = any4 || a.Is4(), any6 || a.Is6()
+			}
+		}
+	}
+	binds = slices.DeleteFunc(binds, func(b string) bool {
+		a, err := netip.ParseAddr(b)
+		return err == nil && !a.IsUnspecified() && (a.Is4() && any4 || a.Is6() && any6)
+	})
+	for i := range c.Listeners {
+		l := &c.Listeners[i]
+		if l.Port != 80 {
+			continue
+		}
+		where := "[global] port"
+		if l.Line > 0 {
+			where = fmt.Sprintf("[[listener]] %s at line %d", l.Name, l.Line)
+		}
+		for _, a := range l.Binds {
+			for _, b := range binds {
+				if a == b || isWildcard(a) || isWildcard(b) {
+					return fmt.Errorf("http_to_https_redirect listens on port 80, which %s also uses on %s", where, a)
+				}
+			}
+		}
+	}
+	c.Redirect = &Listener{Name: RedirectListenerName, Bind: strings.Join(binds, "; "), Binds: binds, Port: 80, IsRedirect: true}
 	return nil
 }
 

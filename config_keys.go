@@ -34,6 +34,7 @@ var configReference = []sectionDoc{
 		{"buffer_size", "65536", "Bytes moved per step in each direction: the splice pipe size, or the size of each pooled buffer. Clamped to 4096..131072."},
 		{"buffer_pool_max_idle", "2 × max_connections", "Free buffers kept for reuse."},
 		{"splice", "true", "Linux: relay passed-through connections with splice(2), without copying them through the proxy."},
+		{"http_to_https_redirect", "false", "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the rules on 443 decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."},
 		{"short_read_delay_us", "0", "Pause N microseconds after a short read so data batches up. 0 = off."},
 		{"allow_cache_size", "4096", "Cached allowed name → target decisions. 0 = off."},
 		{"deny_cache_size", "4096", "Cached denied names, kept apart from the allowed ones. 0 = off."},

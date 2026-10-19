@@ -31,6 +31,7 @@ buffer_size = 32768                # bytes moved per step (4096..131072); pipe s
 buffer_pool_max_idle = 2048        # free buffers kept for reuse; default 2 x max_connections
 short_read_delay_us = 0            # microseconds to pause after a short read; 0 = off (little gain in Go)
 splice = true                      # Linux: relay passed-through connections in the kernel (zero copy)
+http_to_https_redirect = true      # port 80 too: redirect every http:// request to https://; default false
 
 allow_cache_size = 8192            # LRU of allowed SNI -> target decisions; 0 = off
 deny_cache_size = 1024             # separate LRU of denied SNIs; 0 = off

@@ -56,8 +56,7 @@ func newRuntime(cfg *Config, prev *Runtime) *Runtime {
 	}
 	rt.limits, rt.limitsBySource = newRuleLimits(cfg, prevLimits)
 	rt.byListener, rt.listenerLimits = map[string]*Config{}, map[string]*ruleLimits{}
-	for i := range cfg.Listeners {
-		l := &cfg.Listeners[i]
+	for _, l := range cfg.PortListeners() {
 		rt.byListener[l.Name] = cfg.ForListener(l)
 		if l.MaxAggregatedSpeed == 0 {
 			continue
@@ -272,7 +271,7 @@ func Run(cfg *Config, path string) error {
 	// A listener whose port cannot be opened is reported (and shown in the
 	// console, where Start retries it); the proxy refuses to start only when
 	// none can open.
-	if failed := srv.syncListeners(cfg); len(failed) == len(cfg.Listeners) {
+	if failed := srv.syncListeners(cfg); !srv.anyOpen(cfg.Listeners) {
 		return errors.New(strings.Join(failed, "; "))
 	}
 	// From here on the streams go to their log files, if configured.
@@ -299,7 +298,7 @@ func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error 
 		s.listenersMu.Lock()
 		s.listeners = map[string]*liveListener{first.Name: live}
 		s.listenersMu.Unlock()
-		if len(rt.cfg.Listeners) > 1 {
+		if len(rt.cfg.Listeners) > 1 || rt.cfg.Redirect != nil {
 			if failed := s.syncListeners(rt.cfg); failed != nil {
 				return errors.New(failed[0])
 			}
@@ -307,7 +306,7 @@ func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error 
 	}
 	s.listenersMu.Lock()
 	var addrs, closed []string
-	for _, lc := range rt.cfg.Listeners {
+	for _, lc := range rt.cfg.PortListeners() {
 		if live := s.listeners[lc.Name]; live != nil && live.open() {
 			addrs = append(addrs, lc.Name+" "+strings.Join(live.addrs, ", "))
 		} else {
@@ -403,6 +402,10 @@ func (s *Server) acceptLoop(l net.Listener, name string) error {
 			defer s.stats.GoroutinesFinished.Add(1)
 			defer s.stats.Active.Add(-1)
 			defer ls.Active.Add(-1)
+			if cfg.listener.IsRedirect {
+				s.handleRedirect(id, sock, int(active), cfg)
+				return
+			}
 			s.handle(id, sock, int(active), rt, cfg)
 		}()
 	}
