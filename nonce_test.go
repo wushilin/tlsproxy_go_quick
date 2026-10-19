@@ -87,7 +87,7 @@ func TestRememberNonceStopsLoop(t *testing.T) {
 		t.Run(fmt.Sprintf("remember_nonce=%t,random=%#x", on, tc.random), func(t *testing.T) {
 			l, port := listen(t)
 			text := fmt.Sprintf("[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nmax_handshakes_per_ip=0\nmax_connections=20\nremember_nonce=%t\nca_root=%s\n"+
-				"[[host]]\npattern=ANY\ntarget_host=127.0.0.1\ntarget_port=%d\n", on, testCARoot(), port)
+				"[[host]]\nlistener=default\npattern=ANY\ntarget_host=127.0.0.1\ntarget_port=%d\n", on, testCARoot(), port)
 			srv, err := NewServer(mustParse(t, text))
 			if err != nil {
 				t.Fatal(err)

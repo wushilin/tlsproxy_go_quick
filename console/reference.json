@@ -207,8 +207,8 @@
     "keys": [
       {
         "key": "listener",
-        "default": "(the only one)",
-        "meaning": "The [[listener]] this rule belongs to; required when there are several."
+        "default": "(required)",
+        "meaning": "The [[listener]] this rule belongs to."
       },
       {
         "key": "pattern",
@@ -227,7 +227,7 @@
       },
       {
         "key": "target_port",
-        "default": "443",
+        "default": "(required for allow)",
         "meaning": "Target port."
       },
       {

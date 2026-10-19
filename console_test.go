@@ -99,7 +99,7 @@ func startConsoleProxyGlobal(t *testing.T, globalLines, consoleLines, rules stri
 
 func TestConsoleAuthAndRequestGuards(t *testing.T) {
 	t.Parallel()
-	p, c, _ := startConsoleProxy(t, "password = correct horse\nhostnames = console.example.com", "[[host]]\npattern=.*\naction=deny\n")
+	p, c, _ := startConsoleProxy(t, "password = correct horse\nhostnames = console.example.com", "[[host]]\nlistener=default\npattern=.*\naction=deny\n")
 	if code, _ := c.get("/api/status"); code != 401 {
 		t.Fatalf("unauthenticated API: %d", code)
 	}
@@ -154,7 +154,7 @@ func TestConsoleAuthAndRequestGuards(t *testing.T) {
 
 func TestConsolePlaintextPasswordIsReplacedByItsHash(t *testing.T) {
 	t.Parallel()
-	_, c, path := startConsoleProxy(t, "password = \"s3cret pass\"  # typed by hand", "[[host]]\npattern=.*\naction=deny\n")
+	_, c, path := startConsoleProxy(t, "password = \"s3cret pass\"  # typed by hand", "[[host]]\nlistener=default\npattern=.*\naction=deny\n")
 	data, _ := os.ReadFile(path)
 	text := string(data)
 	if strings.Contains(text, "s3cret") || !strings.Contains(text, "password_hash = \"pbkdf2-sha256$") {
@@ -199,7 +199,7 @@ func TestConsoleConfigEditing(t *testing.T) {
 	}
 
 	// Invalid text is refused, and the error names the EDITOR's line.
-	broken := text + "\n[[host]]\npattern=(\ntarget_host=x.lan\n"
+	broken := text + "\n[[host]]\nlistener=default\npattern=(\ntarget_host=x.lan\ntarget_port=443\n"
 	wantLine := fmt.Sprintf("line %d", strings.Count(text, "\n")+2)
 	if _, out := c.post("/api/config/validate", map[string]string{"text": broken}); out["ok"] == true || !strings.Contains(out["error"].(string), wantLine) {
 		t.Fatalf("want an error at %s: %v", wantLine, out)
@@ -346,9 +346,9 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 	l, dead := listen(t)
 	l.Close()
 	certPath := t.TempDir()
-	rules := fmt.Sprintf("[[host]]\npattern=term\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-		"[[host]]\npattern=auto\\.test\ncert=auto\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-		"[[host]]\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+	rules := fmt.Sprintf("[[host]]\nlistener=default\npattern=term\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\nlistener=default\npattern=auto\\.test\ncert=auto\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\nlistener=default\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 		ca.localCA(t), echoBackend(t, ""), echoBackend(t, ""), echoBackend(t, ""))
 	path := filepath.Join(t.TempDir(), "config.toml")
 	port := freePort(t)
@@ -475,8 +475,8 @@ func TestConsoleConfigValidation(t *testing.T) {
 	}
 	// Hiding and restoring the section is exact, wherever it sits.
 	for _, text := range []string{
-		"[[listener]]\nname=default\nport=1\n\n[console]\nport=2\npassword=x\n\n[[host]]\npattern=.*\naction=deny\n",
-		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\naction=deny\n[console]\nport=2\npassword=x",
+		"[[listener]]\nname=default\nport=1\n\n[console]\nport=2\npassword=x\n\n[[host]]\nlistener=default\npattern=.*\naction=deny\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\naction=deny\n[console]\nport=2\npassword=x",
 		"[[listener]]\nname=default\nport=1\n",
 	} {
 		visible, block, _ := hideConsole(text)

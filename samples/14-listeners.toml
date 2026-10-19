@@ -1,6 +1,6 @@
 # Several listeners, each with its own rules: the public port 443, and a lab
-# port 9092 reachable only on the VPN address. Every rule names its listener
-# (with a single listener, as in the other samples, rules may leave it out).
+# port 9092 reachable only on the VPN address. Every rule names its listener,
+# as in every file.
 #
 #> public: www.example.com   => 192.168.1.30:443
 #> public: kafka.example.com => DENY
@@ -32,6 +32,7 @@ max_single_connection_speed = 20MiB/s # each connection on it, each direction
 listener = public
 pattern = www.example.com
 target_host = 192.168.1.30
+target_port = 443
 
 [[host]]
 listener = public
@@ -49,3 +50,4 @@ target_port = 9092
 listener = lab
 pattern = ANY
 target_host = 10.11.12.60
+target_port = 443

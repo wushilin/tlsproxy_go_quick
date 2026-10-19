@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (v2.0.0)
+## v1.4.1
 
 Breaking:
 - Every port is an explicit `[[listener]]`: `[global] bind` and `port` are
@@ -12,12 +12,14 @@ Breaking:
       bind = 0.0.0.0
       port = 443
 
-  With a single listener, rules may still leave out `listener =`. Names in
-  logs, the console and the flow log are now the listener's own (it was
-  `default` for the implicit one).
+  Names in logs, the console and the flow log are now the listener's own
+  (it was `default` for the implicit one).
 
-- Console: adding a second listener tags the rules that had no `listener =`
-  with the first listener's name (it used to convert `[global]` bind/port).
+- Every `[[host]]` needs `listener = <name>`, even with a single listener.
+- Every allow rule needs `target_port`; it no longer defaults to 443.
+
+  Both are load errors that name the rule's line. The console's rule form
+  asks for both.
 
 ## v1.4.0
 

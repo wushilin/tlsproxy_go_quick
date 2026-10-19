@@ -184,7 +184,7 @@ func TestLoggingSection(t *testing.T) {
 		t.Fatalf("%+v", c.Log)
 	}
 	c = mustParse(t, "[[listener]]\nname=default\nport=1\n[logging]\nstdout=stdout.log\nstderr = /var/log/tlsproxy.err\nmax_keep=10\n"+
-		"compress_after=3 # stdout.log.4 is compressed\nmax_size=15MiB # rotated\n[[host]]\npattern=.*\naction=deny\n")
+		"compress_after=3 # stdout.log.4 is compressed\nmax_size=15MiB # rotated\n[[host]]\nlistener=default\npattern=.*\naction=deny\n")
 	if c.Log.Stdout != "stdout.log" || c.Log.Stderr != "/var/log/tlsproxy.err" || c.Log.MaxSize != 15<<20 || len(c.Rules) != 1 {
 		t.Fatalf("%+v", c.Log)
 	}
@@ -220,7 +220,7 @@ func TestBinaryLogsToRotatingFiles(t *testing.T) {
 		return []byte(fmt.Sprintf("[[listener]]\nname=default\nbind=127.0.0.1\nport=%d\n[global]\nreload_interval=5\nstats_interval=0\n\n[logging]\nstdout=%s\nstderr=%s\n"+
 			"max_keep=4\ncompress_after=1\nmax_size=3K\n\n%s", port, outLog, errLog, rules))
 	}
-	os.WriteFile(cfgPath, config("[[host]]\npattern=.*\naction=deny\n"), 0o644)
+	os.WriteFile(cfgPath, config("[[host]]\nlistener=default\npattern=.*\naction=deny\n"), 0o644)
 	var termOut, termErr bytes.Buffer
 	cmd := exec.Command(bin, cfgPath)
 	cmd.Stdout, cmd.Stderr = &termOut, &termErr
@@ -253,7 +253,7 @@ func TestBinaryLogsToRotatingFiles(t *testing.T) {
 		c.Close()
 	}
 	// A broken config on reload is a problem: it belongs in the stderr file.
-	os.WriteFile(cfgPath, config("[[host]]\npattern=(\n"), 0o644)
+	os.WriteFile(cfgPath, config("[[host]]\nlistener=default\npattern=(\n"), 0o644)
 	for deadline := time.Now().Add(12 * time.Second); ; time.Sleep(100 * time.Millisecond) {
 		if data, _ := os.ReadFile(errLog); strings.Contains(string(data), "is invalid") {
 			break

@@ -27,29 +27,42 @@ port = 8443
 max_connections = 256
 
 [[host]]
+listener = https
 pattern = github.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
+listener = https
 pattern = *.github.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
+listener = https
 pattern = *.githubusercontent.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
+listener = https
 pattern = time.apple.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
+listener = https
 pattern = deb.debian.org
 target_host = ${host}
+target_port = 443
 
 [[host]]
+listener = https
 pattern = security.debian.org
 target_host = ${host}
+target_port = 443
 
 [[host]]
+listener = https
 pattern = ANY
 action = deny

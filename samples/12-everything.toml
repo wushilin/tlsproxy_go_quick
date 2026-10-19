@@ -11,8 +11,8 @@
 #> legacy.example.com     => 192.168.1.50:443
 #> other.org              => DENY
 
-# One listener here, so the rules need no listener = line; for several,
-# with listener = <name> in each rule, see 14-listeners.toml.
+# One listener here; every rule names it (listener = https). For several,
+# see 14-listeners.toml.
 
 [[listener]]
 name = https                       # required: what a rule's listener = names
@@ -75,6 +75,7 @@ hostnames = console.example.com, admin.example.com
 
 # Clients without SNI (pattern NONE, any letter case).
 [[host]]
+listener = https
 pattern = NONE
 target_host = 10.0.0.99
 target_port = 8443
@@ -82,6 +83,7 @@ target_port = 8443
 # Terminate TLS, automatic certificate; the name comes from the literal pattern.
 # The upstream speaks TLS with a self-signed certificate.
 [[host]]
+listener = https
 pattern = nas.example.com
 action = allow                     # the default
 cert = auto
@@ -98,6 +100,7 @@ max_single_connection_speed = 15MiB/s # default unlimited: each connection, each
 # Terminate TLS for a wildcard: the exact names must be listed. shop matches the
 # pattern but is not listed, so it gets a self-signed placeholder.
 [[host]]
+listener = https
 pattern = *.example.com
 cert = auto
 cert_domains = www.example.com, blog.example.com
@@ -111,6 +114,7 @@ upstream_tls = false               # plaintext upstream: only http/1.1 is offere
 # (so does no answer within 20 s). cert_domains may be given as well: listed
 # names are never put to the script.
 [[host]]
+listener = https
 pattern = *.customers.example.com
 cert = auto
 cert_validate_script = /usr/local/etc/tlsproxy/domains.sh
@@ -123,28 +127,35 @@ upstream_tls = false
 # issued the first time a client asks and renewed automatically. Clients must
 # trust the CA (download it from the console's CAs page).
 [[host]]
+listener = https
 pattern = *.lab.internal
 cert = local-ca:ca002
 cert_domains = git.lab.internal, *.ci.lab.internal # optional: names or globs; any other name is refused
 upstream_tls = false
 target_host = 10.0.0.30
+target_port = 443
 
 # Pass-through with a capture in the target: each * is ${1}, ${2}, ... from the left;
 # ${host} is the whole name. Braces are required, so ${1}hello is exact.
 [[host]]
+listener = https
 pattern = *.svc.example.com
 target_host = backend-${1}.lan
+target_port = 443
 
 [[host]]
+listener = https
 pattern = blocked.example.com
 action = deny
 
 # Pass-through: the backend keeps its own certificate.
 [[host]]
+listener = https
 pattern = legacy.example.com
 target_host = 192.168.1.50
 target_port = 443
 
 [[host]]
+listener = https
 pattern = ANY
 action = deny

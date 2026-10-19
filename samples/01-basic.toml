@@ -16,6 +16,7 @@ bind = 0.0.0.0
 port = 443
 
 [[host]]
+listener = https
 pattern = *.wushilin.net
 action = allow
 target_host = ${1}.wushilin.internal.net
@@ -23,5 +24,6 @@ target_port = 443
 
 # Everything else. (A name that matches no rule is denied anyway; this makes it explicit.)
 [[host]]
+listener = https
 pattern = ANY
 action = deny

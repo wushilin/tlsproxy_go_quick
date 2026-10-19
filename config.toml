@@ -125,8 +125,8 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 
 # --- More listeners -----------------------------------------------------------
 # Every port is a [[listener]] (at least one; bind and port are not [global]
-# settings). Each listener has its own rules. With one, rules without
-# listener = belong to it; with several, every [[host]] names its listener.
+# settings). Each listener has its own rules, and every [[host]] names its
+# listener, even when there is only one.
 # See samples/14-listeners.toml.
 #   [[listener]]
 #   name        (required) up to 64 letters, digits, spaces and -_@#~()[]<>"'; unique ignoring
@@ -153,11 +153,11 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 #                                    fine: *.*.example.com. More literal characters win
 #               ANY                  everything, with or without SNI: always last
 #             No regular expressions, no **, no "a or b": one rule per name and per depth.
-# listener    the [[listener]] this rule belongs to; required when there are several
+# listener    (required) the [[listener]] this rule belongs to
 # action      (default: allow) allow | deny; deny sends a TLS access_denied alert
 # target_host (required for allow) ${1}, ${2}, ... = what each * matched, from the left;
 #             ${host} (or ${0}) = the whole SNI. Always in braces: a bare $1 is an error
-# target_port (default: 443)
+# target_port (required for allow) the port to connect to; there is no default
 #
 # TLS termination (optional; without cert the TLS stream is passed through untouched):
 # cert        auto       issue and renew through ACME with TLS-ALPN-01 (the CA connects to public
@@ -196,6 +196,7 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 #                               (also bps Kbps Mbps Gbps); /s optional
 
 [[host]]
+listener = https
 pattern = myhome.wushilin.net
 action = allow
 cert = auto
@@ -206,11 +207,13 @@ proxy = true
 proxy_version = 2
 
 [[host]]
+listener = https
 pattern = *.wushilin.net
 action = allow
 target_host = ${1}.wushilin.internal.net
 target_port = 443
 
 [[host]]
+listener = https
 pattern = ANY
 action = deny

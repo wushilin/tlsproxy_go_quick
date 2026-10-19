@@ -36,7 +36,7 @@ func archived(t *testing.T, dir, name string) int {
 func TestRemoveAutoCertificateOnlyWhenSomethingIsWrong(t *testing.T) {
 	certPath := t.TempDir()
 	const name = "a.remove.test"
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=%s\ncert=auto\ntarget_host=127.0.0.1\n", certPath, name))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\nlistener=default\npattern=%s\ncert=auto\ntarget_host=127.0.0.1\ntarget_port=443\n", certPath, name))
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestRemoveLocalCertificate(t *testing.T) {
 	root := t.TempDir()
 	makeCA(t, root, "ca001")
 	const name = "www.remove.test"
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nca_root=%s\n[[host]]\npattern=%s\ncert=local-ca\ntarget_host=127.0.0.1\n", root, name))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nca_root=%s\n[[host]]\nlistener=default\npattern=%s\ncert=local-ca\ntarget_host=127.0.0.1\ntarget_port=443\n", root, name))
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -161,7 +161,7 @@ func TestRemoveLocalCertificate(t *testing.T) {
 // dns_resolvers is required when the DNS pre-check runs, and takes IP
 // addresses only (v4 or v6, with or without a port).
 func TestDNSResolversRequiredAndChecked(t *testing.T) {
-	base := "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\n%s\n[[host]]\npattern=a.example.com\ncert=auto\ntarget_host=127.0.0.1\n"
+	base := "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\n%s\n[[host]]\nlistener=default\npattern=a.example.com\ncert=auto\ntarget_host=127.0.0.1\ntarget_port=443\n"
 	for _, tc := range []struct{ global, err string }{
 		{"public_ip_address=203.0.113.7", "needs dns_resolvers"},
 		{"public_ip_address=203.0.113.7\ndns_resolvers=dns.google", `"dns.google" is not an IP address`},
@@ -179,7 +179,7 @@ func TestDNSResolversRequiredAndChecked(t *testing.T) {
 		}
 	}
 	// Without cert = auto it isn't needed either.
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=443\n[global]\npublic_ip_address=203.0.113.7\n[[host]]\npattern=ANY\naction=deny\n"); err != nil {
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=443\n[global]\npublic_ip_address=203.0.113.7\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n"); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -30,17 +30,22 @@ port = 443
 
 # ANY comes first in the file and is still evaluated last.
 [[host]]
+listener = https
 pattern = ANY
 target_host = 10.0.9.9
+target_port = 443
 
 # Exactly two labels under example.com: two *, two captures.
 [[host]]
+listener = https
 pattern = *.*.example.com
 target_host = ${2}-${1}.deep.lan
+target_port = 443
 
 # Exactly one label under example.com. example.com itself and a.b.c.example.com
 # match none of the wildcards and fall through to ANY.
 [[host]]
+listener = https
 pattern = *.example.com
 target_host = 10.0.1.1
 target_port = 8443
@@ -48,20 +53,26 @@ target_port = 8443
 # More literal characters than *.example.com, so it wins for api-... names. A *
 # inside a label may be empty: api-.example.com matches too.
 [[host]]
+listener = https
 pattern = api-*.example.com
 target_host = 10.0.2.1
 target_port = 9000
 
 # Literal names always win, allow or deny.
 [[host]]
+listener = https
 pattern = vq.example.com
 target_host = 10.0.0.1
+target_port = 443
 
 [[host]]
+listener = https
 pattern = secret.example.com
 action = deny
 
 # Clients without SNI; without this rule ANY would take them.
 [[host]]
+listener = https
 pattern = NONE
 target_host = 10.0.0.99
+target_port = 443

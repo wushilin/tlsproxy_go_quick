@@ -1375,7 +1375,7 @@ function normal(key, v) {
     s = ["true", "yes", "on"].includes(l) ? "true" : ["false", "no", "off"].includes(l) ? "false" : l;
   }
   if (key === "action") s = s.toLowerCase();
-  if (key === "listener") return s || onlyListener(); // untagged rules belong to the only one
+  if (key === "listener") return s;
   return s === "" ? DEFAULTS[key] ?? "" : s;
 }
 
@@ -1535,7 +1535,7 @@ function tryNames() {
 function quickChecks(v) {
   const out = [];
   const info = patternInfo($("f-pattern").value);
-  if (ui.state.listeners.filter((l) => !l.redirect).length > 1 && !$("f-listener").value) out.push([0, "Choose the listener this rule belongs to."]);
+  if (!$("f-listener").value) out.push([0, "Choose the listener this rule belongs to."]);
   if (!v.pattern) out.push([0, "The pattern is required."]);
   else if (info.bad) out.push([0, info.text]);
   if (v.action !== "deny") {
@@ -1547,7 +1547,8 @@ function quickChecks(v) {
       if (ref !== "host" && !/^(0|[1-9]\d*)$/.test(ref)) out.push([1, `Unknown reference \${${ref}}: use \${1}, \${2}, … for the *s, or \${host} for the whole name.`]);
     }
     const port = val("f-target-port");
-    if (port && (!/^\d+$/.test(port) || +port < 1 || +port > 65535)) out.push([1, "The target port must be a number from 1 to 65535."]);
+    if (!port) out.push([1, "A target port is required for an allow rule."]);
+    else if ((!/^\d+$/.test(port) || +port < 1 || +port > 65535)) out.push([1, "The target port must be a number from 1 to 65535."]);
     if (radio("f-tls") === "terminate" && radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the CAs page first."]);
     for (const [id, label] of [["f-agg", "aggregated speed"], ["f-conn", "per-connection speed"]]) {
       const s = val(id);

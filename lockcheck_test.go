@@ -46,8 +46,8 @@ func TestServingPathTakesNoSharedLock(t *testing.T) {
 	defer runtime.SetMutexProfileFraction(old)
 	ca := newTestCA(t)
 	port := echoBackend(t, "E")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=*.lock.test\ntarget_host=127.0.0.1\ntarget_port=%d\nmax_aggregated_speed=1Gbit\nmax_single_connection_speed=500Mbit\n", port)+
-		fmt.Sprintf("[[host]]\npattern=term.lock\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\nmax_aggregated_speed=1Gbit\n", ca.localCA(t), port))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=*.lock.test\ntarget_host=127.0.0.1\ntarget_port=%d\nmax_aggregated_speed=1Gbit\nmax_single_connection_speed=500Mbit\n", port)+
+		fmt.Sprintf("[[host]]\nlistener=default\npattern=term.lock\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\nmax_aggregated_speed=1Gbit\n", ca.localCA(t), port))
 
 	// The profile sees contention here, so a clean result below means something.
 	before := mutexStacks(t)

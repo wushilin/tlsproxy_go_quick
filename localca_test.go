@@ -44,7 +44,7 @@ func TestLocalCAIssuesOnDemand(t *testing.T) {
 	root := t.TempDir()
 	makeCA(t, root, "ca002") // a rule only uses a CA that exists (made on the CAs page)
 	port := echoBackend(t, "L:")
-	rules := fmt.Sprintf("[[host]]\npattern=*.lan.test\ncert=local-ca:ca002\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)
+	rules := fmt.Sprintf("[[host]]\nlistener=default\npattern=*.lan.test\ncert=local-ca:ca002\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)
 	p := startProxy(t, "ca_root="+root, rules)
 	caDir := filepath.Join(root, "ca002")
 	pool := trustCA(t, caDir)
@@ -227,7 +227,7 @@ func TestLocalCAConfig(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
-	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=*.x.test\ncert=local-ca\ncert_domains=a.x.test\ntarget_host=h\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\npattern=*.x.test\ncert=local-ca\ncert_domains=a.x.test\ntarget_host=h\ntarget_port=443\n")
 	if r := cfg.Rules[0]; r.LocalCA() != "ca001" {
 		t.Fatalf("plain local-ca is ca001, got %q", r.LocalCA())
 	}
@@ -243,7 +243,7 @@ func TestLocalCAConfig(t *testing.T) {
 	}
 
 	// Globs, several of them; a * never crosses a dot.
-	g := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=ANY\ncert=local-ca\ncert_domains=*.dev.abc.com, *.prod.abc.com;*.abc.com\ntarget_host=h\n")
+	g := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\npattern=ANY\ncert=local-ca\ncert_domains=*.dev.abc.com, *.prod.abc.com;*.abc.com\ntarget_host=h\ntarget_port=443\n")
 	for name, want := range map[string]bool{
 		"api.dev.abc.com": true, "db.prod.abc.com": true, "www.abc.com": true,
 		"abc.com": false, "a.b.dev.abc.com": false, "x.qa.abc.com": false, "evil.com": false,
@@ -259,7 +259,7 @@ func TestLocalCAConfig(t *testing.T) {
 		"cert=local-ca\ncert_domains=**.x.test":       "not a host name or a glob",
 		"cert=local-ca\ncert_domains=ANY":             "not a host name or a glob",
 	} {
-		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.x.test\n" + text + "\ntarget_host=h\n"); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=*.x.test\n" + text + "\ntarget_host=h\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", text, err, want)
 		}
 	}
@@ -272,7 +272,7 @@ func TestConsoleCAPage(t *testing.T) {
 	root := t.TempDir()
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
 	p, c, _ := startConsoleProxyGlobal(t, "ca_root = "+root, "password = pw",
-		"[[host]]\npattern=svc.lan.test\ncert=local-ca\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=1\n")
+		"[[host]]\nlistener=default\npattern=svc.lan.test\ncert=local-ca\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=1\n")
 	_ = p
 	c.login("pw")
 	_, list := c.get("/api/cas")
@@ -334,7 +334,7 @@ func TestLocalCARefusesUnlistedNames(t *testing.T) {
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
 	dialed := make(chan struct{}, 4)
 	port := backend(t, func(c *net.TCPConn) { dialed <- struct{}{}; c.Write([]byte("B")); io.Copy(c, c) })
-	p := startProxy(t, "ca_root="+root, fmt.Sprintf("[[host]]\npattern=*.lan.test\ncert=local-ca\ncert_domains=ok*.lan.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", port))
+	p := startProxy(t, "ca_root="+root, fmt.Sprintf("[[host]]\nlistener=default\npattern=*.lan.test\ncert=local-ca\ncert_domains=ok*.lan.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", port))
 	pool := trustCA(t, filepath.Join(root, "ca001"))
 
 	if tc, err := tlsDial(t, p, &tls.Config{RootCAs: pool, ServerName: "nope.lan.test"}); err == nil {
@@ -462,7 +462,7 @@ func TestCAConfig(t *testing.T) {
 func TestConsoleGeneratesWithSettings(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	_, c, _ := startConsoleProxyGlobal(t, "ca_root = "+root, "password = pw", "[[host]]\npattern=ANY\naction=deny\n")
+	_, c, _ := startConsoleProxyGlobal(t, "ca_root = "+root, "password = pw", "[[host]]\nlistener=default\npattern=ANY\naction=deny\n")
 	c.login("pw")
 	if code, out := c.post("/api/cas/generate", map[string]any{"commonName": "Big CA", "organization": "Lab",
 		"keyAlgorithm": "rsa", "keyBits": 2048, "hashAlgorithm": "sha384", "validityDays": 1000}); code != 200 {
@@ -613,7 +613,7 @@ func TestLocalCARenewsInTheBackground(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
-	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=*.bg.test\ncert=local-ca\ncert_domains=*.bg.test\ntarget_host=h\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\npattern=*.bg.test\ncert=local-ca\ncert_domains=*.bg.test\ntarget_host=h\ntarget_port=443\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -643,7 +643,7 @@ func TestLocalCARenewalRunsAtStart(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
-	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=*.start.test\ncert=local-ca\ntarget_host=h\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\npattern=*.start.test\ncert=local-ca\ntarget_host=h\ntarget_port=443\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)

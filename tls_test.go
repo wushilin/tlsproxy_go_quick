@@ -140,7 +140,7 @@ func TestTerminateWithPlaintextUpstream(t *testing.T) {
 		data, _ := io.ReadAll(c) // plaintext: exactly what the client sent inside TLS
 		fmt.Fprintf(c, "plain backend got %q", data)
 	})
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=app\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=app\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 		ca.localCA(t), port))
 	tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "app.test", NextProtos: []string{"h2", "http/1.1"}})
 	if err != nil {
@@ -175,7 +175,7 @@ func TestTerminateSendsProxyProtocolToPlaintextUpstream(t *testing.T) {
 				data, _ := io.ReadAll(c)
 				fmt.Fprintf(c, "backend got %q", data)
 			})
-			p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=proxy.test\ncert=%s\nupstream_tls=false\nproxy=true\nproxy_version=%d\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+			p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=proxy.test\ncert=%s\nupstream_tls=false\nproxy=true\nproxy_version=%d\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 				ca.localCA(t), version, port))
 
 			raw := dial(t, p)
@@ -216,7 +216,7 @@ func TestTerminateSendsProxyProtocolBeforeUpstreamTLS(t *testing.T) {
 		io.Copy(upstream, upstream)
 		upstream.CloseWrite()
 	})
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=proxy-tls.test\ncert=%s\nupstream_tls_verify=false\nproxy=true\nproxy_version=2\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=proxy-tls.test\ncert=%s\nupstream_tls_verify=false\nproxy=true\nproxy_version=2\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 		clientCA.localCA(t), port))
 	raw := dial(t, p)
 	originalSource := raw.LocalAddr().String()
@@ -240,7 +240,7 @@ func TestTerminateWithTLSUpstreamNegotiatesALPNEndToEnd(t *testing.T) {
 	ca := newTestCA(t)
 	port := ca.tlsBackend(t, "B", "h2", "http/1.1")
 	rule := func(name, extra string) string {
-		return fmt.Sprintf("[[host]]\npattern=%s\ncert=%s\n%starget_host=127.0.0.1\ntarget_port=%d\n", strings.ReplaceAll(name, ".", `\.`), ca.localCA(t), extra, port)
+		return fmt.Sprintf("[[host]]\nlistener=default\npattern=%s\ncert=%s\n%starget_host=127.0.0.1\ntarget_port=%d\n", strings.ReplaceAll(name, ".", `\.`), ca.localCA(t), extra, port)
 	}
 	p := startProxy(t, "", rule("noverify.test", "upstream_tls_verify=false\n")+rule("verify.test", ""))
 
@@ -280,8 +280,8 @@ func TestTerminationAndPassThroughSideBySide(t *testing.T) {
 	ca, backendCA := newTestCA(t), newTestCA(t)
 	port := backendCA.tlsBackend(t, "P")
 	p := startProxy(t, "", fmt.Sprintf(
-		"[[host]]\npattern=term\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), port, port))
+		"[[host]]\nlistener=default\npattern=term\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\nlistener=default\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), port, port))
 	// Terminated: the client sees OUR certificate.
 	tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: "term.test"})
 	if err != nil || tc.ConnectionState().PeerCertificates[0].Subject.CommonName != "term.test" {
@@ -307,8 +307,8 @@ func TestTerminatedTransferIntegrity(t *testing.T) {
 	secure := ca.tlsBackend(t, "")
 	dir := ca.localCA(t)
 	p := startProxy(t, "buffer_size=4096", fmt.Sprintf(
-		"[[host]]\npattern=a\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=b\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", dir, plain, dir, secure))
+		"[[host]]\nlistener=default\npattern=a\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\nlistener=default\npattern=b\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", dir, plain, dir, secure))
 	for _, name := range []string{"a.test", "b.test"} {
 		tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: name})
 		if err != nil {
@@ -332,7 +332,7 @@ func TestPlaceholderUntilAutomaticCertificateExists(t *testing.T) {
 	l, dead := listen(t)
 	l.Close() // the "CA" is unreachable, so issuance fails and the placeholder stays
 	p := startProxy(t, fmt.Sprintf("cert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir", t.TempDir(), dead),
-		fmt.Sprintf("[[host]]\npattern=*.auto\\.test\ncert=auto\ncert_domains=www.auto.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
+		fmt.Sprintf("[[host]]\nlistener=default\npattern=*.auto\\.test\ncert=auto\ncert_domains=www.auto.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
 	tc, err := tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: "www.auto.test"})
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +350,7 @@ func TestPlaceholderUntilAutomaticCertificateExists(t *testing.T) {
 func TestAnswersTLSALPN01Challenge(t *testing.T) {
 	t.Parallel()
 	ca := newTestCA(t)
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=.*\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), echoBackend(t, "")))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=.*\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), echoBackend(t, "")))
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	answer, err := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("token-123", "x.test")
 	if err != nil {
@@ -388,7 +388,7 @@ func TestAnswersTLSALPN01Challenge(t *testing.T) {
 // while one of ours is pending for the same name: they are its backend's.
 func TestPassThroughForwardsTLSALPN01Challenges(t *testing.T) {
 	t.Parallel()
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=x.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "P:")))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=x.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "P:")))
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	answer, err := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("token-123", "x.test")
 	if err != nil {
@@ -408,7 +408,7 @@ func TestPassThroughForwardsTLSALPN01Challenges(t *testing.T) {
 // cert = <dir> is gone: only auto (ACME) and local-ca terminate TLS, and
 // the error says what to do instead.
 func TestCertDirectoryIsRefused(t *testing.T) {
-	_, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=a.test\ncert=/etc/ssl/mine\ntarget_host=h\n")
+	_, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=a.test\ncert=/etc/ssl/mine\ntarget_host=h\ntarget_port=443\n")
 	if err == nil || !strings.Contains(err.Error(), "no longer supported") || !strings.Contains(err.Error(), "cert = local-ca") {
 		t.Fatalf("want a refusal naming the way forward: %v", err)
 	}
@@ -416,9 +416,9 @@ func TestCertDirectoryIsRefused(t *testing.T) {
 
 func TestCertConfigValidation(t *testing.T) {
 	auto := "[[listener]]\nname=default\nbind=::\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=203.0.113.7; 2001:db8::1\ndns_resolvers=1.1.1.1\n"
-	c := mustParse(t, auto+"[[host]]\npattern=nas\\.example\\.com\ncert=auto\ntarget_host=10.0.0.5\n"+
-		"[[host]]\npattern=*.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=${1}.lan\n"+
-		"[[host]]\npattern=plain\\.example\\.com\ntarget_host=10.0.0.6\n")
+	c := mustParse(t, auto+"[[host]]\nlistener=default\npattern=nas\\.example\\.com\ncert=auto\ntarget_host=10.0.0.5\ntarget_port=443\n"+
+		"[[host]]\nlistener = default\npattern=*.wushilin\\.net\ncert=AUTO\ncert_domains = A.wushilin.net, b.wushilin.net;a.wushilin.net\nupstream_tls=no\ntarget_host=${1}.lan\ntarget_port = 443\n"+
+		"[[host]]\nlistener=default\npattern=plain\\.example\\.com\ntarget_host=10.0.0.6\ntarget_port=443\n")
 	if got := fmt.Sprint(c.AutoDomains()); got != "[nas.example.com a.wushilin.net b.wushilin.net]" {
 		t.Fatal(got) // literal pattern derived; list lowercased and de-duplicated
 	}
@@ -428,26 +428,26 @@ func TestCertConfigValidation(t *testing.T) {
 		t.Fatalf("%+v\n%+v", r, c)
 	}
 	// An IPv6 public address behind an IPv4-only listener: the CA could not get in.
-	if c := mustParse(t, strings.Replace(auto, "bind=::", "bind=0.0.0.0", 1)+"[[host]]\npattern=a.b.com\ncert=auto\ntarget_host=x.lan\n"); len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "listens on IPv4 only") {
+	if c := mustParse(t, strings.Replace(auto, "bind=::", "bind=0.0.0.0", 1)+"[[host]]\nlistener=default\npattern=a.b.com\ncert=auto\ntarget_host=x.lan\ntarget_port=443\n"); len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "listens on IPv4 only") {
 		t.Fatalf("%q", c.Warnings)
 	}
-	c = mustParse(t, "[[listener]]\nname=default\nport=8443\n[global]\nacme_agree_tos=true\n[[host]]\npattern=a\\.b\\.com\ncert=auto\ntarget_host=x.lan\n")
+	c = mustParse(t, "[[listener]]\nname=default\nport=8443\n[global]\nacme_agree_tos=true\n[[host]]\nlistener=default\npattern=a\\.b\\.com\ncert=auto\ntarget_host=x.lan\ntarget_port=443\n")
 	if len(c.Warnings) != 2 { // not on 443, and no public_ip_address
 		t.Fatal(c.Warnings)
 	}
 	for name, text := range map[string]string{
-		"regex without cert_domains": auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ntarget_host=${1}.lan\n",
-		"tos not agreed":             "[[listener]]\nname=default\nport=443\n[[host]]\npattern=a\\.x\\.com\ncert=auto\ntarget_host=x.lan\n",
-		"domain outside the pattern": auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ncert_domains=a.y.com\ntarget_host=x.lan\n",
-		"wildcard":                   auto + "[[host]]\npattern=*.x\\.com\ncert=auto\ncert_domains=*.x.com\ntarget_host=x.lan\n",
-		"auto without sni":           auto + "[[host]]\npattern=NONE\ncert=auto\ntarget_host=x.lan\n",
-		"cert on deny":               auto + "[[host]]\npattern=.*\naction=deny\ncert=auto\n",
-		"upstream_tls without cert":  auto + "[[host]]\npattern=.*\nupstream_tls=true\ntarget_host=x.lan\n",
-		"cert_domains without auto":  auto + "[[host]]\npattern=.*\ncert=/tmp\ncert_domains=a.x.com\ntarget_host=x.lan\n",
-		"bad bool":                   auto + "[[host]]\npattern=.*\ncert=/tmp\nupstream_tls=maybe\ntarget_host=x.lan\n",
-		"bad proxy bool":             auto + "[[host]]\npattern=.*\ncert=/tmp\nproxy=maybe\ntarget_host=x.lan\n",
-		"version without proxy":      auto + "[[host]]\npattern=.*\ncert=/tmp\nproxy_version=1\ntarget_host=x.lan\n",
-		"bad proxy version":          auto + "[[host]]\npattern=.*\ncert=/tmp\nproxy=true\nproxy_version=3\ntarget_host=x.lan\n",
+		"regex without cert_domains": auto + "[[host]]\nlistener=default\npattern=*.x\\.com\ncert=auto\ntarget_host=${1}.lan\ntarget_port=443\n",
+		"tos not agreed":             "[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=a\\.x\\.com\ncert=auto\ntarget_host=x.lan\ntarget_port=443\n",
+		"domain outside the pattern": auto + "[[host]]\nlistener=default\npattern=*.x\\.com\ncert=auto\ncert_domains=a.y.com\ntarget_host=x.lan\ntarget_port=443\n",
+		"wildcard":                   auto + "[[host]]\nlistener=default\npattern=*.x\\.com\ncert=auto\ncert_domains=*.x.com\ntarget_host=x.lan\ntarget_port=443\n",
+		"auto without sni":           auto + "[[host]]\nlistener=default\npattern=NONE\ncert=auto\ntarget_host=x.lan\ntarget_port=443\n",
+		"cert on deny":               auto + "[[host]]\nlistener=default\npattern=.*\naction=deny\ncert=auto\n",
+		"upstream_tls without cert":  auto + "[[host]]\nlistener=default\npattern=.*\nupstream_tls=true\ntarget_host=x.lan\ntarget_port=443\n",
+		"cert_domains without auto":  auto + "[[host]]\nlistener=default\npattern=.*\ncert=/tmp\ncert_domains=a.x.com\ntarget_host=x.lan\ntarget_port=443\n",
+		"bad bool":                   auto + "[[host]]\nlistener=default\npattern=.*\ncert=/tmp\nupstream_tls=maybe\ntarget_host=x.lan\ntarget_port=443\n",
+		"bad proxy bool":             auto + "[[host]]\nlistener=default\npattern=.*\ncert=/tmp\nproxy=maybe\ntarget_host=x.lan\ntarget_port=443\n",
+		"version without proxy":      auto + "[[host]]\nlistener=default\npattern=.*\ncert=/tmp\nproxy_version=1\ntarget_host=x.lan\ntarget_port=443\n",
+		"bad proxy version":          auto + "[[host]]\nlistener=default\npattern=.*\ncert=/tmp\nproxy=true\nproxy_version=3\ntarget_host=x.lan\ntarget_port=443\n",
 		"bad ip":                     "[[listener]]\nname=default\nport=443\n[global]\npublic_ip_address=not-an-ip\n",
 		"bad threshold":              "[[listener]]\nname=default\nport=443\n[global]\nexpiry_threshold_days=0\n",
 	} {
@@ -471,8 +471,8 @@ func TestRenewalScheduleAndPriority(t *testing.T) {
 		t.Fatal(got)
 	}
 	m := NewCertManager()
-	m.cfg = mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\npattern=*.t\\.com\ncert=auto\n"+
-		"cert_domains=fresh.t.com,due-later.t.com,missing.t.com,due-sooner.t.com,expired.t.com,backoff.t.com\ntarget_host=x.lan\n")
+	m.cfg = mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\nlistener=default\npattern=*.t\\.com\ncert=auto\n"+
+		"cert_domains=fresh.t.com,due-later.t.com,missing.t.com,due-sooner.t.com,expired.t.com,backoff.t.com\ntarget_host=x.lan\ntarget_port=443\n")
 	m.auto["fresh.t.com"] = leaf(90*day, 10*day)
 	m.auto["due-later.t.com"] = leaf(90*day, 80*day)
 	m.auto["due-sooner.t.com"] = leaf(90*day, 88*day)
@@ -671,8 +671,8 @@ func TestDNSPreCheckUsesTheConfiguredResolvers(t *testing.T) {
 }
 
 func TestIssuanceRetriesAndLogging(t *testing.T) {
-	cfg := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\npattern=*.retry\\.test\ncert=auto\n"+
-		"cert_domains=flaky.retry.test,wrongdns.retry.test,down.retry.test\ntarget_host=x.lan\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\nlistener=default\npattern=*.retry\\.test\ncert=auto\n"+
+		"cert_domains=flaky.retry.test,wrongdns.retry.test,down.retry.test\ntarget_host=x.lan\ntarget_port=443\n")
 	m := NewCertManager()
 	m.cfg = cfg
 	calls := map[string]int{}
@@ -776,8 +776,8 @@ func TestUpstreamSNIDefaultsToTheClientsName(t *testing.T) {
 	})
 	dir := ca.localCA(t)
 	p := startProxy(t, "", fmt.Sprintf(
-		"[[host]]\npattern=app\\.sni\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=other\\.sni\\.test\ncert=%s\nupstream_sni=Override.Internal\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+		"[[host]]\nlistener=default\npattern=app\\.sni\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\nlistener=default\npattern=other\\.sni\\.test\ncert=%s\nupstream_sni=Override.Internal\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 		dir, port, dir, port))
 	for name, want := range map[string]string{"app.sni.test": "sni=app.sni.test", "other.sni.test": "sni=override.internal"} {
 		tc, err := tlsDial(t, p, &tls.Config{RootCAs: ca.pool, ServerName: name})
@@ -789,9 +789,9 @@ func TestUpstreamSNIDefaultsToTheClientsName(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{
-		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\ncert=/tmp\nupstream_sni=not a name\ntarget_host=x.lan\n",
-		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\ncert=/tmp\nupstream_tls=false\nupstream_sni=a.b.com\ntarget_host=x.lan\n",
-		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\nupstream_sni=a.b.com\ntarget_host=x.lan\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\ncert=/tmp\nupstream_sni=not a name\ntarget_host=x.lan\ntarget_port=443\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\ncert=/tmp\nupstream_tls=false\nupstream_sni=a.b.com\ntarget_host=x.lan\ntarget_port=443\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\nupstream_sni=a.b.com\ntarget_host=x.lan\ntarget_port=443\n",
 	} {
 		if _, err := ParseConfig(bad); err == nil {
 			t.Errorf("should be rejected: %q", bad)
@@ -811,8 +811,8 @@ func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
 	})
 	dir := ca.localCA(t)
 	p := startProxy(t, "", fmt.Sprintf(
-		"[[host]]\npattern=vq\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=plain\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+		"[[host]]\nlistener=default\npattern=vq\\.test\ncert=%s\nupstream_tls_verify=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\nlistener=default\npattern=plain\\.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 		dir, tlsPort, dir, echoBackend(t, "")))
 	challenge := func(name string) (*tls.Conn, error) {
 		return tlsDial(t, p, &tls.Config{InsecureSkipVerify: true, ServerName: name, NextProtos: []string{acme.ALPNProto}})
@@ -857,7 +857,7 @@ func TestForeignTLSALPN01ChallengeGoesToTheUpstream(t *testing.T) {
 // Names are independent: several jobs run at once, but never two for one name.
 func TestCertificateJobsRunInParallelPerName(t *testing.T) {
 	names := []string{"a.par.test", "b.par.test", "c.par.test", "d.par.test", "e.par.test", "f.par.test"}
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n[[host]]\npattern=*.par\\.test\ncert=auto\ncert_domains=%s\ntarget_host=x.lan\n",
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n[[host]]\nlistener=default\npattern=*.par\\.test\ncert=auto\ncert_domains=%s\ntarget_host=x.lan\ntarget_port=443\n",
 		t.TempDir(), strings.Join(names, ",")))
 	m := NewCertManager()
 	var mu sync.Mutex
@@ -926,7 +926,7 @@ func clientHelloALPN(sni, proto string) []byte {
 // An automatic certificate that is due is renewed: the worker's job gets a
 // new one, which is then what clients are given.
 func TestAutomaticRenewalReplacesTheCertificate(t *testing.T) {
-	cfg := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\npattern=renew.t.com\ncert=auto\ntarget_host=x.lan\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n[[host]]\nlistener=default\npattern=renew.t.com\ncert=auto\ntarget_host=x.lan\ntarget_port=443\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)

@@ -39,12 +39,15 @@ port = 443
 
 # the wildcard rule
 [[host]]
+listener = default
 pattern = *.example.com   # all of them
 target_host = ${1}.internal
+target_port = 443
 max_single_connection_speed = 1MB
 
 # the catch-all
 [[host]]
+listener = default
 pattern = ANY
 action = deny
 
@@ -64,7 +67,7 @@ func TestEditRulesKeepsTheRestOfTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.Replace(rulesFile, "target_host = ${1}.internal\nmax_single_connection_speed = 1MB\n",
+	want := strings.Replace(rulesFile, "target_host = ${1}.internal\ntarget_port = 443\nmax_single_connection_speed = 1MB\n",
 		"target_host = ${1}.lan\ntarget_port = 8443\n", 1)
 	if got != want {
 		t.Fatalf("edit:\n%s\nwant:\n%s", got, want)
@@ -76,16 +79,16 @@ func TestEditRulesKeepsTheRestOfTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(got, "wildcard") || strings.Contains(got, "example.com") || !strings.Contains(got, "# top\n[[listener]]\nname = default\nport = 443\n\n# the catch-all\n[[host]]") {
+	if strings.Contains(got, "wildcard") || strings.Contains(got, "example.com") || !strings.Contains(got, "# top\n[[listener]]\nname = default\nport = 443\n\n# the catch-all\n[[host]]\nlistener = default") {
 		t.Fatalf("delete:\n%s", got)
 	}
 
 	// Add goes after the last rule, before [console].
-	got, err = editRules(rulesFile, 0, map[string]string{"pattern": "a.test", "target_host": "10.0.0.1", "proxy": "true", "max_aggregated_speed": "1Gbit"}, false)
+	got, err = editRules(rulesFile, 0, map[string]string{"listener": "default", "pattern": "a.test", "target_host": "10.0.0.1", "target_port": "443", "proxy": "true", "max_aggregated_speed": "1Gbit"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "action = deny\n\n[[host]]\npattern = a.test\ntarget_host = 10.0.0.1\nmax_aggregated_speed = 1Gbit\nproxy = true\n\n[console]") {
+	if !strings.Contains(got, "action = deny\n\n[[host]]\nlistener = default\npattern = a.test\ntarget_host = 10.0.0.1\ntarget_port = 443\nmax_aggregated_speed = 1Gbit\nproxy = true\n\n[console]") {
 		t.Fatalf("add:\n%s", got)
 	}
 	if c := mustParse(t, got); len(c.Rules) != 3 {
@@ -194,8 +197,8 @@ func ruleOf(t *testing.T, state map[string]any, pattern string) map[string]any {
 func TestConsoleRuleManager(t *testing.T) {
 	t.Parallel()
 	a, b := echoBackend(t, "A:"), echoBackend(t, "B:")
-	rules := "[[host]]\npattern = svc.rulemgr.test\ntarget_host = 127.0.0.1\ntarget_port = " + strconv.Itoa(a) +
-		"\n\n[[host]]\npattern = *.rulemgr.test\ntarget_host = 127.0.0.1\ntarget_port = " + strconv.Itoa(b) + "\n"
+	rules := "[[host]]\nlistener = default\npattern = svc.rulemgr.test\ntarget_host = 127.0.0.1\ntarget_port = " + strconv.Itoa(a) +
+		"\n\n[[host]]\nlistener = default\npattern = *.rulemgr.test\ntarget_host = 127.0.0.1\ntarget_port = " + strconv.Itoa(b) + "\n"
 	p, c, path := startConsoleProxy(t, "password = pw", rules)
 	if c.login("pw") != 200 {
 		t.Fatal("login")
@@ -305,7 +308,7 @@ func TestConsoleRuleManager(t *testing.T) {
 // The page and everything it references are served, without signing in.
 func TestConsolePageAssets(t *testing.T) {
 	t.Parallel()
-	_, c, _ := startConsoleProxy(t, "password = pw", "[[host]]\npattern=ANY\naction=deny\n")
+	_, c, _ := startConsoleProxy(t, "password = pw", "[[host]]\nlistener=default\npattern=ANY\naction=deny\n")
 	page, err := c.http.Get(c.base + "/")
 	if err != nil || page.StatusCode != 200 {
 		t.Fatal(err, page.Status)

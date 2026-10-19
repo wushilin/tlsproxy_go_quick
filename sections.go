@@ -263,27 +263,6 @@ func editRules(text string, line int, values map[string]string, del bool) (strin
 	return strings.Join(out, "\n"), err
 }
 
-// tagUntaggedRules adds listener = name to every rule without a listener =
-// line: what a second listener needs, as untagged rules belong to the only
-// one. It returns the new lines and how many rules it tagged.
-func tagUntaggedRules(lines []string, name string) ([]string, int) {
-	tagged := 0
-	for {
-		var untagged *block
-		for _, b := range hostBlocks(lines) {
-			if _, ok := blockValues(lines, b)["listener"]; !ok {
-				untagged = &b
-				break
-			}
-		}
-		if untagged == nil {
-			return lines, tagged
-		}
-		lines = slices.Insert(lines, untagged.start+1, "listener = "+name)
-		tagged++
-	}
-}
-
 func orDefault(v, def string) string {
 	if v == "" {
 		return def
@@ -292,9 +271,8 @@ func orDefault(v, def string) string {
 }
 
 // editListeners applies one change to a [[listener]]: values for the one on
-// line (0 adds one), or its deletion. Adding a second listener tags the
-// rules that had none with the first one's name; a rename retags the rules
-// that named the old name. It returns the new text, the line of the edited
+// line (0 adds one), or its deletion. A rename retags the rules that named
+// the old name. It returns the new text, the line of the edited
 // section (0 after a delete) and notes on any change beyond the section.
 func editListeners(text string, line int, values map[string]string, del bool) (string, int, []string, error) {
 	if err := checkKeys(listenerKeys, values, listenerHeader); err != nil {
@@ -307,15 +285,6 @@ func editListeners(text string, line int, values map[string]string, del bool) (s
 		sec, err := newBlock(listenerHeader, listenerKeys, values)
 		if err != nil {
 			return "", 0, nil, err
-		}
-		if len(blocks) == 1 {
-			if first := blockValues(lines, blocks[0])["name"]; first != "" {
-				var tagged int
-				if lines, tagged = tagUntaggedRules(lines, first); tagged > 0 {
-					notes = append(notes, fmt.Sprintf("Tags %d existing rule(s) with listener = %s: with several listeners, every rule names its own", tagged, first))
-					blocks = sectionBlocks(lines, listenerHeader)
-				}
-			}
 		}
 		at := len(lines)
 		if len(blocks) > 0 {
