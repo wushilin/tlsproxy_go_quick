@@ -34,9 +34,12 @@ compress_after = 3                 # .1-.3 stay plain text, .4.gz and older are 
 # destinations stay in use.
 
 [[host]]
+listener = https
 pattern = www.example.com
 target_host = 10.0.0.10
+target_port = 443
 
 [[host]]
+listener = https
 pattern = ANY
 action = deny

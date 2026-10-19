@@ -15,7 +15,7 @@ import (
 func TestFlowLog(t *testing.T) {
 	t.Parallel()
 	p, c, _ := startConsoleProxy(t, "password = pw", fmt.Sprintf(
-		"[[host]]\npattern=ok.flow.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=no.flow.test\naction=deny\n", echoBackend(t, "F:")))
+		"[[host]]\nlistener=default\npattern=ok.flow.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\nlistener=default\npattern=no.flow.test\naction=deny\n", echoBackend(t, "F:")))
 	c.login("pw")
 	next := wsFramesAt(t, c, "/api/flows")
 	if first := next(); first["type"] != "snapshot" || first["full"] != true {
@@ -124,8 +124,8 @@ func TestFlowHandlingDetails(t *testing.T) {
 	ca := newTestCA(t)
 	port := echoBackend(t, "up:")
 	p := startProxy(t, "proxy_protocol_from = 127.0.0.1",
-		fmt.Sprintf("[[host]]\npattern=via.flow.test\nproxy=true\nproxy_version=1\nmax_single_connection_speed=1MiB/s\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)+
-			fmt.Sprintf("[[host]]\npattern=term.flow.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), port))
+		fmt.Sprintf("[[host]]\nlistener=default\npattern=via.flow.test\nproxy=true\nproxy_version=1\nmax_single_connection_speed=1MiB/s\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)+
+			fmt.Sprintf("[[host]]\nlistener=default\npattern=term.flow.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), port))
 
 	// A load balancer (this test) sends a PROXY v2 header; the rule sends v1 on.
 	c := dial(t, p)

@@ -104,7 +104,7 @@ func echoBackend(t *testing.T, tag string) int {
 }
 
 func allowAll(port int) string {
-	return fmt.Sprintf("[[host]]\npattern=.*\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)
+	return fmt.Sprintf("[[host]]\nlistener=default\npattern=.*\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)
 }
 
 func dial(t *testing.T, p *proxyUnderTest) *net.TCPConn {
@@ -195,9 +195,9 @@ func TestRoutesBySNI(t *testing.T) {
 	t.Parallel()
 	a, b := echoBackend(t, "A"), echoBackend(t, "B")
 	p := startProxy(t, "", fmt.Sprintf(
-		"[[host]]\npattern=*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=*.*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=*.b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-			"[[host]]\npattern=vip.*\ntarget_host=${host}\n[[host]]\npattern=ANY\naction=deny\n", a, a, b, b))
+		"[[host]]\nlistener=default\npattern=*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\nlistener=default\npattern=*.*.a.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\nlistener=default\npattern=b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\nlistener=default\npattern=*.b.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+			"[[host]]\nlistener=default\npattern=vip.*\ntarget_host=${host}\ntarget_port=443\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n", a, a, b, b))
 	roundtrip(t, p, "x.a.test", "A")
 	roundtrip(t, p, "y.z.a.test", "A")
 	roundtrip(t, p, "b.test", "B")
@@ -211,7 +211,7 @@ func TestRoutesBySNI(t *testing.T) {
 func TestCaptureGroupBuildsTarget(t *testing.T) {
 	t.Parallel()
 	port := echoBackend(t, "C")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=*.*.*.*.fwd.test\ntarget_host=${1}.${2}.${3}.${4}\ntarget_port=%d\n", port))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=*.*.*.*.fwd.test\ntarget_host=${1}.${2}.${3}.${4}\ntarget_port=%d\n", port))
 	roundtrip(t, p, "127.0.0.1.fwd.test", "C")      // four captures, left to right
 	expectDenied(t, p, clientHello("nomatch.test")) // no rule matched
 }
@@ -219,9 +219,9 @@ func TestCaptureGroupBuildsTarget(t *testing.T) {
 func TestMissingSNIMatchesEmptyString(t *testing.T) {
 	t.Parallel()
 	noSNI := wrapRecords(buildClientHello(nil, 0), 16384)
-	expectDenied(t, startProxy(t, "", "[[host]]\npattern=.*\naction=deny\n"), noSNI)
+	expectDenied(t, startProxy(t, "", "[[host]]\nlistener=default\npattern=.*\naction=deny\n"), noSNI)
 	port := echoBackend(t, "N")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=ANY\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)) // ANY takes clients without SNI too
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=ANY\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)) // ANY takes clients without SNI too
 	c := dial(t, p)
 	c.Write(noSNI)
 	if got := readN(t, c, 1); got[0] != 'N' {
@@ -232,9 +232,9 @@ func TestMissingSNIMatchesEmptyString(t *testing.T) {
 func TestNonePatternRoutesClientsWithoutSNI(t *testing.T) {
 	t.Parallel()
 	def, named := echoBackend(t, "D"), echoBackend(t, "N")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=NONE\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-		"[[host]]\npattern=*.named\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-		"[[host]]\npattern=.*\naction=deny\n", def, named))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=NONE\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\nlistener=default\npattern=*.named\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\nlistener=default\npattern=.*\naction=deny\n", def, named))
 	for i := 0; i < 2; i++ { // the second round is served from the route cache
 		noSNI := wrapRecords(buildClientHello(nil, 0), 16384)
 		c := dial(t, p)
@@ -289,7 +289,7 @@ func TestHelloShapes(t *testing.T) {
 
 func TestCachedRoutesBehaveLikeUncached(t *testing.T) {
 	t.Parallel()
-	rules := fmt.Sprintf("[[host]]\npattern=*.ok\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\npattern=.*\naction=deny\n", echoBackend(t, "A"))
+	rules := fmt.Sprintf("[[host]]\nlistener=default\npattern=*.ok\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n[[host]]\nlistener=default\npattern=.*\naction=deny\n", echoBackend(t, "A"))
 	for _, global := range []string{"allow_cache_size=2\ndeny_cache_size=2", "allow_cache_size=0\ndeny_cache_size=0"} {
 		p := startProxy(t, global, rules)
 		for round := 0; round < 3; round++ {
@@ -330,8 +330,8 @@ func TestLargeBidirectionalTransferIntegrity(t *testing.T) {
 func TestManyConcurrentConnections(t *testing.T) {
 	t.Parallel()
 	a, b := echoBackend(t, "A"), echoBackend(t, "B")
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=a*.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
-		"[[host]]\npattern=b*.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", a, b))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=a*.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
+		"[[host]]\nlistener=default\npattern=b*.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", a, b))
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
@@ -388,7 +388,7 @@ func TestUpstreamCloseAndUnreachable(t *testing.T) {
 	if got := readToEnd(t, c); len(got) != 0 {
 		t.Fatal(got)
 	}
-	c = dial(t, startProxy(t, "connect_timeout=3", "[[host]]\npattern=.*\ntarget_host=does-not-exist.invalid\n"))
+	c = dial(t, startProxy(t, "connect_timeout=3", "[[host]]\nlistener=default\npattern=.*\ntarget_host=does-not-exist.invalid\ntarget_port=443\n"))
 	c.Write(clientHello("x.test"))
 	if got := readToEnd(t, c); len(got) != 0 {
 		t.Fatal(got)
@@ -622,11 +622,11 @@ func TestConfigReload(t *testing.T) {
 	roundtrip(t, p, "svc.test", "A")
 	roundtrip(t, p, "svc.test", "A") // served from the allow cache
 
-	write("[[host]]\npattern=(\ntarget_host=x\n", true) // invalid: ignored
+	write("[[host]]\nlistener=default\npattern=(\ntarget_host=x\ntarget_port=443\n", true) // invalid: ignored
 	roundtrip(t, p, "svc.test", "A")
 	write(allowAll(b), true)
 	roundtrip(t, p, "svc.test", "B") // a stale cache entry would still say A
-	write("[[host]]\npattern=.*\naction=deny\n", true)
+	write("[[host]]\nlistener=default\npattern=.*\naction=deny\n", true)
 	expectDenied(t, p, clientHello("svc.test")) // cached allow must not survive
 	write(allowAll(a)+"\n[global]\nbuffer_size=4096\n", true)
 	roundtrip(t, p, "svc.test", "A") // nor the cached denial; pool replaced too
@@ -641,7 +641,7 @@ func TestConfigReload(t *testing.T) {
 
 func TestStatsTrackConnectionsGoroutinesAndBytes(t *testing.T) {
 	t.Parallel()
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=ok\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "")))
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=ok\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "")))
 	st := p.srv.stats
 	hello := clientHello("ok.test") // the same length every time
 	var conns []*net.TCPConn
@@ -714,8 +714,8 @@ func TestIPv6DownstreamAndUpstream(t *testing.T) {
 	}()
 	port := up.Addr().(*net.TCPAddr).Port
 	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nbind=[::]\nport=1\n[global]\nstats_interval=0\n"+
-		"[[host]]\npattern=six.test\ntarget_host=::1\ntarget_port=%d\n"+
-		"[[host]]\npattern=*.zone.test\ntarget_host=fe80::1%%lo0\ntarget_port=%d\n", port, port))
+		"[[host]]\nlistener=default\npattern=six.test\ntarget_host=::1\ntarget_port=%d\n"+
+		"[[host]]\nlistener=default\npattern=*.zone.test\ntarget_host=fe80::1%%lo0\ntarget_port=%d\n", port, port))
 	if cfg.Bind != "::" {
 		t.Fatalf("bind = [::] and bind = :: are the same: %q", cfg.Bind)
 	}

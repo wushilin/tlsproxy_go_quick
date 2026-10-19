@@ -190,7 +190,7 @@ func TestProxyProtocolOnPassThroughRules(t *testing.T) {
 	hello := clientHello("pass.example")
 	for _, version := range []string{"1", "2"} {
 		port, seen := headerBackend(t, len(hello))
-		p := startProxy(t, "", "[[host]]\npattern=pass.example\ntarget_host=127.0.0.1\ntarget_port="+strconv.Itoa(port)+"\nproxy=true\nproxy_version="+version+"\n")
+		p := startProxy(t, "", "[[host]]\nlistener=default\npattern=pass.example\ntarget_host=127.0.0.1\ntarget_port="+strconv.Itoa(port)+"\nproxy=true\nproxy_version="+version+"\n")
 		c := dial(t, p)
 		c.Write(hello)
 		got := <-seen
@@ -209,7 +209,7 @@ func TestProxyProtocolIsOnlyAcceptedFromTrustedPeers(t *testing.T) {
 	hello := clientHello("trust.example")
 	forged := append([]byte("PROXY TCP4 203.0.113.9 198.51.100.7 40000 443\r\n"), hello...)
 	rule := func(port int) string {
-		return "[[host]]\npattern=trust.example\ntarget_host=127.0.0.1\ntarget_port=" + strconv.Itoa(port) + "\nproxy=true\n"
+		return "[[host]]\nlistener=default\npattern=trust.example\ntarget_host=127.0.0.1\ntarget_port=" + strconv.Itoa(port) + "\nproxy=true\n"
 	}
 
 	// Not listed (the default): the header is not looked for, so the stream is
@@ -253,7 +253,7 @@ func TestProxyProtocolIsOnlyAcceptedFromTrustedPeers(t *testing.T) {
 
 func TestProxyProtocolConfig(t *testing.T) {
 	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nproxy_protocol_from = 192.0.2.10, 10.0.0.0/8; 2001:db8::/32\n"+
-		"[[host]]\npattern=a.example\ntarget_host=a.lan\nproxy=yes\n[[host]]\npattern=b.example\ntarget_host=b.lan\n")
+		"[[host]]\nlistener=default\npattern=a.example\ntarget_host=a.lan\ntarget_port=443\nproxy=yes\n[[host]]\nlistener=default\npattern=b.example\ntarget_host=b.lan\ntarget_port=443\n")
 	if !c.Rules[0].Proxy || c.Rules[0].ProxyVersion != 2 || c.Rules[1].Proxy {
 		t.Fatalf("%+v", c.Rules)
 	}
@@ -266,10 +266,10 @@ func TestProxyProtocolConfig(t *testing.T) {
 		t.Fatal("nobody is trusted by default")
 	}
 	for name, text := range map[string]string{
-		"version without proxy": "[[host]]\npattern=a\ntarget_host=x\nproxy_version=1\n",
-		"version 3":             "[[host]]\npattern=a\ntarget_host=x\nproxy=true\nproxy_version=3\n",
-		"deny rule":             "[[host]]\npattern=a\naction=deny\nproxy=true\n",
-		"not a bool":            "[[host]]\npattern=a\ntarget_host=x\nproxy=maybe\n",
+		"version without proxy": "[[host]]\nlistener=default\npattern=a\ntarget_host=x\ntarget_port=443\nproxy_version=1\n",
+		"version 3":             "[[host]]\nlistener=default\npattern=a\ntarget_host=x\ntarget_port=443\nproxy=true\nproxy_version=3\n",
+		"deny rule":             "[[host]]\nlistener=default\npattern=a\naction=deny\nproxy=true\n",
+		"not a bool":            "[[host]]\nlistener=default\npattern=a\ntarget_host=x\ntarget_port=443\nproxy=maybe\n",
 	} {
 		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n" + text); err == nil {
 			t.Errorf("%s: should be rejected", name)

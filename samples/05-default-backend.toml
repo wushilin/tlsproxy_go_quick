@@ -12,13 +12,19 @@ bind = 0.0.0.0
 port = 443
 
 [[host]]
+listener = https
 pattern = api.example.com
 target_host = 10.0.0.21
+target_port = 443
 
 [[host]]
+listener = https
 pattern = shop.example.com
 target_host = 10.0.0.22
+target_port = 443
 
 [[host]]
+listener = https
 pattern = ANY
 target_host = 10.0.0.99
+target_port = 443

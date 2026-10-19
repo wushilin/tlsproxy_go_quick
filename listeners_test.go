@@ -12,8 +12,8 @@ import (
 )
 
 func TestListenerConfig(t *testing.T) {
-	// One listener: rules without listener = belong to it.
-	c := mustParse(t, "[[listener]]\nname=https\nbind=127.0.0.1\nport=443\n[[host]]\npattern=a.test\ntarget_host=x\n")
+	// One listener: its rules still name it.
+	c := mustParse(t, "[[listener]]\nname=https\nbind=127.0.0.1\nport=443\n[[host]]\nlistener=https\npattern=a.test\ntarget_host=x\ntarget_port=443\n")
 	if len(c.Listeners) != 1 || c.Listeners[0].Name != "https" || c.Listeners[0].Line != 1 || c.Rules[0].Listener != "https" {
 		t.Fatalf("%+v", c.Listeners)
 	}
@@ -22,8 +22,8 @@ func TestListenerConfig(t *testing.T) {
 	two := "[global]\nidle_timeout=100\n" +
 		"[[listener]]\nname=public\nport=443\n" +
 		"[[listener]]\nname=lab\nbind=10.0.0.1; ::1\nport=9092\nidle_timeout=5\nmax_connections=3\nproxy_protocol_from=10.0.0.0/8\nmax_aggregated_speed=1Gbit\n" +
-		"[[host]]\nlistener=public\npattern=ANY\ntarget_host=pub\n" +
-		"[[host]]\nlistener=lab\npattern=ANY\ntarget_host=lab\n"
+		"[[host]]\nlistener=public\npattern=ANY\ntarget_host=pub\ntarget_port=443\n" +
+		"[[host]]\nlistener=lab\npattern=ANY\ntarget_host=lab\ntarget_port=443\n"
 	c = mustParse(t, two)
 	lab := c.Listener("lab")
 	if lab == nil || lab.Port != 9092 || lab.Bind != "10.0.0.1; ::1" || lab.MaxConnections != 3 || lab.MaxAggregatedSpeed != 125e6 {
@@ -45,17 +45,19 @@ func TestListenerConfig(t *testing.T) {
 
 	base := "[[listener]]\nname=a\nport=1\n[[listener]]\nname=b\nport=2\n"
 	for text, want := range map[string]string{
-		base + "[[host]]\npattern=x.test\ntarget_host=x\n":                            "listener = <name> is required: this file has 2 listeners (a, b)",
-		base + "[[host]]\nlistener=c\npattern=x.test\ntarget_host=x\n":                "there is no [[listener]] named c",
-		"[global]\nport=443\n" + base:                                                 "[global] port is no longer supported",
-		"[global]\nbind=0.0.0.0\n" + base:                                             "[global] bind is no longer supported",
-		"[global]\nport=443\n[[host]]\npattern=ANY\ntarget_host=x\n":                  "[global] port is no longer supported",
-		"[global]\n[[host]]\npattern=ANY\ntarget_host=x\n":                            "no [[listener]] section",
-		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=a\nport=2\n":                "the name a is already used",
-		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=b\nbind=10.0.0.1\nport=1\n": "overlaps a",
-		"[[listener]]\nname=Bad/Name\nport=1\n":                                       "name must be",
-		"[[listener]]\nname=a\n":                                                      "port is required",
-		"[[listener]]\nname=a\nport=1\nfoo=1\n":                                       `unknown key "foo" in [[listener]]`,
+		base + "[[host]]\npattern=x.test\ntarget_host=x\ntarget_port=443\n":                      "listener = <name> is required (listeners: a, b)",
+		"[[listener]]\nname=a\nport=1\n[[host]]\npattern=x.test\ntarget_host=x\ntarget_port=1\n": "listener = <name> is required (listeners: a)",
+		"[[listener]]\nname=a\nport=1\n[[host]]\nlistener=a\npattern=x.test\ntarget_host=x\n":    "target_port is required for allow",
+		base + "[[host]]\nlistener=c\npattern=x.test\ntarget_host=x\ntarget_port=443\n":          "there is no [[listener]] named c",
+		"[global]\nport=443\n" + base:     "[global] port is no longer supported",
+		"[global]\nbind=0.0.0.0\n" + base: "[global] bind is no longer supported",
+		"[global]\nport=443\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=x\ntarget_port=443\n": "[global] port is no longer supported",
+		"[global]\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=x\ntarget_port=443\n":           "no [[listener]] section",
+		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=a\nport=2\n":                                  "the name a is already used",
+		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=b\nbind=10.0.0.1\nport=1\n":                   "overlaps a",
+		"[[listener]]\nname=Bad/Name\nport=1\n":                                                         "name must be",
+		"[[listener]]\nname=a\n":                                                                        "port is required",
+		"[[listener]]\nname=a\nport=1\nfoo=1\n":                                                         `unknown key "foo" in [[listener]]`,
 	} {
 		_, err := ParseConfig(text)
 		if err == nil || !strings.Contains(err.Error(), want) {
@@ -152,12 +154,12 @@ func TestLiveListeners(t *testing.T) {
 	roundtrip(t, p, "x.test", "A:")
 }
 
-// The console adds a second listener: rules without listener = are tagged
-// with the first one's name, and the new port opens.
+// The console adds a second listener: only the new section is written, and
+// the new port opens.
 func TestConsoleAddsListener(t *testing.T) {
 	t.Parallel()
 	a := echoBackend(t, "A:")
-	_, c, path := startConsoleProxy(t, "password = pw", "[[host]]\npattern = ANY\ntarget_host = 127.0.0.1\ntarget_port = "+strconv.Itoa(a)+"\n")
+	_, c, path := startConsoleProxy(t, "password = pw", "[[host]]\nlistener = default\npattern = ANY\ntarget_host = 127.0.0.1\ntarget_port = "+strconv.Itoa(a)+"\n")
 	if c.login("pw") != 200 {
 		t.Fatal("login")
 	}
@@ -166,7 +168,7 @@ func TestConsoleAddsListener(t *testing.T) {
 	f := st["file"].(map[string]any)
 	vals := map[string]string{"name": "lab", "bind": "127.0.0.1", "port": strconv.Itoa(port)}
 	_, out := c.post("/api/listeners/validate", map[string]any{"line": 0, "values": vals})
-	if out["ok"] != true || !strings.Contains(out["block"].(string), "name = lab") || len(out["notes"].([]any)) != 1 {
+	if out["ok"] != true || !strings.Contains(out["block"].(string), "name = lab") || out["notes"] != nil {
 		t.Fatal(out)
 	}
 	if code, out := c.post("/api/listeners/save", map[string]any{"line": 0, "baseHash": f["hash"], "baseMtime": f["mtime"], "values": vals}); code != 200 || out["ok"] != true {
@@ -210,7 +212,7 @@ func TestListenerNames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := "[[listener]]\nname = " + q + "\nport = 1\n[[host]]\nlistener = " + q + "\npattern = a.com\ntarget_host = b\n" +
+		text := "[[listener]]\nname = " + q + "\nport = 1\n[[host]]\nlistener = " + q + "\npattern = a.com\ntarget_host = b\ntarget_port = 443\n" +
 			"[[listener]]\nname = other\nport = 2\n"
 		cfg, err := ParseConfig(text)
 		if err != nil {
@@ -289,21 +291,5 @@ func TestStartupWithABusyPort(t *testing.T) {
 	}
 	if _, open, stopped, msg := srv.listenerState("taken"); !open || stopped || msg != "" {
 		t.Fatalf("after Start: open=%v stopped=%v err=%q", open, stopped, msg)
-	}
-}
-
-// A rule without target_port connects to the port its listener listens on.
-func TestTargetPortDefaultsToListenerPort(t *testing.T) {
-	c := mustParse(t, "[[listener]]\nname=https\nport=443\n[[listener]]\nname=kafka\nport=9092\n"+
-		"[[host]]\nlistener=https\npattern=ANY\ntarget_host=${host}\n"+
-		"[[host]]\nlistener=kafka\npattern=ANY\ntarget_host=${host}\n"+
-		"[[host]]\nlistener=kafka\npattern=b.test\ntarget_host=b\ntarget_port=19092\n")
-	for l, want := range map[string]string{"https": "a.test:443", "kafka": "a.test:9092"} {
-		if got := route(t, c.ForListener(c.Listener(l)), "a.test"); got != want {
-			t.Errorf("%s: %s, want %s", l, got, want)
-		}
-	}
-	if got := route(t, c.ForListener(c.Listener("kafka")), "b.test"); got != "b:19092" {
-		t.Errorf("explicit target_port: %s", got)
 	}
 }

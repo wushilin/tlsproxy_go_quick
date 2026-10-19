@@ -175,7 +175,7 @@ func TestPasswordRewriteRejectsStaleSnapshot(t *testing.T) {
 }
 
 func TestCertificateReloadCancelsIssuance(t *testing.T) {
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=removed.example.com\ncert=auto\ntarget_host=127.0.0.1\n", t.TempDir()))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\nlistener=default\npattern=removed.example.com\ncert=auto\ntarget_host=127.0.0.1\ntarget_port=443\n", t.TempDir()))
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ func TestCertificateReloadCancelsIssuance(t *testing.T) {
 	}
 	// A rejected config must leave the current generation alive.
 	// (It parses, but names a CA that doesn't exist: Apply refuses it.)
-	bad := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nca_root="+t.TempDir()+"\n[[host]]\npattern=ANY\ncert=local-ca:ca009\ntarget_host=127.0.0.1\n")
+	bad := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nca_root="+t.TempDir()+"\n[[host]]\nlistener=default\npattern=ANY\ncert=local-ca:ca009\ntarget_host=127.0.0.1\ntarget_port=443\n")
 	if err := m.Apply(bad); err == nil {
 		t.Fatal("bad config accepted")
 	}
@@ -239,7 +239,7 @@ func TestCertificateReloadCancelsIssuance(t *testing.T) {
 }
 
 func TestCertificateInstallRejectsObsoleteResult(t *testing.T) {
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=commit.example.com\ncert=auto\ntarget_host=127.0.0.1\n", t.TempDir()))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\nlistener=default\npattern=commit.example.com\ncert=auto\ntarget_host=127.0.0.1\ntarget_port=443\n", t.TempDir()))
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -277,7 +277,7 @@ func TestCertificateInstallRejectsObsoleteResult(t *testing.T) {
 
 func TestReloadUsesParsedSnapshotAtStartup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	oldText := "[[listener]]\nname=default\nport=1\n[global]\nreload_interval=0\nstats_interval=0\n[[host]]\npattern=ANY\naction=deny\n"
+	oldText := "[[listener]]\nname=default\nport=1\n[global]\nreload_interval=0\nstats_interval=0\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n"
 	newText := strings.ReplaceAll(oldText, "stats_interval=0", "stats_interval=17")
 	if err := os.WriteFile(path, []byte(newText), 0600); err != nil {
 		t.Fatal(err)

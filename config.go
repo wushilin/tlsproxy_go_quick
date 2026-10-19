@@ -675,7 +675,7 @@ func ParseConfig(text string) (*Config, error) {
 			case "bind", "port":
 				return nil, fail("[global] %s is no longer supported: every listen address is a [[listener]] section, as in\n\n"+
 					"  [[listener]]\n  name = https\n  bind = 0.0.0.0\n  port = 443\n\n"+
-					"move bind and port there (rules without listener = belong to it while it is the only one)", key)
+					"move bind and port there, and name it in every rule: listener = https", key)
 			case "handshake_timeout":
 				err = secs(&cfg.HandshakeTimeout)
 			case "connect_timeout":
@@ -897,10 +897,8 @@ func ParseConfig(text string) (*Config, error) {
 				return nil, fail("listener = %s: there is no [[listener]] named %s (listeners: %s)", *r.listener, *r.listener, cfg.listenerNames())
 			}
 			rule.Listener = *r.listener
-		case len(cfg.Listeners) == 1:
-			rule.Listener = cfg.Listeners[0].Name
 		default:
-			return nil, fail("listener = <name> is required: this file has %d listeners (%s)", len(cfg.Listeners), cfg.listenerNames())
+			return nil, fail("listener = <name> is required (listeners: %s)", cfg.listenerNames())
 		}
 		groups := 0
 		expr := ""
@@ -937,11 +935,11 @@ func ParseConfig(text string) (*Config, error) {
 					return nil, fail("target_host %q must not contain a port: use target_port (an IPv6 address is written without brackets)", rule.TargetHost)
 				}
 			}
-			rule.TargetPort = cfg.Listener(rule.Listener).Port // by default, the port the client connected to
-			if r.tport != nil {
-				if rule.TargetPort, err = parsePort(*r.tport); err != nil {
-					return nil, fail("%v", err)
-				}
+			if r.tport == nil {
+				return nil, fail("target_port is required for allow")
+			}
+			if rule.TargetPort, err = parsePort(*r.tport); err != nil {
+				return nil, fail("%v", err)
 			}
 			// Catch bad group references now rather than per connection.
 			probe := make([]int, 2*(groups+1))

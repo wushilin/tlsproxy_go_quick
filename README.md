@@ -173,12 +173,14 @@ bind = 0.0.0.0
 port = 443
 
 [[host]]
+listener = https
 pattern = *.wushilin.net
 action = allow
 target_host = ${1}.wushilin.internal.net
 target_port = 443
 
 [[host]]
+listener = https
 pattern = ANY
 action = deny
 ```
@@ -224,8 +226,9 @@ action = deny
   still connects to any *name* a client sends, internal ones included; that is
   logged as a warning at start-up.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
-  `access_denied` alert. `target_port` defaults to the port of the rule's listener (the one the
-  client connected to): 9092 for a rule on a 9092 listener.
+  `access_denied` alert. An allow rule needs `target_port`: there is no
+  default port.
+- Every rule names its `listener`, even when there is only one.
 - `pattern = NONE` (any letter case) is explicit: it matches only clients that
   send no SNI, for example to send them to a default target; its `target_host`
   must be a literal. Without such a rule only `ANY` takes them; a wildcard
@@ -296,9 +299,8 @@ Samples, each with its expected routing checked by `go test`:
 ## Listeners
 
 Every port the proxy listens on is a `[[listener]]` section, and a file needs
-at least one. With a single listener, rules may leave out `listener =`: they
-belong to it. For more ports, each with its own rules, name the listener in
-every rule:
+at least one, and every rule names the listener it belongs to. For more
+ports, each with its own rules:
 
 ```toml
 [[listener]]
@@ -316,6 +318,7 @@ max_aggregated_speed = 200Mbit     # all connections on this listener together
 listener = public
 pattern = www.example.com
 target_host = 192.168.1.30
+target_port = 443
 
 [[host]]
 listener = lab
@@ -338,8 +341,8 @@ target_port = 9092
   v1.4.1 they made an implicit listener named `default`.)
 - Each listener has its own rules, so the same pattern can appear on several
   listeners, and a name that matches nothing *on that listener* is denied.
-- With two or more listeners every rule must name its `listener`; an untagged
-  rule is a load error. With one, `listener =` may be left out.
+- Every rule must name its `listener`, with one listener or many; a rule
+  without one is a load error.
 - Two listeners cannot share a port on the same (or a wildcard) address.
 - **Listeners follow hot reload.** A new listener opens its port, a changed
   `bind` or `port` moves it, and a removed one closes its port, all without a
@@ -448,12 +451,15 @@ upstream connection, and the untouched stream follows.
 
 ```toml
 [[host]]
+listener = https
 pattern = www.example.com          # passed through: header, then the client's ClientHello as it was
 target_host = 192.168.1.30
+target_port = 443
 proxy = true                       # default false
 proxy_version = 2                  # default 2 (binary); 1 is the text form
 
 [[host]]
+listener = https
 pattern = api.example.com          # terminated: header, then our upstream TLS handshake (or plaintext)
 cert = auto
 upstream_tls = false
@@ -488,8 +494,10 @@ Any allow rule, passed through or terminated, can cap its bandwidth:
 
 ```toml
 [[host]]
+listener = https
 pattern = *.downloads.example.com
 target_host = 10.0.0.20
+target_port = 443
 max_aggregated_speed = 1Gbit             # all connections of this rule together
 max_single_connection_speed = 15MiB/s    # each connection
 ```
@@ -533,6 +541,7 @@ acme_email = admin@example.com        # optional
 public_ip_address = 203.0.113.7       # only ask the CA for names that point here
 
 [[host]]
+listener = https
 pattern = nas.example.com             # literal pattern: the name comes from it
 cert = auto
 target_host = 192.168.1.10
@@ -542,6 +551,7 @@ proxy = true                          # send the original connection addresses f
 proxy_version = 2                     # v2 (default), or 1
 
 [[host]]
+listener = https
 pattern = *.example.com               # wildcard: list the exact names
 cert = auto
 cert_domains = www.example.com, blog.example.com
@@ -550,9 +560,11 @@ target_port = 8080
 upstream_tls = false                  # plain HTTP backend
 
 [[host]]
+listener = https
 pattern = intranet.example.com
 cert = local-ca                       # your own CA (ca001 in ca_root, made on the CAs page)
 target_host = 192.168.1.40
+target_port = 443
 ```
 
 | per rule | default | meaning |
@@ -588,10 +600,12 @@ DNS, wildcards), the proxy runs CAs of its own, or uses your organisation's:
 ca_root = /var/db/tlsproxy/ca          # default ./ca
 
 [[host]]
+listener = https
 pattern = *.lab.internal
 cert = local-ca:ca002                  # plain "local-ca" is ca001
 cert_domains = *.dev.lab.internal, git.lab.internal   # optional: names or globs; others are refused
 target_host = 10.0.0.30
+target_port = 443
 upstream_tls = false
 ```
 
@@ -684,12 +698,14 @@ upstream_tls = false
 
 ```toml
 [[host]]
+listener = https
 pattern = *.customers.example.com
 cert = auto
 cert_domains = www.customers.example.com        # optional: always issued, never put to the script
 cert_validate_script = /usr/local/etc/tlsproxy/domains.sh
 # cert_validate_args = ["${host}"]              # the default: the name alone
 target_host = 192.168.1.50
+target_port = 443
 ```
 
 ```sh
@@ -833,6 +849,7 @@ secure_cookie = true               # require HTTPS for browser sessions
 
 # Publish it through the proxy itself, with a real certificate:
 [[host]]
+listener = https
 pattern = console.example.com
 cert = auto
 upstream_tls = false
@@ -866,10 +883,8 @@ written to it (and every change to the file shows up in the console).
   details: client, proxy and upstream addresses, bytes each way, the state of
   each direction, SNI and how TLS was handled.
   - **Add / Edit / Delete a listener** with the same guided form: name, bind
-    and port, then any overrides. The new port opens (or moves) at once. Adding
-    a second listener gives every rule without a `listener =` line the first
-    listener's name, as with two listeners each rule names its own; the form
-    says so before anything is saved. Renaming a listener renames it in its rules. A listener
+    and port, then any overrides. The new port opens (or moves) at once.
+    Renaming a listener renames it in its rules. A listener
     that still has rules cannot be deleted.
   - **Stop / Start a listener.** Stop closes its port and its connections;
     like stopping a rule, it is not written to the file and lasts until Start

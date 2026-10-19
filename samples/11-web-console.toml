@@ -45,6 +45,7 @@ hostnames = console.example.com    # names the console may be addressed by, besi
 # new config is applied at once.
 
 [[host]]
+listener = https
 pattern = console.example.com
 cert = auto
 upstream_tls = false               # the console is plain HTTP
@@ -52,9 +53,12 @@ target_host = 127.0.0.1
 target_port = 9443
 
 [[host]]
+listener = https
 pattern = www.example.com
 target_host = 10.0.0.10
+target_port = 443
 
 [[host]]
+listener = https
 pattern = ANY
 action = deny

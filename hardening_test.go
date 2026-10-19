@@ -331,11 +331,11 @@ func TestIPAddressIsNotAnSNI(t *testing.T) {
 		t.Fatalf("a name made of numbers is still a name: %q %v", sni, err)
 	}
 	// A catch-all that follows the client's SNI is an open relay: say so.
-	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\ntarget_host=${host}\n")
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\ntarget_host=${host}\ntarget_port=443\n")
 	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "connects to whatever name a client sends") {
 		t.Fatalf("%q", c.Warnings)
 	}
-	if c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.example\\.com\ntarget_host=${host}\n[[host]]\npattern=.*\ntarget_host=fixed.lan\n"); len(c.Warnings) != 0 {
+	if c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=*.example\\.com\ntarget_host=${host}\ntarget_port=443\n[[host]]\nlistener=default\npattern=.*\ntarget_host=fixed.lan\ntarget_port=443\n"); len(c.Warnings) != 0 {
 		t.Fatalf("%q", c.Warnings)
 	}
 }
@@ -344,7 +344,7 @@ func TestIPAddressIsNotAnSNI(t *testing.T) {
 // normal close; one that goes away inside a record is reported as exactly that.
 func TestConnectionEndingInsideATLSRecord(t *testing.T) {
 	ca := newTestCA(t)
-	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=nonotify.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
+	p := startProxy(t, "", fmt.Sprintf("[[host]]\nlistener=default\npattern=nonotify.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 		ca.localCA(t), echoBackend(t, "")))
 	raw, err := net.DialTimeout("tcp", p.addr, T)
 	if err != nil {

@@ -148,7 +148,7 @@ func TestPebbleIssuesOverTLSALPN01(t *testing.T) {
 	// The proxy under test, terminating TLS for two names with cert = auto.
 	certPath := t.TempDir()
 	p := startProxy(t, pb.global(certPath),
-		fmt.Sprintf("[[host]]\npattern=*.acme\\.test\ncert=auto\ncert_domains=www.acme.test, api.acme.test, elsewhere.acme.test\n"+
+		fmt.Sprintf("[[host]]\nlistener=default\npattern=*.acme\\.test\ncert=auto\ncert_domains=www.acme.test, api.acme.test, elsewhere.acme.test\n"+
 			"upstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
 	_, proxyPort, _ := net.SplitHostPort(p.addr)
 
