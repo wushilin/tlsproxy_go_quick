@@ -53,7 +53,8 @@ the full reference as `/etc/tlsproxy/config.toml.example`):
 
 ```sh
 cat > /srv/tlsproxy/etc/config.toml <<'CONFIG'
-[global]
+[[listener]]
+name = https
 port = 443
 
 [console]
@@ -100,7 +101,7 @@ the like); elsewhere it does nothing. Without it, SELinux refuses with
 
 ```sh
 docker logs tlsproxy
-#   listening on default 0.0.0.0:443 with 1 listener(s), 2 rules (...)
+#   listening on https 0.0.0.0:443 with 1 listener(s), 2 rules (...)
 #   console: replaced the plaintext password in /etc/tlsproxy/config.toml with its hash
 #   console: listening on http://0.0.0.0:9443/tlsproxy_quick/ (plain HTTP; password required)
 ```
@@ -166,7 +167,8 @@ binaries with `SHA256SUMS` and `config.toml` to the release.
 ## Configuration
 
 ```toml
-[global]
+[[listener]]
+name = https
 bind = 0.0.0.0
 port = 443
 
@@ -239,7 +241,6 @@ with its default, and a test keeps that file in step with the code:
 
 | key                    | default | meaning                                                              |
 |------------------------|---------|----------------------------------------------------------------------|
-| `bind`                 | 0.0.0.0 | listen address: `0.0.0.0` all IPv4, `::` all IPv6 and IPv4, or specific addresses, several separated by `;` |
 | `handshake_timeout`    | 10      | seconds to receive the whole ClientHello (a slow trickle can't extend it) |
 | `connect_timeout`      | 10      | seconds to resolve and connect to the target                         |
 | `idle_timeout`         | 600     | close after N seconds with no traffic in either direction (0 = never); also reaps half-open connections |
@@ -266,7 +267,7 @@ option is missing from it, from `config.toml` or from this README):
 
 | section | options |
 |---|---|
-| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[global]` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
 | `[[listener]]` | `name` `bind` `port` · `proxy_protocol_from` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
@@ -293,9 +294,9 @@ Samples, each with its expected routing checked by `go test`:
 
 ## Listeners
 
-One port is enough for most setups: `[global] bind` and `port` make one
-listener, named `default`, and every rule belongs to it. For more ports, each
-with its own rules, write `[[listener]]` sections and name the listener in
+Every port the proxy listens on is a `[[listener]]` section, and a file needs
+at least one. With a single listener, rules may leave out `listener =`: they
+belong to it. For more ports, each with its own rules, name the listener in
 every rule:
 
 ```toml
@@ -325,14 +326,15 @@ target_port = 9092
 | `[[listener]]` | default | meaning |
 |---|---|---|
 | `name` | (required) | up to 64 letters, digits, spaces and `-` `_` `@` `#` `~` `(` `)` `[` `]` `<` `>` `"` `'`, no space at either end; unique, ignoring case. What `listener =` in a rule refers to. Quote it as a TOML string when it has spaces or quotes: `name = "Kafka (EU)"`, `listener = "Kafka (EU)"` (the console does this for you) |
-| `bind` | 0.0.0.0 | as in `[global]` |
+| `bind` | 0.0.0.0 | listen address: `0.0.0.0` all IPv4, `::` all IPv6 and IPv4, or specific addresses, several separated by `;` |
 | `port` | (required) | |
 | `proxy_protocol_from` `handshake_timeout` `idle_timeout` `half_close_timeout` | `[global]` | the same settings, for this listener only |
 | `max_connections` | (none) | a cap for this listener, on top of the global `max_connections` |
 | `max_aggregated_speed` `max_single_connection_speed` | unlimited | as for a rule (see [Speed limits](#speed-limits)), for every connection on this listener; they apply on top of each rule's own |
 
-- With `[[listener]]` sections, `bind` and `port` belong in them: setting
-  them in `[global]` too is a load error.
+- `bind` and `port` exist only in `[[listener]]`. In `[global]` they are a
+  load error; the message shows the `[[listener]]` to write instead. (Before
+  v2.0.0 they made an implicit listener named `default`.)
 - Each listener has its own rules, so the same pattern can appear on several
   listeners, and a name that matches nothing *on that listener* is denied.
 - With two or more listeners every rule must name its `listener`; an untagged
@@ -524,7 +526,6 @@ certificate). With `cert`, the proxy terminates TLS for that rule:
 
 ```toml
 [global]
-port = 443
 cert_path = /var/db/tlsproxy/certs
 acme_agree_tos = true                 # required for cert = auto
 acme_email = admin@example.com        # optional
@@ -864,11 +865,10 @@ written to it (and every change to the file shows up in the console).
   details: client, proxy and upstream addresses, bytes each way, the state of
   each direction, SNI and how TLS was handled.
   - **Add / Edit / Delete a listener** with the same guided form: name, bind
-    and port, then any overrides. The new port opens (or moves) at once. A
-    file that has no `[[listener]]` yet is converted on the first one: `bind`
-    and `port` move from `[global]` into a `[[listener]]` named `default`, and
-    every existing rule gets `listener = default`; the form says so before
-    anything is saved. Renaming a listener renames it in its rules. A listener
+    and port, then any overrides. The new port opens (or moves) at once. Adding
+    a second listener gives every rule without a `listener =` line the first
+    listener's name, as with two listeners each rule names its own; the form
+    says so before anything is saved. Renaming a listener renames it in its rules. A listener
     that still has rules cannot be deleted.
   - **Stop / Start a listener.** Stop closes its port and its connections;
     like stopping a rule, it is not written to the file and lasts until Start

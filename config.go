@@ -29,9 +29,12 @@ import (
 const MinReloadInterval = 5
 
 type Config struct {
-	sourceHash         string   // exact parsed bytes, for password rewrites and reload change detection
-	Bind               string   // as configured, normalised: "0.0.0.0", or "192.0.2.1; 2001:db8::1"
-	Binds              []string // the addresses in Bind
+	sourceHash string // exact parsed bytes, for password rewrites and reload change detection
+	// The listener's bind and port: the first [[listener]] as parsed, this
+	// copy's own after ForListener. Bind is normalised: "0.0.0.0", or
+	// "192.0.2.1; 2001:db8::1"; Binds holds its addresses.
+	Bind               string
+	Binds              []string
 	Port               int
 	HandshakeTimeout   time.Duration
 	ConnectTimeout     time.Duration
@@ -68,7 +71,7 @@ type Config struct {
 
 	Console   *ConsoleConfig // the [console] section; nil = no web console
 	Rules     []Rule         // in file order
-	Listeners []Listener     // in file order; one implicit "default" from [global] when the file has none
+	Listeners []Listener     // in file order; at least one
 	// Redirect is the port 80 listener of http_to_https_redirect = true, nil
 	// when off. It has no rules and is not in Listeners: it answers every
 	// plain HTTP request with a redirect to https:// (see redirect.go).
@@ -84,7 +87,7 @@ type Config struct {
 // nil overrides mean the [global] value applies.
 type Listener struct {
 	Name  string
-	Line  int // 0 = implicit, made from [global] bind and port
+	Line  int
 	Bind  string
 	Binds []string
 	Port  int
@@ -569,8 +572,6 @@ const (
 func ParseConfig(text string) (*Config, error) {
 	cfg := &Config{
 		sourceHash:         fileHash([]byte(text)),
-		Bind:               "0.0.0.0",
-		Binds:              []string{"0.0.0.0"},
 		HandshakeTimeout:   10 * time.Second,
 		ConnectTimeout:     10 * time.Second,
 		IdleTimeout:        600 * time.Second,
@@ -592,7 +593,6 @@ func ParseConfig(text string) (*Config, error) {
 		AcmeDirectory:       LetsEncryptDirectory,
 	}
 	poolMaxIdle := -1
-	globalListenLine := 0 // where [global] sets bind or port
 	httpRedirect := false
 	var raws []rawRule
 	section := ""
@@ -672,16 +672,10 @@ func ParseConfig(text string) (*Config, error) {
 		switch section {
 		case "global":
 			switch key {
-			case "bind":
-				if cfg.Binds, err = parseBinds(value); err != nil {
-					return nil, fail("%v", err)
-				}
-				cfg.Bind, globalListenLine = strings.Join(cfg.Binds, "; "), lineno
-			case "port":
-				if cfg.Port, err = parsePort(value); err != nil {
-					return nil, fail("%v", err)
-				}
-				globalListenLine = lineno
+			case "bind", "port":
+				return nil, fail("[global] %s is no longer supported: every listen address is a [[listener]] section, as in\n\n"+
+					"  [[listener]]\n  name = https\n  bind = 0.0.0.0\n  port = 443\n\n"+
+					"move bind and port there (rules without listener = belong to it while it is the only one)", key)
 			case "handshake_timeout":
 				err = secs(&cfg.HandshakeTimeout)
 			case "connect_timeout":
@@ -881,7 +875,7 @@ func ParseConfig(text string) (*Config, error) {
 		poolMaxIdle = 2 * cfg.MaxConnections
 	}
 	cfg.BufferPoolMaxIdle = poolMaxIdle
-	if err := cfg.resolveListeners(globalListenLine); err != nil {
+	if err := cfg.resolveListeners(); err != nil {
 		return nil, err
 	}
 	if httpRedirect {
@@ -1006,7 +1000,7 @@ func ParseConfig(text string) (*Config, error) {
 		if v4Only {
 			for _, ip := range cfg.PublicIPs {
 				if a, _ := netip.ParseAddr(ip); a.Is6() {
-					cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: public_ip_address lists the IPv6 address %s, but bind = %s listens on IPv4 only. The CA prefers IPv6 when a name has an AAAA record, and would not reach this proxy; use bind = :: to listen on both", ip, cfg.Bind))
+					cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("cert = auto: public_ip_address lists the IPv6 address %s, but this proxy listens on IPv4 only (%s). The CA prefers IPv6 when a name has an AAAA record, and would not reach this proxy; use bind = :: to listen on both", ip, listenAddrs(cfg)))
 					break
 				}
 			}
@@ -1133,18 +1127,10 @@ func (c *Config) listenerNames() string {
 	return strings.Join(names, ", ")
 }
 
-// resolveListeners checks the [[listener]] sections, or makes the implicit
-// one from [global] bind and port when there are none.
-func (c *Config) resolveListeners(globalListenLine int) error {
+// resolveListeners checks the [[listener]] sections.
+func (c *Config) resolveListeners() error {
 	if len(c.Listeners) == 0 {
-		if c.Port == 0 {
-			return fmt.Errorf("[global] port is required (or define [[listener]] sections)")
-		}
-		c.Listeners = []Listener{{Name: "default", Bind: c.Bind, Binds: c.Binds, Port: c.Port}}
-		return nil
-	}
-	if globalListenLine != 0 {
-		return fmt.Errorf("line %d: with [[listener]] sections, bind and port belong in them, not in [global]", globalListenLine)
+		return fmt.Errorf("no [[listener]] section: add one, e.g. [[listener]] with name = https, bind = 0.0.0.0, port = 443")
 	}
 	for i := range c.Listeners {
 		l := &c.Listeners[i]
@@ -1206,10 +1192,7 @@ func (c *Config) makeRedirectListener() error {
 		if l.Port != 80 {
 			continue
 		}
-		where := "[global] port"
-		if l.Line > 0 {
-			where = fmt.Sprintf("[[listener]] %s at line %d", l.Name, l.Line)
-		}
+		where := fmt.Sprintf("[[listener]] %s at line %d", l.Name, l.Line)
 		for _, a := range l.Binds {
 			for _, b := range binds {
 				if a == b || isWildcard(a) || isWildcard(b) {

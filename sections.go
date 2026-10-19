@@ -263,33 +263,10 @@ func editRules(text string, line int, values map[string]string, del bool) (strin
 	return strings.Join(out, "\n"), err
 }
 
-// makeListenersExplicit turns a file without [[listener]] sections into one
-// with a [[listener]] named "default": bind and port move there from
-// [global], and every rule is tagged with listener = default. It returns the
-// line of the new section and what it did, for the editor to show.
-func makeListenersExplicit(text string) (string, int, []string, error) {
-	lines := strings.Split(text, "\n")
-	if len(sectionBlocks(lines, listenerHeader)) > 0 {
-		return text, 0, nil, nil
-	}
-	values := map[string]string{"name": "default"}
-	var notes []string
-	for _, g := range sectionBlocks(lines, "[global]") {
-		moved := blockValues(lines, g)
-		for _, k := range []string{"bind", "port"} {
-			if v, ok := moved[k]; ok {
-				values[k] = v
-			}
-		}
-		var err error
-		if lines, err = setValues(lines, g, nil, map[string]string{"bind": "", "port": ""}); err != nil {
-			return "", 0, nil, err
-		}
-	}
-	if values["port"] == "" {
-		return "", 0, nil, fmt.Errorf("[global] has no port to make the default listener from")
-	}
-	notes = append(notes, fmt.Sprintf("Moves bind and port from [global] into a new [[listener]] named default (%s port %s)", orDefault(values["bind"], "0.0.0.0"), values["port"]))
+// tagUntaggedRules adds listener = name to every rule without a listener =
+// line: what a second listener needs, as untagged rules belong to the only
+// one. It returns the new lines and how many rules it tagged.
+func tagUntaggedRules(lines []string, name string) ([]string, int) {
 	tagged := 0
 	for {
 		var untagged *block
@@ -300,21 +277,11 @@ func makeListenersExplicit(text string) (string, int, []string, error) {
 			}
 		}
 		if untagged == nil {
-			break
+			return lines, tagged
 		}
-		lines = slices.Insert(lines, untagged.start+1, "listener = default")
+		lines = slices.Insert(lines, untagged.start+1, "listener = "+name)
 		tagged++
 	}
-	if tagged > 0 {
-		notes = append(notes, fmt.Sprintf("Tags %d existing rule(s) with listener = default: with several listeners, every rule names its own", tagged))
-	}
-	sec, _ := newBlock(listenerHeader, listenerKeys, values)
-	at := len(lines)
-	if hb := hostBlocks(lines); len(hb) > 0 {
-		at = hb[0].start
-	}
-	lines = insertBlock(lines, at, sec)
-	return strings.Join(lines, "\n"), sectionBlocks(lines, listenerHeader)[0].start + 1, notes, nil
 }
 
 func orDefault(v, def string) string {
@@ -325,30 +292,15 @@ func orDefault(v, def string) string {
 }
 
 // editListeners applies one change to a [[listener]]: values for the one on
-// line (0 adds one; implicit edits the listener made from [global], which
-// first becomes a real section), or its deletion. A rename retags the rules
+// line (0 adds one), or its deletion. Adding a second listener tags the
+// rules that had none with the first one's name; a rename retags the rules
 // that named the old name. It returns the new text, the line of the edited
 // section (0 after a delete) and notes on any change beyond the section.
-func editListeners(text string, line int, implicit bool, values map[string]string, del bool) (string, int, []string, error) {
+func editListeners(text string, line int, values map[string]string, del bool) (string, int, []string, error) {
 	if err := checkKeys(listenerKeys, values, listenerHeader); err != nil {
 		return "", 0, nil, err
 	}
 	var notes []string
-	if implicit || line == 0 {
-		if del {
-			return "", 0, nil, fmt.Errorf("the listener made from [global] cannot be deleted; change [global] bind and port instead")
-		}
-		var at int
-		var err error
-		var more []string
-		if text, at, more, err = makeListenersExplicit(text); err != nil {
-			return "", 0, nil, err
-		}
-		notes = append(notes, more...)
-		if implicit {
-			line = at
-		}
-	}
 	lines := strings.Split(text, "\n")
 	blocks := sectionBlocks(lines, listenerHeader)
 	if line == 0 { // add, after the last listener
@@ -356,7 +308,21 @@ func editListeners(text string, line int, implicit bool, values map[string]strin
 		if err != nil {
 			return "", 0, nil, err
 		}
-		at := blocks[len(blocks)-1].end
+		if len(blocks) == 1 {
+			if first := blockValues(lines, blocks[0])["name"]; first != "" {
+				var tagged int
+				if lines, tagged = tagUntaggedRules(lines, first); tagged > 0 {
+					notes = append(notes, fmt.Sprintf("Tags %d existing rule(s) with listener = %s: with several listeners, every rule names its own", tagged, first))
+					blocks = sectionBlocks(lines, listenerHeader)
+				}
+			}
+		}
+		at := len(lines)
+		if len(blocks) > 0 {
+			at = blocks[len(blocks)-1].end
+		} else if hb := hostBlocks(lines); len(hb) > 0 {
+			at = hb[0].start
+		}
 		lines = slices.Concat(lines[:at], []string{""}, sec, lines[at:])
 		return strings.Join(lines, "\n"), at + 2, notes, nil
 	}

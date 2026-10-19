@@ -4,16 +4,6 @@
     "about": "Settings for the whole proxy. Listeners may override some of them.",
     "keys": [
       {
-        "key": "bind",
-        "default": "0.0.0.0",
-        "meaning": "Listen address of the implicit listener: 0.0.0.0 all IPv4, :: all IPv6 and IPv4, or addresses separated by ;. Not allowed with [[listener]] sections."
-      },
-      {
-        "key": "port",
-        "default": "(required without [[listener]])",
-        "meaning": "Listen port of the implicit listener. Not allowed with [[listener]] sections."
-      },
-      {
         "key": "handshake_timeout",
         "default": "10",
         "meaning": "Seconds to receive the whole ClientHello; a slow trickle can't extend it."
@@ -71,7 +61,7 @@
       {
         "key": "http_to_https_redirect",
         "default": "false",
-        "meaning": "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the rules on 443 decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."
+        "meaning": "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the HTTPS listeners' rules decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."
       },
       {
         "key": "short_read_delay_us",
@@ -157,7 +147,7 @@
   },
   {
     "section": "[[listener]]",
-    "about": "A port with its own rules. Without any, one listener named default is made from [global] bind and port. Overrides apply to this listener only.",
+    "about": "A port with its own rules; at least one is required. Overrides apply to this listener only.",
     "keys": [
       {
         "key": "name",
@@ -167,7 +157,7 @@
       {
         "key": "bind",
         "default": "0.0.0.0",
-        "meaning": "Listen address, as in [global]."
+        "meaning": "Listen address: 0.0.0.0 all IPv4, :: all IPv6 and IPv4, or addresses separated by ;."
       },
       {
         "key": "port",

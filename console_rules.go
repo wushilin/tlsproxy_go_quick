@@ -85,8 +85,7 @@ type ruleView struct {
 
 type listenerView struct {
 	Name              string            `json:"name"`
-	Line              int               `json:"line"` // 0: the implicit listener made from [global]
-	Implicit          bool              `json:"implicit"`
+	Line              int               `json:"line"`
 	Removed           bool              `json:"removed,omitempty"`  // gone from the file; its connections remain
 	Redirect          bool              `json:"redirect,omitempty"` // the http_to_https_redirect listener: Start/Stop only
 	Bind              string            `json:"bind"`
@@ -302,13 +301,10 @@ func (c *Console) state() consoleState {
 	}
 	for i := range shown.Listeners {
 		l := &shown.Listeners[i]
-		lv := listenerView{Name: l.Name, Line: l.Line, Implicit: l.Line == 0, Bind: l.Bind, Port: l.Port,
+		lv := listenerView{Name: l.Name, Line: l.Line, Bind: l.Bind, Port: l.Port,
 			Values: values(l.Line), MaxConnections: l.MaxConnections,
 			HandshakeTimeout: secondsOrNil(l.HandshakeTimeout), IdleTimeout: secondsOrNil(l.IdleTimeout), HalfCloseTimeout: secondsOrNil(l.HalfCloseTimeout),
 			AggSpeed: l.MaxAggregatedSpeed, ConnSpeed: l.MaxSingleConnectionSpeed}
-		if l.Line == 0 {
-			lv.Values = map[string]string{}
-		}
 		if l.ProxyProtocolFrom != nil {
 			var p []string
 			for _, x := range *l.ProxyProtocolFrom {
@@ -679,7 +675,6 @@ func (c *Console) ruleEdit(w http.ResponseWriter, r *http.Request, del bool) {
 
 type listenerEditRequest struct {
 	Line      int
-	Implicit  bool // edit the listener made from [global]
 	BaseHash  string
 	BaseMtime string
 	Values    map[string]string
@@ -711,7 +706,7 @@ func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []by
 			}
 		}
 	}
-	if full, at, notes, err = editListeners(string(onDisk), req.Line, req.Implicit, req.Values, del); err != nil {
+	if full, at, notes, err = editListeners(string(onDisk), req.Line, req.Values, del); err != nil {
 		return
 	}
 	if cfg, err = ParseConfig(full); err == nil {
@@ -770,8 +765,6 @@ func (c *Console) listenerEdit(w http.ResponseWriter, r *http.Request, del bool)
 	switch {
 	case del:
 		what = fmt.Sprintf("listener at line %d deleted", req.Line)
-	case req.Implicit:
-		what = "the [global] listener turned into a [[listener]]"
 	case req.Line > 0:
 		what = fmt.Sprintf("listener at line %d changed", req.Line)
 	}

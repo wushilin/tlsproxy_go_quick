@@ -29,7 +29,7 @@ func TestParseRate(t *testing.T) {
 }
 
 func TestSpeedSettings(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=a.test\ntarget_host=x\nmax_aggregated_speed=1Gbit\nmax_single_connection_speed = \"15MiB/s\"\n")
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=a.test\ntarget_host=x\nmax_aggregated_speed=1Gbit\nmax_single_connection_speed = \"15MiB/s\"\n")
 	if r := c.Rules[0]; r.MaxAggregatedSpeed != 125e6 || r.MaxSingleConnectionSpeed != 15<<20 {
 		t.Fatal(r.MaxAggregatedSpeed, r.MaxSingleConnectionSpeed)
 	}
@@ -37,7 +37,7 @@ func TestSpeedSettings(t *testing.T) {
 		"pattern=a.test\naction=deny\nmax_aggregated_speed=1MB":           "max_aggregated_speed makes no sense on a deny rule",
 		"pattern=a.test\ntarget_host=x\nmax_single_connection_speed=fast": "max_single_connection_speed: invalid rate",
 	} {
-		_, err := ParseConfig("[global]\nport=1\n[[host]]\n" + text + "\n")
+		_, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\n" + text + "\n")
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", text, err, want)
 		}
@@ -47,7 +47,7 @@ func TestSpeedSettings(t *testing.T) {
 // A reload keeps a rule's shared budget when its pattern and rate are
 // unchanged, and starts a new one when the rate changes.
 func TestAggregateBudgetSurvivesReload(t *testing.T) {
-	text := "[global]\nport=1\n[[host]]\npattern=a.test\ntarget_host=x\nmax_aggregated_speed=%s\n"
+	text := "[[listener]]\nname=default\nport=1\n[[host]]\npattern=a.test\ntarget_host=x\nmax_aggregated_speed=%s\n"
 	parse := func(rate string) *Config { return mustParse(t, strings.Replace(text, "%s", rate, 1)) }
 	rt1 := newRuntime(parse("1MB"), nil)
 	rt2 := newRuntime(parse("1MB"), rt1)
@@ -107,8 +107,8 @@ func TestSpeedLimits(t *testing.T) {
 // buffer_size outside 4 KiB..128 KiB is clamped, and the config says so.
 func TestBufferSizeIsClampedWithWarning(t *testing.T) {
 	for in, want := range map[string]int{"512": minBufferSize, "1048576": maxBufferSize, "65536": 65536} {
-		c := mustParse(t, "[global]\nport=1\nbuffer_size="+in+"\n")
-		warned := len(c.Warnings) == 1 && strings.Contains(c.Warnings[0], "line 3: buffer_size = "+in+" is outside 4096..131072; using "+strconv.Itoa(want))
+		c := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nbuffer_size="+in+"\n")
+		warned := len(c.Warnings) == 1 && strings.Contains(c.Warnings[0], "line 5: buffer_size = "+in+" is outside 4096..131072; using "+strconv.Itoa(want))
 		if c.BufferSize != want || warned != (in != "65536") {
 			t.Errorf("buffer_size=%s: got %d, warnings %q", in, c.BufferSize, c.Warnings)
 		}

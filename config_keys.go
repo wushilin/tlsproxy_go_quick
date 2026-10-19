@@ -22,8 +22,6 @@ type sectionDoc struct {
 
 var configReference = []sectionDoc{
 	{"[global]", "Settings for the whole proxy. Listeners may override some of them.", []keyDoc{
-		{"bind", "0.0.0.0", "Listen address of the implicit listener: 0.0.0.0 all IPv4, :: all IPv6 and IPv4, or addresses separated by ;. Not allowed with [[listener]] sections."},
-		{"port", "(required without [[listener]])", "Listen port of the implicit listener. Not allowed with [[listener]] sections."},
 		{"handshake_timeout", "10", "Seconds to receive the whole ClientHello; a slow trickle can't extend it."},
 		{"connect_timeout", "10", "Seconds to resolve and connect to the target."},
 		{"idle_timeout", "600", "Close after N seconds with no traffic either way. 0 = never."},
@@ -35,7 +33,7 @@ var configReference = []sectionDoc{
 		{"buffer_pool_max_idle", "2 × max_connections", "Free buffers kept for reuse."},
 		{"splice", "true", "Linux: relay passed-through connections with splice(2), without copying them through the proxy."},
 		{"remember_nonce", "true", "Remember a hash of every ClientHello passed through for 10 seconds (at most 1M, newest win) and refuse one that comes in again: it is this proxy's own connection come back (a name or ${host} target that points at this machine), which would otherwise loop until max_connections. Terminated connections are not covered."},
-		{"http_to_https_redirect", "false", "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the rules on 443 decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."},
+		{"http_to_https_redirect", "false", "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the HTTPS listeners' rules decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."},
 		{"short_read_delay_us", "0", "Pause N microseconds after a short read so data batches up. 0 = off."},
 		{"allow_cache_size", "4096", "Cached allowed name → target decisions. 0 = off."},
 		{"deny_cache_size", "4096", "Cached denied names, kept apart from the allowed ones. 0 = off."},
@@ -53,9 +51,9 @@ var configReference = []sectionDoc{
 		{"io_model", "", "Legacy: accepted and ignored."},
 		{"worker_threads", "", "Legacy: accepted and ignored."},
 	}},
-	{"[[listener]]", "A port with its own rules. Without any, one listener named default is made from [global] bind and port. Overrides apply to this listener only.", []keyDoc{
+	{"[[listener]]", "A port with its own rules; at least one is required. Overrides apply to this listener only.", []keyDoc{
 		{"name", "(required)", "Up to 64 letters, digits, spaces and -_@#~()[]<>\"'; unique ignoring case. What listener = in a rule refers to."},
-		{"bind", "0.0.0.0", "Listen address, as in [global]."},
+		{"bind", "0.0.0.0", "Listen address: 0.0.0.0 all IPv4, :: all IPv6 and IPv4, or addresses separated by ;."},
 		{"port", "(required)", "Listen port. Two listeners can't share a port on the same or a wildcard address."},
 		{"proxy_protocol_from", "[global]", "Overrides [global] for this listener."},
 		{"max_connections", "(no own limit)", "A cap for this listener, on top of the global one."},

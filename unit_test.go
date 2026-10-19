@@ -198,7 +198,8 @@ func TestSNIRejects(t *testing.T) {
 // ---------------------------------------------------------------- config
 
 const sampleConfig = `
-[global]
+[[listener]]
+name=default
 bind=0.0.0.0
 port=8443   # listen port
 
@@ -258,9 +259,9 @@ func TestConfigSample(t *testing.T) {
 }
 
 func TestConfigDefaultsAndValueForms(t *testing.T) {
-	c := mustParse(t, "[global]\r\nport = \"8443\" # quoted number\r\nidle_timeout = 0\r\n"+
+	c := mustParse(t, "[[listener]]\r\nname = 'https'\r\nport = \"8443\" # quoted number\r\n[global]\r\nidle_timeout = 0\r\n"+
 		"[[host]]\r\npattern = \"*.a\\.com\"  # comment\r\ntarget_host = '${1}.b'\r\n")
-	if c.Bind != "0.0.0.0" || c.IdleTimeout != 0 || c.HandshakeTimeout != 10*time.Second ||
+	if c.Bind != "0.0.0.0" || c.Port != 8443 || c.Listeners[0].Name != "https" || c.IdleTimeout != 0 || c.HandshakeTimeout != 10*time.Second ||
 		c.HalfCloseTimeout != 30*time.Second || c.BufferSize != 65536 ||
 		c.BufferPoolMaxIdle != 2*c.MaxConnections || c.ReloadInterval != 5*time.Second {
 		t.Fatalf("%+v", c)
@@ -271,7 +272,7 @@ func TestConfigDefaultsAndValueForms(t *testing.T) {
 }
 
 func TestConfigRouting(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=secret.*.com\naction=deny\n"+
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=secret.*.com\naction=deny\n"+
 		"[[host]]\npattern=ANY\ntarget_host=${host}\ntarget_port=8443\n")
 	if route(t, c, "secret.x.com") != "DENY" || route(t, c, "public.x.com") != "public.x.com:8443" {
 		t.Fatal("the more specific rule must win")
@@ -279,11 +280,11 @@ func TestConfigRouting(t *testing.T) {
 	if route(t, c, "") != "ERROR" { // expands to an empty target host
 		t.Fatal("empty target must be an error")
 	}
-	none := mustParse(t, "[global]\nport=1\n")
+	none := mustParse(t, "[[listener]]\nname=default\nport=1\n")
 	if d := none.Route("a.com"); d.Allow || d.RuleLine != 0 {
 		t.Fatalf("%+v", d)
 	}
-	re := mustParse(t, "[global]\nport=1\n[[host]]\npattern=www.*.example.*\ntarget_host=${1}-${2}.lan\n[[host]]\npattern=*.sample.*\ntarget_host=${1}-${2}.lan\n"+
+	re := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=www.*.example.*\ntarget_host=${1}-${2}.lan\n[[host]]\npattern=*.sample.*\ntarget_host=${1}-${2}.lan\n"+
 		"[[host]]\npattern=node*.x\ntarget_host=node${1}-mgmt\n[[host]]\npattern=*y\ntarget_host=got${1}.lan\n")
 	for sni, want := range map[string]string{
 		"www.shop.example.com": "shop-com.lan:443", "API.Sample.NET": "api-net.lan:443",
@@ -296,7 +297,7 @@ func TestConfigRouting(t *testing.T) {
 }
 
 func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern = NONE\ntarget_host = 10.0.0.99\ntarget_port = 8443\n"+
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern = NONE\ntarget_host = 10.0.0.99\ntarget_port = 8443\n"+
 		"[[host]]\npattern = *.ok\ntarget_host = ${1}.lan\n")
 	for sni, want := range map[string]string{
 		"": "10.0.0.99:8443", "a.ok": "a.lan:443",
@@ -309,8 +310,8 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 	}
 	// Any letter case, quoted or not; and it can deny ahead of a catch-all allow.
 	for _, form := range []string{"none", "None", `"NONE"`, "'none'"} {
-		c := mustParse(t, "[global]\nport=1\n[[host]]\npattern="+form+"\naction=deny\n[[host]]\npattern=.*\ntarget_host=${host}\n")
-		if d := c.Route(""); d.Allow || d.RuleLine != 3 {
+		c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern="+form+"\naction=deny\n[[host]]\npattern=.*\ntarget_host=${host}\n")
+		if d := c.Route(""); d.Allow || d.RuleLine != 4 {
 			t.Errorf("%s: %+v", form, d)
 		}
 		if got := route(t, c, "x.com"); got != "x.com:443" {
@@ -318,21 +319,21 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 		}
 	}
 	// The literal host name is still reachable with an explicit regex.
-	lit := mustParse(t, "[global]\nport=1\n[[host]]\npattern=^none$\ntarget_host=n.lan\n")
+	lit := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=^none$\ntarget_host=n.lan\n")
 	if route(t, lit, "none") != "n.lan:443" || route(t, lit, "") != "DENY" {
 		t.Error("^none$ must match the host name, not a missing SNI")
 	}
 	// No groups to expand: ${host} is empty (route error), ${1} doesn't exist (load error).
-	if got := route(t, mustParse(t, "[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=${host}\n"), ""); got != "ERROR" {
+	if got := route(t, mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=NONE\ntarget_host=${host}\n"), ""); got != "ERROR" {
 		t.Error(got)
 	}
-	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=NONE\ntarget_host=${1}.lan\n"); err == nil {
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=NONE\ntarget_host=${1}.lan\n"); err == nil {
 		t.Error("${1} with pattern NONE must be rejected")
 	}
 }
 
 func TestConfigIgnoresLegacyKeys(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\nio_model=events\nworker_threads=4\nshort_read_delay_us=50\n")
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nio_model=events\nworker_threads=4\nshort_read_delay_us=50\n")
 	if c.ShortReadDelay != 50*time.Microsecond {
 		t.Fatal(c.ShortReadDelay)
 	}
@@ -344,21 +345,21 @@ func TestConfigIgnoresLegacyKeys(t *testing.T) {
 func TestConfigErrors(t *testing.T) {
 	for _, text := range []string{
 		"[global]\nbind=1.2.3.4\n", // no port
-		"[global]\nport=70000\n", "[global]\nport=0\n", "[global]\nport=abc\n", "port=1\n",
-		"[global]\nport=1\n[other]\n", "[global]\nport=1\nfoo=bar\n", "[global]\nport=1\nnovalue\n", "[global\nport=1\n",
-		"[global]\nport=1\nbuffer_size=lots\n", "[global]\nport=1\nbuffer_size=-1\n",
-		"[global]\nport=1\nreload_interval=1\n", "[global]\nport=1\nreload_interval=4\n",
-		"[global]\nport=1\n[[host]]\npattern=a\n",                            // allow without target
-		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=10.0.0.1:8080\n", // the port belongs in target_port
-		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=[::1]:443\n", "[global]\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=${1}:8080\n",
-		"[global]\nport=1\n[[host]]\npattern=a\naction=nope\n",
-		"[global]\nport=1\n[[host]]\npattern=\"abc\n", "[global]\nport=1\n[[host]]\npattern='abc\n",
-		"[global]\nport=1\n[[host]]\npattern=\"a\" junk\n",
-		"[global]\nport=1\n[[host]]\npattern=(\ntarget_host=x\n", // bad regex
-		"[global]\nport=1\n[[host]]\npattern=a\ntarget_host=x\ntarget_port=0\n",
-		"[global]\nport=1\n[[host]]\ntarget_host=x\n", // no pattern
-		"[global]\nport=1\n[[host]]\npattern=a\ncolor=red\n",
-		"[global]\nport=1\n[[host]]\npattern=.*\ntarget_host=${3}\n", // no such group
+		"[[listener]]\nname=default\nport=70000\n", "[[listener]]\nname=default\nport=0\n", "[[listener]]\nname=default\nport=abc\n", "port=1\n",
+		"[[listener]]\nname=default\nport=1\n[other]\n", "[[listener]]\nname=default\nport=1\n[global]\nfoo=bar\n", "[[listener]]\nname=default\nport=1\n[global]\nnovalue\n", "[global\nport=1\n",
+		"[[listener]]\nname=default\nport=1\n[global]\nbuffer_size=lots\n", "[[listener]]\nname=default\nport=1\n[global]\nbuffer_size=-1\n",
+		"[[listener]]\nname=default\nport=1\n[global]\nreload_interval=1\n", "[[listener]]\nname=default\nport=1\n[global]\nreload_interval=4\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=a\n",                            // allow without target
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=a\ntarget_host=10.0.0.1:8080\n", // the port belongs in target_port
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=a\ntarget_host=[::1]:443\n", "[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=${1}:8080\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=a\naction=nope\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=\"abc\n", "[[listener]]\nname=default\nport=1\n[[host]]\npattern='abc\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=\"a\" junk\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=(\ntarget_host=x\n", // bad regex
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=a\ntarget_host=x\ntarget_port=0\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\ntarget_host=x\n", // no pattern
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=a\ncolor=red\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\ntarget_host=${3}\n", // no such group
 	} {
 		if _, err := ParseConfig(text); err == nil {
 			t.Errorf("should fail: %q", text)
@@ -650,15 +651,15 @@ func TestPatternKinds(t *testing.T) {
 		".x.com":              "not a host name",
 		"x.com.":              "not a host name",
 	} {
-		_, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=" + pattern + "\ntarget_host=a\n")
-		if err == nil || !strings.Contains(err.Error(), hint) || !strings.Contains(err.Error(), "line 3") {
+		_, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=" + pattern + "\ntarget_host=a\n")
+		if err == nil || !strings.Contains(err.Error(), hint) || !strings.Contains(err.Error(), "line 4") {
 			t.Errorf("%q: %v", pattern, err)
 		}
 	}
 }
 
 func TestWildcardsStayWithinALabel(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\n"+
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n"+
 		"[[host]]\npattern=*.abc.com\ntarget_host=one-${1}\n"+
 		"[[host]]\npattern=abc*.abc.com\ntarget_host=part-${1}\n"+
 		"[[host]]\npattern=*.*.abc.com\ntarget_host=${2}-${1}-${host}\n"+
@@ -681,10 +682,10 @@ func TestWildcardsStayWithinALabel(t *testing.T) {
 		}
 	}
 	// A reference to a * that is not there is a load error, as it always was for groups.
-	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=${2}.lan\n"); err == nil {
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.x.com\ntarget_host=${2}.lan\n"); err == nil {
 		t.Error("${2} with one * should be rejected")
 	}
-	if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=ANY\ntarget_host=${1}.lan\n"); err == nil {
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=ANY\ntarget_host=${1}.lan\n"); err == nil {
 		t.Error("${1} with ANY should be rejected: only ${host} exists")
 	}
 }
@@ -692,7 +693,7 @@ func TestWildcardsStayWithinALabel(t *testing.T) {
 func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
 	// Broadest first: under first-match-wins ANY would take everything.
 	// The wildcard is a bare value: no quotes are needed after the "=".
-	c := mustParse(t, "[global]\nport=1\n"+
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n"+
 		"[[host]]\npattern = ANY\ntarget_host=catchall\n"+
 		"[[host]]\npattern = *.*.wushilin.net\ntarget_host=deep-${1}-${2}\n"+
 		"[[host]]\npattern = *.wushilin.net   # one label\ntarget_host=wild-${1}\n"+
@@ -717,21 +718,21 @@ func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
 			t.Errorf("%q: got %s, want %s", sni, got, want)
 		}
 	}
-	if d := c.Route("vq.wushilin.net"); d.Rule.Kind != kindLiteral || d.RuleLine != 18 {
+	if d := c.Route("vq.wushilin.net"); d.Rule.Kind != kindLiteral || d.RuleLine != 19 {
 		t.Fatalf("%+v", d)
 	}
 	// Reading the file top to bottom would give other answers: say so, once.
 	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "evaluated by specificity, not file order") ||
-		!strings.Contains(c.Warnings[0], "line 18 (VQ.Wushilin.Net, literal) wins over line 3 (ANY, catch-all)") {
+		!strings.Contains(c.Warnings[0], "line 19 (VQ.Wushilin.Net, literal) wins over line 4 (ANY, catch-all)") {
 		t.Fatalf("%q", c.Warnings)
 	}
 	// A file already written most specific first gets no such note.
-	if c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=none\ntarget_host=a\n[[host]]\npattern=a.x.com\ntarget_host=a\n"+
+	if c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=none\ntarget_host=a\n[[host]]\npattern=a.x.com\ntarget_host=a\n"+
 		"[[host]]\npattern=*.x.com\ntarget_host=a\n[[host]]\npattern=*.y.com\ntarget_host=a\n[[host]]\npattern=b.z.com\ntarget_host=a\n[[host]]\npattern=.*\naction=deny\n"); len(c.Warnings) != 0 {
 		t.Fatalf("%q", c.Warnings)
 	}
 	// Equally specific wildcards keep their file order.
-	r := mustParse(t, "[global]\nport=1\n[[host]]\npattern=a*.x.com\ntarget_host=first\n[[host]]\npattern=*a.x.com\ntarget_host=second\n")
+	r := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=a*.x.com\ntarget_host=first\n[[host]]\npattern=*a.x.com\ntarget_host=second\n")
 	if got := route(t, r, "a.x.com"); got != "first:443" {
 		t.Fatal(got)
 	}
@@ -742,7 +743,7 @@ func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
 		"same wildcard":      "[[host]]\npattern=*.x.com\ntarget_host=a\n[[host]]\npattern=^*\\.X.com$\naction=deny\n",
 		"two NONE rules":     "[[host]]\npattern=NONE\ntarget_host=a\n[[host]]\npattern=none\naction=deny\n",
 	} {
-		if _, err := ParseConfig("[global]\nport=1\n" + text); err == nil {
+		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n" + text); err == nil {
 			t.Errorf("%s: should be rejected", name)
 		}
 	}
@@ -760,7 +761,7 @@ func TestTargetReferences(t *testing.T) {
 		"x${1}${2}.lan": "xapieu.lan",
 		"fixed.lan":     "fixed.lan",
 	} {
-		c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=*.*.example.com\ntarget_host="+target+"\n")
+		c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.*.example.com\ntarget_host="+target+"\n")
 		if got := route(t, c, "api.eu.example.com"); got != want+":443" {
 			t.Errorf("%s: %s, want %s", target, got, want)
 		}
@@ -779,7 +780,7 @@ func TestTargetReferences(t *testing.T) {
 		"${1|UPPER}": "unknown reference ${1|UPPER}",
 		"${3}.lan":   "${3} does not exist",
 	} {
-		_, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=*.*.example.com\ntarget_host=" + target + "\n")
+		_, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.*.example.com\ntarget_host=" + target + "\n")
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", target, err, want)
 		}

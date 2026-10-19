@@ -70,7 +70,7 @@ func TestConsoleSecureCookies(t *testing.T) {
 		{"direct TLS", false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := mustParse(t, "[global]\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie="+strconv.FormatBool(tc.configured)+"\n")
+			cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie="+strconv.FormatBool(tc.configured)+"\n")
 			hash, err := hashPassword("x")
 			if err != nil {
 				t.Fatal(err)
@@ -95,7 +95,7 @@ func TestConsoleSecureCookies(t *testing.T) {
 			}
 		})
 	}
-	if _, err := ParseConfig("[global]\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie=invalid\n"); err == nil {
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie=invalid\n"); err == nil {
 		t.Fatal("invalid secure_cookie accepted")
 	}
 }
@@ -132,11 +132,11 @@ func TestRelayCountsPartialWrites(t *testing.T) {
 }
 
 func TestPasswordRewriteRejectsStaleSnapshot(t *testing.T) {
-	oldText := "[global]\nport=443\n[console]\nport=9443\npassword=old-password\n"
+	oldText := "[[listener]]\nname=default\nport=443\n[console]\nport=9443\npassword=old-password\n"
 	for name, newText := range map[string]string{
 		"new password":    strings.ReplaceAll(oldText, "old-password", "new-password"),
 		"unrelated edit":  oldText + "# newer edit\n",
-		"console removed": "[global]\nport=443\n",
+		"console removed": "[[listener]]\nname=default\nport=443\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.toml")
@@ -175,7 +175,7 @@ func TestPasswordRewriteRejectsStaleSnapshot(t *testing.T) {
 }
 
 func TestCertificateReloadCancelsIssuance(t *testing.T) {
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=removed.example.com\ncert=auto\ntarget_host=127.0.0.1\n", t.TempDir()))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=removed.example.com\ncert=auto\ntarget_host=127.0.0.1\n", t.TempDir()))
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -201,14 +201,14 @@ func TestCertificateReloadCancelsIssuance(t *testing.T) {
 	}
 	// A rejected config must leave the current generation alive.
 	// (It parses, but names a CA that doesn't exist: Apply refuses it.)
-	bad := mustParse(t, "[global]\nport=443\nca_root="+t.TempDir()+"\n[[host]]\npattern=ANY\ncert=local-ca:ca009\ntarget_host=127.0.0.1\n")
+	bad := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nca_root="+t.TempDir()+"\n[[host]]\npattern=ANY\ncert=local-ca:ca009\ntarget_host=127.0.0.1\n")
 	if err := m.Apply(bad); err == nil {
 		t.Fatal("bad config accepted")
 	}
 	if ctx.Err() != nil {
 		t.Fatal("rejected config canceled a current job")
 	}
-	newCfg := mustParse(t, "[global]\nport=443\n")
+	newCfg := mustParse(t, "[[listener]]\nname=default\nport=443\n")
 	if err := m.Apply(newCfg); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestCertificateReloadCancelsIssuance(t *testing.T) {
 }
 
 func TestCertificateInstallRejectsObsoleteResult(t *testing.T) {
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=commit.example.com\ncert=auto\ntarget_host=127.0.0.1\n", t.TempDir()))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=commit.example.com\ncert=auto\ntarget_host=127.0.0.1\n", t.TempDir()))
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -267,7 +267,7 @@ func TestCertificateInstallRejectsObsoleteResult(t *testing.T) {
 	}
 	// Pointer changes must also reject a result even if its caller supplied
 	// an independent context that the reload could not cancel.
-	if err := m.Apply(mustParse(t, "[global]\nport=443\n")); err != nil {
+	if err := m.Apply(mustParse(t, "[[listener]]\nname=default\nport=443\n")); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.installCertificate(context.Background(), cfg, "other.example.com", certPEM, keyPEM); !errors.Is(err, context.Canceled) {
@@ -277,7 +277,7 @@ func TestCertificateInstallRejectsObsoleteResult(t *testing.T) {
 
 func TestReloadUsesParsedSnapshotAtStartup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	oldText := "[global]\nport=1\nreload_interval=0\nstats_interval=0\n[[host]]\npattern=ANY\naction=deny\n"
+	oldText := "[[listener]]\nname=default\nport=1\n[global]\nreload_interval=0\nstats_interval=0\n[[host]]\npattern=ANY\naction=deny\n"
 	newText := strings.ReplaceAll(oldText, "stats_interval=0", "stats_interval=17")
 	if err := os.WriteFile(path, []byte(newText), 0600); err != nil {
 		t.Fatal(err)

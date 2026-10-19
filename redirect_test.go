@@ -12,11 +12,11 @@ import (
 )
 
 func TestRedirectConfig(t *testing.T) {
-	c := mustParse(t, "[global]\nport=443\nbind=127.0.0.1\n[[host]]\npattern=ANY\ntarget_host=x\n")
+	c := mustParse(t, "[[listener]]\nname=default\nbind=127.0.0.1\nport=443\n[[host]]\npattern=ANY\ntarget_host=x\n")
 	if c.Redirect != nil || len(c.PortListeners()) != 1 {
 		t.Fatal("off by default")
 	}
-	c = mustParse(t, "[global]\nport=443\nbind=127.0.0.1\nhttp_to_https_redirect=true\n[[host]]\npattern=ANY\ntarget_host=x\n")
+	c = mustParse(t, "[[listener]]\nname=default\nbind=127.0.0.1\nport=443\n[global]\nhttp_to_https_redirect=true\n[[host]]\npattern=ANY\ntarget_host=x\n")
 	if r := c.Redirect; r == nil || r.Name != RedirectListenerName || r.Port != 80 || !slices.Equal(r.Binds, []string{"127.0.0.1"}) || len(c.Listeners) != 1 {
 		t.Fatalf("%+v", c.Redirect)
 	}
@@ -34,10 +34,10 @@ func TestRedirectConfig(t *testing.T) {
 	}
 
 	for text, want := range map[string]string{
-		"[global]\nport=80\nhttp_to_https_redirect=true\n":                                                                                               "port 80, which [global] port also uses",
+		"[[listener]]\nname=default\nport=80\n[global]\nhttp_to_https_redirect=true\n":                                                                   "port 80, which [[listener]] default at line 1 also uses",
 		"[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nport=443\n[[listener]]\nname=b\nbind=10.0.0.1\nport=80\n":                          "port 80, which [[listener]] b at line 6 also uses",
 		"[[listener]]\nname=HTTP-to-HTTPS-redirect\nport=1\n":                                                                                            "reserved for http_to_https_redirect",
-		"[global]\nport=443\nhttp_to_https_redirect=maybe\n":                                                                                             "http_to_https_redirect",
+		"[[listener]]\nname=default\nport=443\n[global]\nhttp_to_https_redirect=maybe\n":                                                                 "http_to_https_redirect",
 		"[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nport=443\n[[host]]\nlistener=http-to-https-redirect\npattern=ANY\ntarget_host=x\n": "there is no [[listener]] named http-to-https-redirect",
 	} {
 		_, err := ParseConfig(text)
@@ -67,7 +67,7 @@ func TestRedirectHost(t *testing.T) {
 // startRedirect serves the redirect listener of cfg on a free loopback port.
 func startRedirect(t *testing.T, extra string) (*Server, string) {
 	t.Helper()
-	cfg := mustParse(t, "[global]\nport=443\nbind=127.0.0.1\nhttp_to_https_redirect=true\nhandshake_timeout=2\n"+extra+"[[host]]\npattern=ANY\ntarget_host=x\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nbind=127.0.0.1\nport=443\n[global]\nhttp_to_https_redirect=true\nhandshake_timeout=2\n"+extra+"[[host]]\npattern=ANY\ntarget_host=x\n")
 	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatal(err)

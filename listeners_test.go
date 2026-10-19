@@ -12,9 +12,9 @@ import (
 )
 
 func TestListenerConfig(t *testing.T) {
-	// No [[listener]]: one implicit listener, untagged rules belong to it.
-	c := mustParse(t, "[global]\nport=443\nbind=127.0.0.1\n[[host]]\npattern=a.test\ntarget_host=x\n")
-	if len(c.Listeners) != 1 || c.Listeners[0].Name != "default" || c.Listeners[0].Line != 0 || c.Rules[0].Listener != "default" {
+	// One listener: rules without listener = belong to it.
+	c := mustParse(t, "[[listener]]\nname=https\nbind=127.0.0.1\nport=443\n[[host]]\npattern=a.test\ntarget_host=x\n")
+	if len(c.Listeners) != 1 || c.Listeners[0].Name != "https" || c.Listeners[0].Line != 1 || c.Rules[0].Listener != "https" {
 		t.Fatalf("%+v", c.Listeners)
 	}
 
@@ -47,7 +47,10 @@ func TestListenerConfig(t *testing.T) {
 	for text, want := range map[string]string{
 		base + "[[host]]\npattern=x.test\ntarget_host=x\n":                            "listener = <name> is required: this file has 2 listeners (a, b)",
 		base + "[[host]]\nlistener=c\npattern=x.test\ntarget_host=x\n":                "there is no [[listener]] named c",
-		"[global]\nport=443\n" + base:                                                 "with [[listener]] sections, bind and port belong in them",
+		"[global]\nport=443\n" + base:                                                 "[global] port is no longer supported",
+		"[global]\nbind=0.0.0.0\n" + base:                                             "[global] bind is no longer supported",
+		"[global]\nport=443\n[[host]]\npattern=ANY\ntarget_host=x\n":                  "[global] port is no longer supported",
+		"[global]\n[[host]]\npattern=ANY\ntarget_host=x\n":                            "no [[listener]] section",
 		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=a\nport=2\n":                "the name a is already used",
 		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=b\nbind=10.0.0.1\nport=1\n": "overlaps a",
 		"[[listener]]\nname=Bad/Name\nport=1\n":                                       "name must be",
@@ -149,8 +152,8 @@ func TestLiveListeners(t *testing.T) {
 	roundtrip(t, p, "x.test", "A:")
 }
 
-// The console adds a listener to a file that has none: [global] bind/port
-// become [[listener]] default, rules are tagged, and the new port opens.
+// The console adds a second listener: rules without listener = are tagged
+// with the first one's name, and the new port opens.
 func TestConsoleAddsListener(t *testing.T) {
 	t.Parallel()
 	a := echoBackend(t, "A:")
@@ -163,20 +166,17 @@ func TestConsoleAddsListener(t *testing.T) {
 	f := st["file"].(map[string]any)
 	vals := map[string]string{"name": "lab", "bind": "127.0.0.1", "port": strconv.Itoa(port)}
 	_, out := c.post("/api/listeners/validate", map[string]any{"line": 0, "values": vals})
-	if out["ok"] != true || !strings.Contains(out["block"].(string), "name = lab") || len(out["notes"].([]any)) != 2 {
+	if out["ok"] != true || !strings.Contains(out["block"].(string), "name = lab") || len(out["notes"].([]any)) != 1 {
 		t.Fatal(out)
 	}
 	if code, out := c.post("/api/listeners/save", map[string]any{"line": 0, "baseHash": f["hash"], "baseMtime": f["mtime"], "values": vals}); code != 200 || out["ok"] != true {
 		t.Fatal(code, out)
 	}
 	text, _ := os.ReadFile(path)
-	for _, want := range []string{"[[listener]]\nname = default\nport = 1\n", "\n[[listener]]\nname = lab\nbind = 127.0.0.1\nport = " + strconv.Itoa(port), "[[host]]\nlistener = default\npattern = ANY"} {
+	for _, want := range []string{"[[listener]]\nname=default\nport=1\n", "\n[[listener]]\nname = lab\nbind = 127.0.0.1\nport = " + strconv.Itoa(port), "[[host]]\nlistener = default\npattern = ANY"} {
 		if !strings.Contains(string(text), want) {
 			t.Fatalf("missing %q in:\n%s", want, text)
 		}
-	}
-	if strings.Contains(string(text), "port=1") {
-		t.Fatalf("[global] port left behind:\n%s", text)
 	}
 	// The new listener has no rules: everything on it is denied, but it is open.
 	for deadline := time.Now().Add(T); ; time.Sleep(20 * time.Millisecond) {

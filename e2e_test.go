@@ -27,7 +27,7 @@ type proxyUnderTest struct {
 // startProxy starts the proxy with rules (appended after [global]) on a free port.
 func startProxy(t *testing.T, global, rules string) *proxyUnderTest {
 	t.Helper()
-	return startProxyText(t, "[global]\nport=1\nstats_interval=0\nmax_handshakes_per_ip=0\n"+global+"\n"+rules, "")
+	return startProxyText(t, "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nmax_handshakes_per_ip=0\n"+global+"\n"+rules, "")
 }
 
 func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
@@ -601,7 +601,7 @@ func TestConfigReload(t *testing.T) {
 	a, b := echoBackend(t, "A"), echoBackend(t, "B")
 	path := filepath.Join(t.TempDir(), "config.toml")
 	write := func(body string, wait bool) string {
-		text := "[global]\nport=1\nstats_interval=0\nreload_interval=5\n" + body
+		text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=5\n" + body
 		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -713,7 +713,7 @@ func TestIPv6DownstreamAndUpstream(t *testing.T) {
 		}
 	}()
 	port := up.Addr().(*net.TCPAddr).Port
-	cfg := mustParse(t, fmt.Sprintf("[global]\nbind=[::]\nport=1\nstats_interval=0\n"+
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nbind=[::]\nport=1\n[global]\nstats_interval=0\n"+
 		"[[host]]\npattern=six.test\ntarget_host=::1\ntarget_port=%d\n"+
 		"[[host]]\npattern=*.zone.test\ntarget_host=fe80::1%%lo0\ntarget_port=%d\n", port, port))
 	if cfg.Bind != "::" {

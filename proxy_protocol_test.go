@@ -252,7 +252,7 @@ func TestProxyProtocolIsOnlyAcceptedFromTrustedPeers(t *testing.T) {
 }
 
 func TestProxyProtocolConfig(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\nproxy_protocol_from = 192.0.2.10, 10.0.0.0/8; 2001:db8::/32\n"+
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nproxy_protocol_from = 192.0.2.10, 10.0.0.0/8; 2001:db8::/32\n"+
 		"[[host]]\npattern=a.example\ntarget_host=a.lan\nproxy=yes\n[[host]]\npattern=b.example\ntarget_host=b.lan\n")
 	if !c.Rules[0].Proxy || c.Rules[0].ProxyVersion != 2 || c.Rules[1].Proxy {
 		t.Fatalf("%+v", c.Rules)
@@ -262,7 +262,7 @@ func TestProxyProtocolConfig(t *testing.T) {
 			t.Errorf("%s: trusted=%v", addr, got)
 		}
 	}
-	if mustParse(t, "[global]\nport=1\n").trustsProxyProtocolFrom(&net.TCPAddr{IP: net.ParseIP("127.0.0.1")}) {
+	if mustParse(t, "[[listener]]\nname=default\nport=1\n").trustsProxyProtocolFrom(&net.TCPAddr{IP: net.ParseIP("127.0.0.1")}) {
 		t.Fatal("nobody is trusted by default")
 	}
 	for name, text := range map[string]string{
@@ -271,11 +271,11 @@ func TestProxyProtocolConfig(t *testing.T) {
 		"deny rule":             "[[host]]\npattern=a\naction=deny\nproxy=true\n",
 		"not a bool":            "[[host]]\npattern=a\ntarget_host=x\nproxy=maybe\n",
 	} {
-		if _, err := ParseConfig("[global]\nport=1\n" + text); err == nil {
+		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n" + text); err == nil {
 			t.Errorf("%s: should be rejected", name)
 		}
 	}
-	if _, err := ParseConfig("[global]\nport=1\nproxy_protocol_from = lb.example.com\n"); err == nil {
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[global]\nproxy_protocol_from = lb.example.com\n"); err == nil {
 		t.Error("a host name is not a trusted source")
 	}
 }

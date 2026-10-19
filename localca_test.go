@@ -227,7 +227,7 @@ func TestLocalCAConfig(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
-	cfg := mustParse(t, "[global]\nport=1\nca_root="+root+"\n[[host]]\npattern=*.x.test\ncert=local-ca\ncert_domains=a.x.test\ntarget_host=h\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=*.x.test\ncert=local-ca\ncert_domains=a.x.test\ntarget_host=h\n")
 	if r := cfg.Rules[0]; r.LocalCA() != "ca001" {
 		t.Fatalf("plain local-ca is ca001, got %q", r.LocalCA())
 	}
@@ -243,7 +243,7 @@ func TestLocalCAConfig(t *testing.T) {
 	}
 
 	// Globs, several of them; a * never crosses a dot.
-	g := mustParse(t, "[global]\nport=1\nca_root="+root+"\n[[host]]\npattern=ANY\ncert=local-ca\ncert_domains=*.dev.abc.com, *.prod.abc.com;*.abc.com\ntarget_host=h\n")
+	g := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=ANY\ncert=local-ca\ncert_domains=*.dev.abc.com, *.prod.abc.com;*.abc.com\ntarget_host=h\n")
 	for name, want := range map[string]bool{
 		"api.dev.abc.com": true, "db.prod.abc.com": true, "www.abc.com": true,
 		"abc.com": false, "a.b.dev.abc.com": false, "x.qa.abc.com": false, "evil.com": false,
@@ -259,7 +259,7 @@ func TestLocalCAConfig(t *testing.T) {
 		"cert=local-ca\ncert_domains=**.x.test":       "not a host name or a glob",
 		"cert=local-ca\ncert_domains=ANY":             "not a host name or a glob",
 	} {
-		if _, err := ParseConfig("[global]\nport=1\n[[host]]\npattern=*.x.test\n" + text + "\ntarget_host=h\n"); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.x.test\n" + text + "\ntarget_host=h\n"); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", text, err, want)
 		}
 	}
@@ -613,7 +613,7 @@ func TestLocalCARenewsInTheBackground(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
-	cfg := mustParse(t, "[global]\nport=1\nca_root="+root+"\n[[host]]\npattern=*.bg.test\ncert=local-ca\ncert_domains=*.bg.test\ntarget_host=h\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=*.bg.test\ncert=local-ca\ncert_domains=*.bg.test\ntarget_host=h\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
@@ -643,7 +643,7 @@ func TestLocalCARenewalRunsAtStart(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
-	cfg := mustParse(t, "[global]\nport=1\nca_root="+root+"\n[[host]]\npattern=*.start.test\ncert=local-ca\ntarget_host=h\n")
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\npattern=*.start.test\ncert=local-ca\ntarget_host=h\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)

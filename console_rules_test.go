@@ -33,7 +33,8 @@ func TestFmtValueRoundTrips(t *testing.T) {
 }
 
 const rulesFile = `# top
-[global]
+[[listener]]
+name = default
 port = 443
 
 # the wildcard rule
@@ -75,7 +76,7 @@ func TestEditRulesKeepsTheRestOfTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(got, "wildcard") || strings.Contains(got, "example.com") || !strings.Contains(got, "# top\n[global]\nport = 443\n\n# the catch-all\n[[host]]") {
+	if strings.Contains(got, "wildcard") || strings.Contains(got, "example.com") || !strings.Contains(got, "# top\n[[listener]]\nname = default\nport = 443\n\n# the catch-all\n[[host]]") {
 		t.Fatalf("delete:\n%s", got)
 	}
 
