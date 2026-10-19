@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.4.0
 
 - `[global] remember_nonce = true` (the default): loop detection. A hash of
   every ClientHello passed through is kept for 10 s (a fixed lock-free table
