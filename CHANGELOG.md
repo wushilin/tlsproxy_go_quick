@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.3.0
 
 - `[global] http_to_https_redirect = true` (default false): a listener named
   `http-to-https-redirect` on port 80 answers every plain HTTP request with a
