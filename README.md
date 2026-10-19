@@ -255,6 +255,7 @@ with its default, and a test keeps that file in step with the code:
 | `stats_interval`       | 60      | log a one-line state summary every N seconds; 0 = never              |
 | `short_read_delay_us`  | 0       | pause N µs after a short read so data batches up. Measured in Go: a few percent more throughput at best, +37 µs (50) or +210 µs (200) per round trip, so leave it off unless your box shows otherwise |
 | `splice`               | true    | Linux only: relay passed-through connections with `splice(2)`, see [Zero-copy relaying](#zero-copy-relaying-linux) |
+| `http_to_https_redirect` | false | also listen on port 80 and redirect every plain HTTP request to `https://`, see [HTTP to HTTPS redirect](#http-to-https-redirect) |
 
 The legacy keys `io_model` and `worker_threads` are accepted and ignored (with
 a log line), so older config files keep loading.
@@ -264,7 +265,7 @@ option is missing from it, from `config.toml` or from this README):
 
 | section | options |
 |---|---|
-| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
 | `[[listener]]` | `name` `bind` `port` · `proxy_protocol_from` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
@@ -343,6 +344,42 @@ target_port = 9092
   console (where Start retries it), and the other listeners keep working.
   The proxy refuses to start only when no listener can open its port.
 - `--test` and the console's routing tests answer for every listener.
+
+### HTTP to HTTPS redirect
+
+```toml
+[global]
+http_to_https_redirect = true      # default false
+```
+
+adds one more listener, `http-to-https-redirect`, on port 80 of every address
+the other listeners bind (a wildcard such as `0.0.0.0` covers the specific
+addresses of its family). It answers every plain HTTP request with a redirect
+to the same host, path and query on `https://` (no port, so 443):
+
+- `301 Moved Permanently` for GET and HEAD, `308 Permanent Redirect` for the
+  other methods, so a POST stays a POST.
+- It does not look at the rules: every name is redirected, and the rules of
+  the HTTPS listener refuse the ones they don't serve. The port in `Host` is
+  dropped; a request without a usable `Host` gets `400`.
+- Keep-alive works. A request with a body is answered without reading the
+  body (a 10 GB upload gets its `308` straight after the headers), then the
+  connection is closed; at most 256 KiB / 2 s of what is still arriving is
+  read and dropped first, so the client gets the response instead of a reset.
+- Headers are capped at 8 KiB (`431`). The first request must arrive within
+  `handshake_timeout`, later ones within `idle_timeout`. `max_connections`,
+  `max_handshakes_per_ip` and `proxy_protocol_from` apply as on the other
+  listeners.
+- The name `http-to-https-redirect` is reserved: no `[[listener]]` and no
+  rule may use it. A listener of your own on port 80 at an address the
+  redirect also binds is a load error.
+- It follows hot reload: setting it opens port 80, clearing it closes the
+  port. In the console it is a listener card with Stop/Start and its open
+  connections, but no Edit, Delete or rules. Each connection is in the flow
+  log, and each request is a line in the log:
+  `[#12] redirect GET http://www.example.com/a -> https://www.example.com/a (301)`.
+- It plays no part in ACME, which only uses TLS-ALPN-01 on port 443.
+- With Docker, publish the port too: `-p 80:80`.
 
 ## IPv6
 

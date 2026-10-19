@@ -87,7 +87,8 @@ type listenerView struct {
 	Name              string            `json:"name"`
 	Line              int               `json:"line"` // 0: the implicit listener made from [global]
 	Implicit          bool              `json:"implicit"`
-	Removed           bool              `json:"removed,omitempty"` // gone from the file; its connections remain
+	Removed           bool              `json:"removed,omitempty"`  // gone from the file; its connections remain
+	Redirect          bool              `json:"redirect,omitempty"` // the http_to_https_redirect listener: Start/Stop only
 	Bind              string            `json:"bind"`
 	Port              int               `json:"port"`
 	Addrs             []string          `json:"addrs"` // actually open
@@ -317,6 +318,9 @@ func (c *Console) state() consoleState {
 		}
 		addListener(lv)
 	}
+	if l := shown.Redirect; l != nil {
+		addListener(listenerView{Name: l.Name, Redirect: true, Bind: l.Bind, Port: l.Port, Values: map[string]string{}})
+	}
 	for i := range shown.Rules {
 		r := &shown.Rules[i]
 		v := ruleView{Listener: r.Listener, Line: r.Line, Key: r.Key(), Pattern: r.Source, Kind: r.Kind.String(), Allow: r.Allow,
@@ -331,6 +335,12 @@ func (c *Console) state() consoleState {
 		}
 		lv := &listeners[index[r.Listener]]
 		lv.Rules = append(lv.Rules, view(v))
+	}
+	// The redirect listener's connections, shown as one pseudo-rule.
+	if shown.Redirect != nil {
+		lv := &listeners[index[shown.Redirect.Name]]
+		lv.Rules = append(lv.Rules, view(ruleView{Listener: shown.Redirect.Name, Key: redirectKey, Pattern: redirectPattern, Kind: "redirect",
+			Allow: true, Target: "https://", Running: rt.cfg.Redirect != nil, Values: map[string]string{}}))
 	}
 	// Connections of a rule (or listener) that is gone still show up.
 	var orphans []string

@@ -184,8 +184,11 @@ func (s *Stats) prepare(cfg *Config) {
 	for i := range cfg.Rules {
 		s.rule(cfg.Rules[i].Key())
 	}
-	for i := range cfg.Listeners {
-		s.listener(cfg.Listeners[i].Name)
+	for _, l := range cfg.PortListeners() {
+		s.listener(l.Name)
+	}
+	if cfg.Redirect != nil {
+		s.rule(redirectKey)
 	}
 }
 

@@ -39,6 +39,13 @@ port = 443                      # (required) listen port
 #                               #   min 5 (at most one reload per 5 s), 0 = never.
 #                               #   listeners open, move and close live; an invalid file is ignored
 
+# --- HTTP to HTTPS ----------------------------------------------------------------
+# http_to_https_redirect = false # (default: false) also listen on port 80, on every address the
+#                               #   listeners use, and redirect each plain HTTP request to the same
+#                               #   URL on https:// (301 for GET/HEAD, 308 otherwise). Every name is
+#                               #   redirected; the rules on 443 decide from there. Listener name
+#                               #   http-to-https-redirect (reserved); Stop/Start in the console
+
 # --- Throughput tuning ------------------------------------------------------------
 # short_read_delay_us = 0       # (default: 0 = off) pause N microseconds after a short read so
 #                               #   data batches up: less CPU per GiB, more latency per round trip

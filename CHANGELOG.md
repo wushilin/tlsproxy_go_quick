@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `[global] http_to_https_redirect = true` (default false): a listener named
+  `http-to-https-redirect` on port 80 answers every plain HTTP request with a
+  redirect to the same URL on `https://` (301 for GET/HEAD, 308 otherwise),
+  whatever the name; keep-alive supported, request bodies never read. It
+  follows hot reload, is shown in the console with Stop/Start and its
+  connections (not editable), and its connections are in the flow log. The
+  name is reserved.
+
 ## v1.2.1
 
 Breaking:
