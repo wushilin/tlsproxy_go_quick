@@ -224,7 +224,8 @@ action = deny
   still connects to any *name* a client sends, internal ones included; that is
   logged as a warning at start-up.
 - `action` is `allow` (the default) or `deny`. A denied client gets a TLS
-  `access_denied` alert. `target_port` defaults to 443.
+  `access_denied` alert. `target_port` defaults to the port of the rule's listener (the one the
+  client connected to): 9092 for a rule on a 9092 listener.
 - `pattern = NONE` (any letter case) is explicit: it matches only clients that
   send no SNI, for example to send them to a default target; its `target_host`
   must be a literal. Without such a rule only `ANY` takes them; a wildcard
@@ -334,7 +335,7 @@ target_port = 9092
 
 - `bind` and `port` exist only in `[[listener]]`. In `[global]` they are a
   load error; the message shows the `[[listener]]` to write instead. (Before
-  v2.0.0 they made an implicit listener named `default`.)
+  v1.4.1 they made an implicit listener named `default`.)
 - Each listener has its own rules, so the same pattern can appear on several
   listeners, and a name that matches nothing *on that listener* is denied.
 - With two or more listeners every rule must name its `listener`; an untagged

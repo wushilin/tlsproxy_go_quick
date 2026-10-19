@@ -41,11 +41,11 @@ action = deny
 [[host]]
 listener = lab
 pattern = kafka.example.com
-target_host = 10.11.12.50
-target_port = 9092
+target_host = 10.11.12.50          # no target_port: the listener's, 9092
 
 # The same pattern may appear on several listeners: each has its own rules.
 [[host]]
 listener = lab
 pattern = ANY
 target_host = 10.11.12.60
+target_port = 443

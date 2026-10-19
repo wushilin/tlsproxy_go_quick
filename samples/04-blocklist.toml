@@ -49,3 +49,4 @@ action = deny
 [[host]]
 pattern = ANY
 target_host = ${host}
+target_port = 443

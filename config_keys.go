@@ -68,7 +68,7 @@ var configReference = []sectionDoc{
 		{"pattern", "(required)", "A host name with * wildcards (a * never crosses a dot; as a whole label it is exactly one label), NONE for clients without SNI, or ANY for everything."},
 		{"action", "allow", "allow or deny. deny answers with a TLS access_denied alert."},
 		{"target_host", "(required for allow)", "Where to connect. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces."},
-		{"target_port", "443", "Target port."},
+		{"target_port", "(the listener's port)", "Target port; by default the port of the rule's listener, the one the client connected to."},
 		{"cert", "(pass through)", "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in ca_root, made on the CAs page, issuing one certificate per name on first use)."},
 		{"cert_domains", "the literal pattern", "cert = auto: exact names to issue, separated by , or ;. cert = local-ca: names or globs (*.dev.example.com, several) that get a certificate; any other name is refused (default: every name the rule matches)."},
 		{"cert_validate_script", "(none)", "cert = auto: a script that decides per name not in cert_domains; exit 0 = issue."},

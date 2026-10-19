@@ -291,3 +291,19 @@ func TestStartupWithABusyPort(t *testing.T) {
 		t.Fatalf("after Start: open=%v stopped=%v err=%q", open, stopped, msg)
 	}
 }
+
+// A rule without target_port connects to the port its listener listens on.
+func TestTargetPortDefaultsToListenerPort(t *testing.T) {
+	c := mustParse(t, "[[listener]]\nname=https\nport=443\n[[listener]]\nname=kafka\nport=9092\n"+
+		"[[host]]\nlistener=https\npattern=ANY\ntarget_host=${host}\n"+
+		"[[host]]\nlistener=kafka\npattern=ANY\ntarget_host=${host}\n"+
+		"[[host]]\nlistener=kafka\npattern=b.test\ntarget_host=b\ntarget_port=19092\n")
+	for l, want := range map[string]string{"https": "a.test:443", "kafka": "a.test:9092"} {
+		if got := route(t, c.ForListener(c.Listener(l)), "a.test"); got != want {
+			t.Errorf("%s: %s, want %s", l, got, want)
+		}
+	}
+	if got := route(t, c.ForListener(c.Listener("kafka")), "b.test"); got != "b:19092" {
+		t.Errorf("explicit target_port: %s", got)
+	}
+}

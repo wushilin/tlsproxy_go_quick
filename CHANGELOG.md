@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (v2.0.0)
+## v1.4.1
 
 Breaking:
 - Every port is an explicit `[[listener]]`: `[global] bind` and `port` are
@@ -15,6 +15,12 @@ Breaking:
   With a single listener, rules may still leave out `listener =`. Names in
   logs, the console and the flow log are now the listener's own (it was
   `default` for the implicit one).
+
+- A rule without `target_port` connects to its listener's port (the one the
+  client connected to), not always 443: a rule on a 9092 listener goes to
+  9092. A proxy listening on a high port behind a forward (e.g. Docker
+  `-p 443:8443`) whose targets are on 443 needs `target_port = 443` in those
+  rules now.
 
 - Console: adding a second listener tags the rules that had no `listener =`
   with the first listener's name (it used to convert `[global]` bind/port).

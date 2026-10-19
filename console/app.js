@@ -1560,6 +1560,9 @@ function quickChecks(v) {
 // syncWizard shows the fields that apply and the hints for what is typed.
 function syncWizard() {
   const pattern = $("f-pattern").value;
+  // An empty target port means the listener's own.
+  const lst = ui.state && ui.state.listeners.find((l) => l.name === ($("f-listener").value || onlyListener()));
+  $("f-target-port").placeholder = lst ? `${lst.port} (the listener's port)` : "the listener's port";
   if (!ed.tryTouched) $("f-try").value = sampleNames(pattern);
   const info = patternInfo(pattern);
   $("pattern-kind").hidden = !info.kind;

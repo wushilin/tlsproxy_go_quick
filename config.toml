@@ -157,7 +157,7 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 # action      (default: allow) allow | deny; deny sends a TLS access_denied alert
 # target_host (required for allow) ${1}, ${2}, ... = what each * matched, from the left;
 #             ${host} (or ${0}) = the whole SNI. Always in braces: a bare $1 is an error
-# target_port (default: 443)
+# target_port (default: the listener's port) e.g. 9092 for rules on a 9092 listener
 #
 # TLS termination (optional; without cert the TLS stream is passed through untouched):
 # cert        auto       issue and renew through ACME with TLS-ALPN-01 (the CA connects to public

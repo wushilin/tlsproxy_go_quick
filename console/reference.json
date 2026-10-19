@@ -227,8 +227,8 @@
       },
       {
         "key": "target_port",
-        "default": "443",
-        "meaning": "Target port."
+        "default": "(the listener's port)",
+        "meaning": "Target port; by default the port of the rule's listener, the one the client connected to."
       },
       {
         "key": "cert",

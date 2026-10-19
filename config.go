@@ -937,7 +937,7 @@ func ParseConfig(text string) (*Config, error) {
 					return nil, fail("target_host %q must not contain a port: use target_port (an IPv6 address is written without brackets)", rule.TargetHost)
 				}
 			}
-			rule.TargetPort = 443
+			rule.TargetPort = cfg.Listener(rule.Listener).Port // by default, the port the client connected to
 			if r.tport != nil {
 				if rule.TargetPort, err = parsePort(*r.tport); err != nil {
 					return nil, fail("%v", err)

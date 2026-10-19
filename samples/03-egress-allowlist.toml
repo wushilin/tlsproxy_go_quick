@@ -29,26 +29,32 @@ max_connections = 256
 [[host]]
 pattern = github.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
 pattern = *.github.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
 pattern = *.githubusercontent.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
 pattern = time.apple.com
 target_host = ${host}
+target_port = 443
 
 [[host]]
 pattern = deb.debian.org
 target_host = ${host}
+target_port = 443
 
 [[host]]
 pattern = security.debian.org
 target_host = ${host}
+target_port = 443
 
 [[host]]
 pattern = ANY
