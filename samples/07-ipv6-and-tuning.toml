@@ -4,9 +4,12 @@
 #> mail.example.com   => [::1]:993
 #> x.example.com      => DENY
 
-[global]
+[[listener]]
+name = https
 bind = "::"
 port = "443"
+
+[global]
 handshake_timeout = 5        # seconds to receive the ClientHello
 connect_timeout = 3          # seconds to connect to the target
 idle_timeout = 300           # no traffic for N seconds closes; 0 disables

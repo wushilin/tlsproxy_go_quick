@@ -87,7 +87,7 @@ func startConsoleProxyGlobal(t *testing.T, globalLines, consoleLines, rules stri
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
 	port := freePort(t)
-	text := fmt.Sprintf("# top comment\n[global]\nport=1\nstats_interval=0\nreload_interval=0\n%s\n\n[console]\n# console comment\nport = %d\n%s\n\n%s", globalLines, port, consoleLines, rules)
+	text := fmt.Sprintf("# top comment\n[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=0\n%s\n\n[console]\n# console comment\nport = %d\n%s\n\n%s", globalLines, port, consoleLines, rules)
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 		ca.localCA(t), echoBackend(t, ""), echoBackend(t, ""), echoBackend(t, ""))
 	path := filepath.Join(t.TempDir(), "config.toml")
 	port := freePort(t)
-	text := fmt.Sprintf("[global]\nport=1\nstats_interval=0\ncert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir\n[console]\nport=%d\npassword=pw\n%s", certPath, dead, port, rules)
+	text := fmt.Sprintf("[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\ncert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir\n[console]\nport=%d\npassword=pw\n%s", certPath, dead, port, rules)
 	os.WriteFile(path, []byte(text), 0o600)
 	p := startProxyText(t, text, path)
 	waitForPort(t, fmt.Sprintf("127.0.0.1:%d", port))
@@ -453,21 +453,21 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 }
 
 func TestConsoleConfigValidation(t *testing.T) {
-	ok := mustParse(t, "[global]\nport=1\n[console]\nlisten=192.168.1.1\nport=9000\npassword=x\nhostnames=a.example.com; B.example.com\n")
+	ok := mustParse(t, "[[listener]]\nname=default\nport=1\n[console]\nlisten=192.168.1.1\nport=9000\npassword=x\nhostnames=a.example.com; B.example.com\n")
 	if ok.Console.Listen != "192.168.1.1" || fmt.Sprint(ok.Console.Hostnames) != "[a.example.com b.example.com]" || len(ok.Warnings) != 1 {
 		t.Fatalf("%+v %v", ok.Console, ok.Warnings) // plain HTTP off loopback is allowed, with a warning
 	}
-	if c := mustParse(t, "[global]\nport=1\n[console]\nport=9000\npassword=x\n"); c.Console.Listen != "127.0.0.1" || len(c.Warnings) != 0 {
+	if c := mustParse(t, "[[listener]]\nname=default\nport=1\n[console]\nport=9000\npassword=x\n"); c.Console.Listen != "127.0.0.1" || len(c.Warnings) != 0 {
 		t.Fatalf("%+v %v", c.Console, c.Warnings)
 	}
-	if mustParse(t, "[global]\nport=1\n").Console != nil {
+	if mustParse(t, "[[listener]]\nname=default\nport=1\n").Console != nil {
 		t.Fatal("no [console] section = no console")
 	}
 	for name, text := range map[string]string{
-		"no password": "[global]\nport=1\n[console]\nport=9000\n",
-		"no port":     "[global]\nport=1\n[console]\npassword=x\n",
-		"bad hash":    "[global]\nport=1\n[console]\nport=9000\npassword_hash=md5$abc\n",
-		"unknown key": "[global]\nport=1\n[console]\nport=9000\npassword=x\ntls=true\n",
+		"no password": "[[listener]]\nname=default\nport=1\n[console]\nport=9000\n",
+		"no port":     "[[listener]]\nname=default\nport=1\n[console]\npassword=x\n",
+		"bad hash":    "[[listener]]\nname=default\nport=1\n[console]\nport=9000\npassword_hash=md5$abc\n",
+		"unknown key": "[[listener]]\nname=default\nport=1\n[console]\nport=9000\npassword=x\ntls=true\n",
 	} {
 		if _, err := ParseConfig(text); err == nil {
 			t.Errorf("%s: should be rejected", name)
@@ -475,9 +475,9 @@ func TestConsoleConfigValidation(t *testing.T) {
 	}
 	// Hiding and restoring the section is exact, wherever it sits.
 	for _, text := range []string{
-		"[global]\nport=1\n\n[console]\nport=2\npassword=x\n\n[[host]]\npattern=.*\naction=deny\n",
-		"[global]\nport=1\n[[host]]\npattern=.*\naction=deny\n[console]\nport=2\npassword=x",
-		"[global]\nport=1\n",
+		"[[listener]]\nname=default\nport=1\n\n[console]\nport=2\npassword=x\n\n[[host]]\npattern=.*\naction=deny\n",
+		"[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\naction=deny\n[console]\nport=2\npassword=x",
+		"[[listener]]\nname=default\nport=1\n",
 	} {
 		visible, block, _ := hideConsole(text)
 		full, _, err := showConsole(visible, block)

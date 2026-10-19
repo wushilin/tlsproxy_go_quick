@@ -9,9 +9,12 @@
 #> admin.home.example.com    => DENY
 #> random.com                => DENY
 
-[global]
+[[listener]]
+name = https
 bind = 0.0.0.0
 port = 443
+
+[global]
 idle_timeout = 3600          # long-lived sessions (NAS, Home Assistant websockets)
 
 [[host]]

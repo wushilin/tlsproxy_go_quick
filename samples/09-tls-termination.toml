@@ -9,9 +9,12 @@
 #> legacy.example.com    => 192.168.1.40:443
 #> other.org             => DENY
 
-[global]
+[[listener]]
+name = https
 bind = 0.0.0.0
 port = 443                        # the CA validates on public port 443
+
+[global]
 cert_path = /var/db/tlsproxy/certs
 acme_agree_tos = true
 acme_email = admin@example.com

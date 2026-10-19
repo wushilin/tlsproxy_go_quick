@@ -11,14 +11,15 @@
 #> legacy.example.com     => 192.168.1.50:443
 #> other.org              => DENY
 
-# One listener here, from [global] bind and port; for several, with
-# [[listener]] sections and listener = <name> in each rule, see
-# 14-listeners.toml.
+# One listener here, so the rules need no listener = line; for several,
+# with listener = <name> in each rule, see 14-listeners.toml.
 
-[global]
+[[listener]]
+name = https                       # required: what a rule's listener = names
 bind = "::"                        # :: = all IPv6 and IPv4 addresses; or a list: 192.0.2.1; 2001:db8::1
 port = 443                         # required
 
+[global]
 handshake_timeout = 5              # seconds to receive the whole ClientHello
 connect_timeout = 3                # seconds to resolve and connect to the target
 idle_timeout = 300                 # close after this long without traffic either way; 0 = never

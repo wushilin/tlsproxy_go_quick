@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased (v2.0.0)
+
+Breaking:
+- Every port is an explicit `[[listener]]`: `[global] bind` and `port` are
+  gone, and a file needs at least one `[[listener]]`. A config that still
+  sets them is refused with an error showing what to write instead:
+
+      [[listener]]
+      name = https
+      bind = 0.0.0.0
+      port = 443
+
+  With a single listener, rules may still leave out `listener =`. Names in
+  logs, the console and the flow log are now the listener's own (it was
+  `default` for the implicit one).
+
+- Console: adding a second listener tags the rules that had no `listener =`
+  with the first listener's name (it used to convert `[global]` bind/port).
+
 ## v1.4.0
 
 - `[global] remember_nonce = true` (the default): loop detection. A hash of

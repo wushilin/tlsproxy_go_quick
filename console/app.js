@@ -345,7 +345,7 @@ function buildListener(l) {
   const target = el("span", "target");
   const chips = el("span", "chips");
   const status = el("span", "chip warn");
-  const implicit = el("span", "chip");
+  const redirectChip = el("span", "chip");
   const ppf = el("span", "chip");
   const maxConns = el("span", "chip limit");
   const refused = el("span", "chip bad");
@@ -354,7 +354,7 @@ function buildListener(l) {
   const half = el("span", "chip");
   const limTotal = el("span", "chip limit");
   const limConn = el("span", "chip limit");
-  chips.append(status, implicit, ppf, maxConns, refused, hs, idle, half, limTotal, limConn);
+  chips.append(status, redirectChip, ppf, maxConns, refused, hs, idle, half, limTotal, limConn);
   const line = el("div", "route-line");
   line.append(lname, listen, el("span", "arrow", "→"), target);
   route.append(line, chips);
@@ -408,7 +408,7 @@ function buildListener(l) {
 
   card.append(head, body);
   return {
-    name: l.name, data: l, card, head, lname, listen, target, status, implicit, ppf, maxConns, refused, hs, idle, half,
+    name: l.name, data: l, card, head, lname, listen, target, status, redirectChip, ppf, maxConns, refused, hs, idle, half,
     limTotal, limConn, spark, active, accepted, tx, rx, toggleBtn, toggleLabel, addBtn, editBtn, delBtn, delLabel,
     body, err, rules, empty, sleepy, emptyText,
   };
@@ -985,7 +985,7 @@ function paintListener(lr, l, now, file) {
   setText(lr.lname, l.name);
   setText(lr.listen, `[${listenAddrs(l)}]`);
   lr.listen.title = l.redirect ? "http_to_https_redirect = true in [global]: port 80 on every address the other listeners use"
-    : l.implicit ? "bind and port from [global]" : `[[listener]] at line ${l.line} of the config file`;
+    : `[[listener]] at line ${l.line} of the config file`;
   const n = l.rules.length;
   setText(lr.target, l.redirect ? "https://" : `${n} rule${n === 1 ? "" : "s"}`);
   const out = l.stopped || !l.running;
@@ -1007,11 +1007,9 @@ function paintListener(lr, l, now, file) {
   }
   lr.err.hidden = !l.error;
   setText(lr.err, l.error ? `Could not open the port: ${l.error}` : "");
-  lr.implicit.hidden = !l.implicit && !l.redirect;
-  setText(lr.implicit, l.redirect ? "HTTP → HTTPS redirect" : "from [global]");
-  lr.implicit.title = l.redirect
-    ? "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in [global]; it has no rules and cannot be edited here."
-    : "No [[listener]] section: bind and port come from [global]. Edit turns it into a [[listener]].";
+  lr.redirectChip.hidden = !l.redirect;
+  setText(lr.redirectChip, "HTTP → HTTPS redirect");
+  lr.redirectChip.title = "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in [global]; it has no rules and cannot be edited here.";
   lr.ppf.hidden = !l.proxyProtocolFrom;
   setText(lr.ppf, `PROXY from ${l.proxyProtocolFrom || ""}`);
   lr.ppf.title = "Accepts a PROXY protocol header from these addresses (proxy_protocol_from)";
@@ -1054,8 +1052,8 @@ function paintListener(lr, l, now, file) {
   lr.addBtn.title = editable ? `Add a rule to ${l.name}` : "Editing is off: see the note above";
   lr.editBtn.disabled = busy || !editable;
   lr.editBtn.title = !editable ? "Editing is off: see the note above"
-    : l.implicit ? "Edit: saving turns it into a [[listener]] section" : "Edit this listener in the config file";
-  lr.delBtn.hidden = l.implicit || l.redirect;
+    : "Edit this listener in the config file";
+  lr.delBtn.hidden = !!l.redirect;
   lr.addBtn.hidden = lr.editBtn.hidden = !!l.redirect;
   lr.delBtn.disabled = busy || !editable;
   lr.delBtn.title = editable ? "Delete this listener from the config file (only once no rule uses it)" : "Editing is off: see the note above";
@@ -1301,7 +1299,7 @@ function onListenerStartStop(name) {
 
 function onDeleteListener(name) {
   const lr = ui.L.get(name);
-  if (!lr || pendingListeners.has(name) || lr.data.implicit) return;
+  if (!lr || pendingListeners.has(name) || lr.data.redirect) return;
   if (!armedLDeletes.has(name)) {
     lr.delBtn.classList.add("armed");
     setText(lr.delLabel, "Confirm delete");
@@ -1377,13 +1375,13 @@ function normal(key, v) {
     s = ["true", "yes", "on"].includes(l) ? "true" : ["false", "no", "off"].includes(l) ? "false" : l;
   }
   if (key === "action") s = s.toLowerCase();
-  if (key === "listener") return s || implicitListener(); // untagged rules belong to the implicit one
+  if (key === "listener") return s || onlyListener(); // untagged rules belong to the only one
   return s === "" ? DEFAULTS[key] ?? "" : s;
 }
 
-function implicitListener() {
-  const l = ui.state && ui.state.listeners.find((x) => x.implicit);
-  return l ? l.name : "";
+function onlyListener() {
+  const ls = ui.state ? ui.state.listeners.filter((x) => !x.redirect) : [];
+  return ls.length === 1 ? ls[0].name : "";
 }
 
 const val = (id) => $(id).value.trim();
@@ -1708,7 +1706,7 @@ function fillListenerSelect(selected) {
 function openEditor(r, listenerName) {
   const s = ui.state;
   if (!s || !s.file.editable) return;
-  fillListenerSelect((r && (r.listener || r.values.listener)) || listenerName || implicitListener());
+  fillListenerSelect((r && (r.listener || r.values.listener)) || listenerName || onlyListener());
   ed.rule = r || null;
   ed.base = { hash: s.file.hash, mtime: s.file.mtime };
   ed.result = null;
@@ -1877,7 +1875,7 @@ function lValidateNow() {
   const seq = ++led.seq;
   led.pending = true;
   lPaintVerdict();
-  dryRun("api/listeners/validate", { line: led.l ? led.l.line : 0, implicit: !!(led.l && led.l.implicit), baseHash: led.base.hash, baseMtime: led.base.mtime, values: lFormValues() })
+  dryRun("api/listeners/validate", { line: led.l ? led.l.line : 0, baseHash: led.base.hash, baseMtime: led.base.mtime, values: lFormValues() })
     .then((data) => {
       if (seq !== led.seq || !$("lst-editor").open) return;
       led.pending = false;
@@ -1895,15 +1893,13 @@ function openListenerEditor(l) {
   led.conflict = false;
   led.saving = false;
   const v = (l && l.values) || {};
-  // The implicit listener has no section yet: start from what it runs with.
   const start = {
     name: v.name ?? (l ? l.name : ""), bind: v.bind ?? (l ? l.bind : ""), port: v.port ?? (l ? String(l.port) : ""),
   };
   for (const [k, id] of Object.entries(L_FIELDS)) $(id).value = start[k] ?? v[k] ?? "";
   setText($("lst-title"), l ? `Edit listener ${l.name}` : "Add listener");
   setText($("lst-save"), l ? "Save" : "Add listener");
-  setText($("lst-hint"), `Saved to ${s.file.path} (previous version kept as a backup) and applied at once: the port opens or moves right away.` +
-    (l && l.implicit ? " This listener comes from [global] today; saving writes it as a [[listener]] section." : ""));
+  setText($("lst-hint"), `Saved to ${s.file.path} (previous version kept as a backup) and applied at once: the port opens or moves right away.`);
   setText($("lst-preview-title"), `Will be written to ${s.file.path}`);
   lShowStep(0);
   $("lst-editor").showModal();
@@ -1939,7 +1935,7 @@ $("lst-form").addEventListener("submit", (ev) => {
   led.saving = true;
   $("lst-save").disabled = true;
   const was = led.l;
-  api("api/listeners/save", { line: was ? was.line : 0, implicit: !!(was && was.implicit), baseHash: led.base.hash, baseMtime: led.base.mtime, values })
+  api("api/listeners/save", { line: was ? was.line : 0, baseHash: led.base.hash, baseMtime: led.base.mtime, values })
     .then((d) => {
       $("lst-editor").close();
       if (d.unchanged) toast("Nothing to save: the listener is as it was.");

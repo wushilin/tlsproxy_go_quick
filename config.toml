@@ -1,14 +1,16 @@
 # tlsproxy config. Values may be bare, "double-quoted" or 'single-quoted'.
 #
 # Every commented-out setting below shows its DEFAULT value: uncommenting a
-# line unchanged changes nothing (this is checked by `go test`). Only
-# `port` is required.
+# line unchanged changes nothing (this is checked by `go test`). Only a
+# [[listener]] with a name and a port is required.
 
-[global]
+[[listener]]
+name = https                    # (required) unique; what a rule's listener = names
 bind = 0.0.0.0                  # (default: 0.0.0.0) listen address: 0.0.0.0 = all IPv4, :: = all IPv6 and IPv4;
                                 #   or specific addresses, several separated by ";" (192.0.2.1; 2001:db8::1)
 port = 443                      # (required) listen port
 
+[global]
 # --- Timeouts, in seconds -----------------------------------------------
 # handshake_timeout = 10        # (default: 10) max time to receive the whole ClientHello
 # connect_timeout = 10          # (default: 10) max time to connect to the target
@@ -121,16 +123,16 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 # listen and port need a restart; password, secure_cookie and hostnames follow hot reload. The
 # section is hidden from the console's editor and cannot be changed there.
 
-# --- Listeners (optional) ------------------------------------------------------
-# Without [[listener]] sections the proxy has one listener, "default", made from
-# bind and port above. With them, bind and port move into the sections (setting
-# them in [global] too is an error), each listener has its own rules, and every
-# [[host]] names its listener. See samples/14-listeners.toml.
+# --- More listeners -----------------------------------------------------------
+# Every port is a [[listener]] (at least one; bind and port are not [global]
+# settings). Each listener has its own rules. With one, rules without
+# listener = belong to it; with several, every [[host]] names its listener.
+# See samples/14-listeners.toml.
 #   [[listener]]
 #   name        (required) up to 64 letters, digits, spaces and -_@#~()[]<>"'; unique ignoring
 #               case; what listener = in [[host]] refers to. Quote it if it has spaces or
 #               quotes: name = "Kafka (EU)"
-#   bind        same as in [global] (0.0.0.0 unless set)
+#   bind        as in the first [[listener]] above (0.0.0.0 unless set)
 #   port        (required)
 #   Optional, each overriding [global] for this listener only:
 #   proxy_protocol_from, handshake_timeout, idle_timeout, half_close_timeout,

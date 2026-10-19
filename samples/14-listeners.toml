@@ -1,7 +1,6 @@
 # Several listeners, each with its own rules: the public port 443, and a lab
-# port 9092 reachable only on the VPN address. Every rule names its listener.
-# A file without [[listener]] sections has one implicit listener, "default",
-# made from [global] bind and port (the other samples).
+# port 9092 reachable only on the VPN address. Every rule names its listener
+# (with a single listener, as in the other samples, rules may leave it out).
 #
 #> public: www.example.com   => 192.168.1.30:443
 #> public: kafka.example.com => DENY

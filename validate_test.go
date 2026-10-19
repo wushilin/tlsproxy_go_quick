@@ -34,7 +34,7 @@ func validateScript(t *testing.T, dir, body string) string {
 const acceptOK = "case \"$1\" in ok.*) echo welcome; exit 0;; *) echo 'not a customer' >&2; exit 3;; esac\n"
 
 func TestCertValidateScriptConfig(t *testing.T) {
-	auto := "[global]\nport=443\nacme_agree_tos=true\n"
+	auto := "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\n"
 	// A regex pattern needs no cert_domains when a script decides; both together are fine.
 	c := mustParse(t, auto+"[[host]]\npattern=*.x\\.com\ncert=auto\ncert_validate_script=./domains.sh\ntarget_host=x.lan\n"+
 		"[[host]]\npattern=*.y\\.com\ncert=auto\ncert_domains=a.y.com\ncert_validate_script='/opt/d.sh'\ntarget_host=y.lan\n")
@@ -62,7 +62,7 @@ func TestCertValidateScriptConfig(t *testing.T) {
 func TestCertValidateScriptDecidesIssuanceAndRenewal(t *testing.T) {
 	dir := t.TempDir()
 	script := validateScript(t, dir, acceptOK)
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
 		"[[host]]\npattern=*.s\\.test\ncert=auto\ncert_domains=listed.s.test\ncert_validate_script=%s\ntarget_host=x.lan\n", filepath.Join(dir, "certs"), script))
 	rule := &cfg.Rules[0]
 	m := NewCertManager()
@@ -180,7 +180,7 @@ func TestCertValidateScriptAdoptsCertificatesOnDisk(t *testing.T) {
 	os.MkdirAll(filepath.Join(certPath, "other.example.org"), 0o700) // not covered by the rule
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "cert.pem"), certPEM, 0o600)
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "key.pem"), keyPEM, 0o600)
-	cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
 		"[[host]]\npattern=*.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\n", certPath, script))
 	m := NewCertManager()
 	m.issueFunc = func(context.Context, *Config, string) error { t.Error("nothing needs issuing"); return nil }
@@ -221,7 +221,7 @@ func TestCertValidateScriptTimeoutCountsAsRefusal(t *testing.T) {
 // A flood of random names must not cost a key and a certificate each: names the
 // configuration does not list share one placeholder per rule.
 func TestPlaceholderIsSharedForClientChosenNames(t *testing.T) {
-	cfg := mustParse(t, "[global]\nport=443\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n"+
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\n"+
 		"[[host]]\npattern=*.s3.test\ncert=auto\ncert_domains=www.s3.test\ncert_validate_script=/nonexistent\ntarget_host=x.lan\n"+
 		"[[host]]\npattern=*.re\\.test\ncert=auto\ncert_validate_script=/nonexistent\ntarget_host=y.lan\n")
 	m := NewCertManager()
@@ -273,7 +273,7 @@ func TestCertificateReloadDiscardsScriptDecision(t *testing.T) {
 			dir := t.TempDir()
 			entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
 			script := validateScript(t, dir, fmt.Sprintf("touch '%s'\nwhile [ ! -f '%s' ]; do sleep 0.01; done\nexit 0\n", entered, release))
-			cfg := mustParse(t, fmt.Sprintf("[global]\nport=443\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=*.example.com\ncert=auto\ncert_validate_script=%s\ntarget_host=127.0.0.1\n", filepath.Join(dir, "certs"), script))
+			cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\npattern=*.example.com\ncert=auto\ncert_validate_script=%s\ntarget_host=127.0.0.1\n", filepath.Join(dir, "certs"), script))
 			m := NewCertManager()
 			if err := m.Apply(cfg); err != nil {
 				t.Fatal(err)
@@ -294,7 +294,7 @@ func TestCertificateReloadDiscardsScriptDecision(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
-			newCfg := mustParse(t, "[global]\nport=443\n[[host]]\npattern=ANY\naction=deny\n")
+			newCfg := mustParse(t, "[[listener]]\nname=default\nport=443\n[[host]]\npattern=ANY\naction=deny\n")
 			if sameConfig {
 				newCfg = cfg
 			}
@@ -331,7 +331,7 @@ func TestCertificateReloadDiscardsScriptDecision(t *testing.T) {
 // cert_validate_args: each argument is expanded like target_host; without
 // it the script gets the name alone.
 func TestCertValidateScriptArgs(t *testing.T) {
-	auto := "[global]\nport=443\nacme_agree_tos=true\n"
+	auto := "[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\n"
 	c := mustParse(t, auto+"[[host]]\npattern=*.*.x.com\ncert=auto\ncert_validate_script=/opt/d.sh\n"+
 		`cert_validate_args = ["--customer", "aaa-${1}", 'env ${2}', "${host}"]   # who asks`+"\ntarget_host=x.lan\n"+
 		"[[host]]\npattern=*.y.com\ncert=auto\ncert_validate_script=/opt/d.sh\ntarget_host=y.lan\n")

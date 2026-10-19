@@ -179,22 +179,22 @@ func TestLogEdgeSettings(t *testing.T) {
 }
 
 func TestLoggingSection(t *testing.T) {
-	c := mustParse(t, "[global]\nport=1\n")
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n")
 	if c.Log != defaultLogConfig() || c.Log.MaxSize != 15<<20 || c.Log.MaxKeep != 10 || c.Log.CompressAfter != 3 {
 		t.Fatalf("%+v", c.Log)
 	}
-	c = mustParse(t, "[global]\nport=1\n[logging]\nstdout=stdout.log\nstderr = /var/log/tlsproxy.err\nmax_keep=10\n"+
+	c = mustParse(t, "[[listener]]\nname=default\nport=1\n[logging]\nstdout=stdout.log\nstderr = /var/log/tlsproxy.err\nmax_keep=10\n"+
 		"compress_after=3 # stdout.log.4 is compressed\nmax_size=15MiB # rotated\n[[host]]\npattern=.*\naction=deny\n")
 	if c.Log.Stdout != "stdout.log" || c.Log.Stderr != "/var/log/tlsproxy.err" || c.Log.MaxSize != 15<<20 || len(c.Rules) != 1 {
 		t.Fatalf("%+v", c.Log)
 	}
 	for text, want := range map[string]int64{"1500": 1500, "64k": 64 << 10, "10M": 10 << 20, "10 MB": 10 << 20, "1GiB": 1 << 30} {
-		if got := mustParse(t, "[global]\nport=1\n[logging]\nmax_size = "+text+"\n").Log.MaxSize; got != want {
+		if got := mustParse(t, "[[listener]]\nname=default\nport=1\n[logging]\nmax_size = "+text+"\n").Log.MaxSize; got != want {
 			t.Errorf("%s: %d", text, got)
 		}
 	}
 	for _, bad := range []string{"max_size=0", "max_size=ten", "max_size=5T", "compress_after=x", "max_keep=-1", "file=a.log"} {
-		if _, err := ParseConfig("[global]\nport=1\n[logging]\n" + bad + "\n"); err == nil {
+		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[logging]\n" + bad + "\n"); err == nil {
 			t.Errorf("should fail: %s", bad)
 		}
 	}
@@ -217,7 +217,7 @@ func TestBinaryLogsToRotatingFiles(t *testing.T) {
 	l.Close()
 	outLog, errLog, cfgPath := filepath.Join(dir, "stdout.log"), filepath.Join(dir, "stderr.log"), filepath.Join(dir, "config.toml")
 	config := func(rules string) []byte {
-		return []byte(fmt.Sprintf("[global]\nbind=127.0.0.1\nport=%d\nreload_interval=5\nstats_interval=0\n\n[logging]\nstdout=%s\nstderr=%s\n"+
+		return []byte(fmt.Sprintf("[[listener]]\nname=default\nbind=127.0.0.1\nport=%d\n[global]\nreload_interval=5\nstats_interval=0\n\n[logging]\nstdout=%s\nstderr=%s\n"+
 			"max_keep=4\ncompress_after=1\nmax_size=3K\n\n%s", port, outLog, errLog, rules))
 	}
 	os.WriteFile(cfgPath, config("[[host]]\npattern=.*\naction=deny\n"), 0o644)

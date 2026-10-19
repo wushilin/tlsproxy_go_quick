@@ -149,13 +149,8 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			}
 			return treeItem{Key: key, Value: global, From: "[global]"}
 		}
-		if l.Line > 0 {
-			n.Line = toEditor(l.Line)
-			n.Items = append(n.Items, treeItem{Key: "bind", Value: l.Bind}, treeItem{Key: "port", Value: strconv.Itoa(l.Port)})
-		} else {
-			n.Tag = "from [global]"
-			n.Items = append(n.Items, treeItem{Key: "bind", Value: l.Bind, From: "[global]"}, treeItem{Key: "port", Value: strconv.Itoa(l.Port), From: "[global]"})
-		}
+		n.Line = toEditor(l.Line)
+		n.Items = append(n.Items, treeItem{Key: "bind", Value: l.Bind}, treeItem{Key: "port", Value: strconv.Itoa(l.Port)})
 		ppf := cfg.ProxyProtocolFrom
 		if l.ProxyProtocolFrom != nil {
 			ppf = *l.ProxyProtocolFrom

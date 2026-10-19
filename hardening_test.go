@@ -170,12 +170,12 @@ func TestHandshakeSlotsPerSourceAreLimited(t *testing.T) {
 // ---------------------------------------------------------------- several bind addresses
 
 func TestSeveralBindAddresses(t *testing.T) {
-	c := mustParse(t, "[global]\nbind = 127.0.0.1; [::1]\nport=1\n")
+	c := mustParse(t, "[[listener]]\nname=default\nbind = 127.0.0.1; [::1]\nport=1\n[global]\n")
 	if fmt.Sprint(c.Binds) != "[127.0.0.1 ::1]" || c.Bind != "127.0.0.1; ::1" || listenAddrs(c) != "127.0.0.1:1, [::1]:1" {
 		t.Fatalf("%v %q %q", c.Binds, c.Bind, listenAddrs(c))
 	}
 	for _, bad := range []string{"bind = 0.0.0.0, 0.0.0.0", "bind = ;"} {
-		if _, err := ParseConfig("[global]\nport=1\n" + bad + "\n"); err == nil {
+		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n" + bad + "\n"); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}
 	}
@@ -187,7 +187,7 @@ func TestSeveralBindAddresses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := mustParse(t, "[global]\nport=1\nstats_interval=0\n"+allowAll(echoBackend(t, "")))
+	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\n"+allowAll(echoBackend(t, "")))
 	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -331,11 +331,11 @@ func TestIPAddressIsNotAnSNI(t *testing.T) {
 		t.Fatalf("a name made of numbers is still a name: %q %v", sni, err)
 	}
 	// A catch-all that follows the client's SNI is an open relay: say so.
-	c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=.*\ntarget_host=${host}\n")
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=.*\ntarget_host=${host}\n")
 	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "connects to whatever name a client sends") {
 		t.Fatalf("%q", c.Warnings)
 	}
-	if c := mustParse(t, "[global]\nport=1\n[[host]]\npattern=*.example\\.com\ntarget_host=${host}\n[[host]]\npattern=.*\ntarget_host=fixed.lan\n"); len(c.Warnings) != 0 {
+	if c := mustParse(t, "[[listener]]\nname=default\nport=1\n[[host]]\npattern=*.example\\.com\ntarget_host=${host}\n[[host]]\npattern=.*\ntarget_host=fixed.lan\n"); len(c.Warnings) != 0 {
 		t.Fatalf("%q", c.Warnings)
 	}
 }
