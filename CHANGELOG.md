@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `[global] remember_nonce = true` (the default): loop detection. A hash of
+  every ClientHello passed through is kept for 10 s (a fixed lock-free table
+  of 1M entries); a connection whose ClientHello comes back is this proxy's
+  own and is refused, instead of looping until `max_connections` runs out
+  (e.g. `ANY` → `${host}` with a name that points at this machine).
+
 ## v1.3.0
 
 - `[global] http_to_https_redirect = true` (default false): a listener named

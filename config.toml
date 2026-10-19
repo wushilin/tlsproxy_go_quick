@@ -46,6 +46,12 @@ port = 443                      # (required) listen port
 #                               #   redirected; the rules on 443 decide from there. Listener name
 #                               #   http-to-https-redirect (reserved); Stop/Start in the console
 
+# --- Loop detection -----------------------------------------------------------------
+# remember_nonce = true         # (default: true) remember a hash of every ClientHello passed
+#                               #   through for 10 s (at most 1M, newest win) and refuse one that
+#                               #   comes back: this proxy's own connection reaching itself again
+#                               #   (a name or ${host} target pointing here). Terminated TLS: not covered
+
 # --- Throughput tuning ------------------------------------------------------------
 # short_read_delay_us = 0       # (default: 0 = off) pause N microseconds after a short read so
 #                               #   data batches up: less CPU per GiB, more latency per round trip

@@ -235,8 +235,8 @@ func TestNonePatternRoutesClientsWithoutSNI(t *testing.T) {
 	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=NONE\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 		"[[host]]\npattern=*.named\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 		"[[host]]\npattern=.*\naction=deny\n", def, named))
-	noSNI := wrapRecords(buildClientHello(nil, 0), 16384)
 	for i := 0; i < 2; i++ { // the second round is served from the route cache
+		noSNI := wrapRecords(buildClientHello(nil, 0), 16384)
 		c := dial(t, p)
 		c.Write(noSNI)
 		got := readN(t, c, 1+len(noSNI))
@@ -572,9 +572,10 @@ func TestHalfCloseTimeout(t *testing.T) {
 func TestMaxConnectionsEnforcedAndReleased(t *testing.T) {
 	t.Parallel()
 	p := startProxy(t, "max_connections=2", allowAll(echoBackend(t, "")))
-	hello := clientHello("limit.test")
+	var hello []byte
 	var open []*net.TCPConn
 	for i := 0; i < 2; i++ {
+		hello = clientHello("limit.test")
 		c := dial(t, p)
 		c.Write(hello)
 		readN(t, c, len(hello))
@@ -588,6 +589,7 @@ func TestMaxConnectionsEnforcedAndReleased(t *testing.T) {
 	open[0].Close()
 	time.Sleep(300 * time.Millisecond)
 	c = dial(t, p)
+	hello = clientHello("limit.test")
 	c.Write(hello)
 	readN(t, c, len(hello))
 }
@@ -641,9 +643,10 @@ func TestStatsTrackConnectionsGoroutinesAndBytes(t *testing.T) {
 	t.Parallel()
 	p := startProxy(t, "", fmt.Sprintf("[[host]]\npattern=ok\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "")))
 	st := p.srv.stats
-	hello := clientHello("ok.test")
+	hello := clientHello("ok.test") // the same length every time
 	var conns []*net.TCPConn
 	for i := 0; i < 3; i++ {
+		hello = clientHello("ok.test")
 		c := dial(t, p)
 		c.Write(hello)
 		c.Write(make([]byte, 1000))

@@ -256,6 +256,7 @@ with its default, and a test keeps that file in step with the code:
 | `short_read_delay_us`  | 0       | pause N µs after a short read so data batches up. Measured in Go: a few percent more throughput at best, +37 µs (50) or +210 µs (200) per round trip, so leave it off unless your box shows otherwise |
 | `splice`               | true    | Linux only: relay passed-through connections with `splice(2)`, see [Zero-copy relaying](#zero-copy-relaying-linux) |
 | `http_to_https_redirect` | false | also listen on port 80 and redirect every plain HTTP request to `https://`, see [HTTP to HTTPS redirect](#http-to-https-redirect) |
+| `remember_nonce` | true | refuse a connection that is this proxy's own, come back to it: see [Loop detection](#loop-detection-remember_nonce) |
 
 The legacy keys `io_model` and `worker_threads` are accepted and ignored (with
 a log line), so older config files keep loading.
@@ -265,7 +266,7 @@ option is missing from it, from `config.toml` or from this README):
 
 | section | options |
 |---|---|
-| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[global]` | `bind` `port` · `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
 | `[[listener]]` | `name` `bind` `port` · `proxy_protocol_from` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
@@ -380,6 +381,31 @@ to the same host, path and query on `https://` (no port, so 443):
   `[#12] redirect GET http://www.example.com/a -> https://www.example.com/a (301)`.
 - It plays no part in ACME, which only uses TLS-ALPN-01 on port 443.
 - With Docker, publish the port too: `-p 80:80`.
+
+### Loop detection (`remember_nonce`)
+
+A rule can send a connection back to this proxy: `pattern = ANY` with
+`target_host = ${host}` and a client asking for a name that resolves to this
+machine (or to 127.0.0.1), or a target that is another of its listeners.
+Each hop would open the next until `max_connections` runs out. With
+`remember_nonce = true` (the default) the proxy remembers a hash of every
+ClientHello it passes through, and refuses one that arrives again:
+
+- The whole ClientHello message is hashed, so no field is trusted: a refused
+  connection sent byte for byte the hello the proxy forwarded moments
+  earlier. Real clients pick a fresh random for every connection, so they
+  never do; a replayed hello is refused too.
+- The hash is Go's `hash/maphash` (64-bit, seeded randomly at each start),
+  several times cheaper than SHA-256. An accidental match is about 10⁻¹³ per
+  connection, and without the seed nobody can aim for one.
+- It is kept 10 seconds, in a fixed table of 1M entries (8 MiB) where a newer
+  hello can take an older one's place: one atomic write to remember, one
+  atomic read to check, nothing to clean up, no lock.
+- The looped connection is refused with a TLS `access_denied` alert, which
+  travels back to the client; the log and the flow log say `connection
+  loop`.
+- Only passed-through connections are covered. A terminated connection
+  starts a new TLS session upstream; point those rules at fixed targets.
 
 ## IPv6
 
