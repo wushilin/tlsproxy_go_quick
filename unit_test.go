@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,10 +21,13 @@ import (
 // ---------------------------------------------------------------- helpers
 
 // buildClientHello builds a minimal ClientHello handshake message (no record
-// framing), optionally with a padding extension of pad bytes.
+// framing), optionally with a padding extension of pad bytes. Its random is
+// random, as a real client's: the proxy refuses a hello it forwarded moments
+// ago as a loop (remember_nonce).
 func buildClientHello(sni *string, pad int) []byte {
 	body := []byte{0x03, 0x03}
 	body = append(body, make([]byte, 32)...)
+	rand.Read(body[2:34])
 	body = append(body, 0)                // session id
 	body = append(body, 0, 2, 0x13, 0x01) // one cipher suite
 	body = append(body, 1, 0)             // null compression

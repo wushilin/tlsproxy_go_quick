@@ -115,6 +115,8 @@ type Server struct {
 	rejectLog, handshakeLog rateLimitedLog
 
 	tickets atomic.Pointer[ticketKeys] // replaced whole when rotated
+
+	nonces *nonceCache // ClientHello randoms forwarded lately (remember_nonce)
 }
 
 // sessionTicketKeys returns a stable current key and yesterday's key.  TLS
@@ -199,7 +201,7 @@ func (s *Server) sessionTicketKeys() [][32]byte {
 
 // NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts()}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache()}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}
@@ -679,6 +681,17 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	if sni == "" {
 		sniDisp = "<none>"
 	}
+	if cfg.RememberNonce && s.nonces.seen(info.Digest, time.Now()) {
+		rt.pool.Put(helloBuf)
+		s.stats.Denied.Add(1)
+		c.mu.Lock()
+		c.SNI, c.routed = sni, true
+		c.mu.Unlock()
+		c.setEnd(flowDenied, "connection loop: this proxy forwarded this ClientHello itself moments ago (remember_nonce)")
+		logf("[#%d] route sni=%s src=%s -> DENY (connection loop: this proxy forwarded this ClientHello itself moments ago)", id, sniDisp, src)
+		client.Write(alertAccessDenied)
+		return
+	}
 
 	// One cache for every listener: the key says whose rules decided.
 	d, hit := rt.cache.GetOrRoute(cfg.listener.Name+"\x00"+sni, func() Decision { return cfg.RouteExcept(sni, s.stoppedRules()) })
@@ -847,6 +860,11 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		c.mu.Lock()
 		c.how.TLS, c.how.ALPN = "passthrough", strings.Join(info.ALPN, ",") // what the client offered
 		c.mu.Unlock()
+		if cfg.RememberNonce {
+			// Before any byte goes out: a hop back to this proxy could
+			// otherwise read the hello before it is remembered.
+			s.nonces.remember(info.Digest, time.Now())
+		}
 		// A foreign TLS-ALPN-01 challenge bypasses normal termination, but a
 		// backend configured for PROXY protocol still needs its header before
 		// the untouched ClientHello.

@@ -154,6 +154,7 @@ func TestHandshakeSlotsPerSourceAreLimited(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c2.Close()
+	hello = clientHello("a.test") // another client's
 	c2.Write(hello)
 	if got := readN(t, c2, len(hello)); len(got) != len(hello) {
 		t.Fatal("a freed slot should be usable")
@@ -193,8 +194,8 @@ func TestSeveralBindAddresses(t *testing.T) {
 	}
 	go srv.Serve(four, "", six)
 	t.Cleanup(func() { four.Close(); six.Close() })
-	hello := clientHello("both.test")
 	for _, addr := range []string{four.Addr().String(), six.Addr().String()} {
+		hello := clientHello("both.test")
 		conn, err := net.DialTimeout("tcp", addr, T)
 		if err != nil {
 			t.Fatalf("%s: %v", addr, err)

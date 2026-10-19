@@ -64,6 +64,11 @@
         "meaning": "Linux: relay passed-through connections with splice(2), without copying them through the proxy."
       },
       {
+        "key": "remember_nonce",
+        "default": "true",
+        "meaning": "Remember a hash of every ClientHello passed through for 10 seconds (at most 1M, newest win) and refuse one that comes in again: it is this proxy's own connection come back (a name or ${host} target that points at this machine), which would otherwise loop until max_connections. Terminated connections are not covered."
+      },
+      {
         "key": "http_to_https_redirect",
         "default": "false",
         "meaning": "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the rules on 443 decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."

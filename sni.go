@@ -5,9 +5,14 @@ package main
 import (
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"net/netip"
 	"strings"
 )
+
+// helloSeed keys the ClientHello hash, fresh for each process: nobody outside
+// can compute digests to build a colliding hello (see remember_nonce).
+var helloSeed = maphash.MakeSeed()
 
 const maxClientHello = 64 * 1024
 
@@ -22,8 +27,9 @@ var errNeedMore = errors.New("need more data")
 
 // helloInfo is what the proxy needs from a ClientHello.
 type helloInfo struct {
-	SNI  string   // lowercased; "" if absent
-	ALPN []string // offered application protocols, e.g. "h2", "acme-tls/1"
+	SNI    string   // lowercased; "" if absent
+	ALPN   []string // offered application protocols, e.g. "h2", "acme-tls/1"
+	Digest uint64   // hash of the ClientHello message (see remember_nonce)
 }
 
 func (h helloInfo) offers(proto string) bool {
@@ -57,7 +63,13 @@ func parseHello(data []byte) (helloInfo, error) {
 				return helloInfo{}, errors.New("ClientHello too large")
 			}
 			if len(handshake) >= 4+msgLen {
-				return parseExtensions(handshake[4 : 4+msgLen])
+				info, err := parseExtensions(handshake[4 : 4+msgLen])
+				if err == nil {
+					// The message, not the records: a hop back to this
+					// proxy may frame or segment the same bytes differently.
+					info.Digest = maphash.Bytes(helloSeed, handshake[:4+msgLen])
+				}
+				return info, err
 			}
 		}
 		if len(rest) < 5 {

@@ -51,6 +51,7 @@ type Config struct {
 	StatsInterval     time.Duration // 0 = never
 	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
 	Splice            bool          // relay passed-through connections with splice(2) (Linux only)
+	RememberNonce     bool          // refuse a ClientHello this proxy itself forwarded seconds ago (a loop)
 	Log               LogConfig     // the [logging] section
 
 	// Certificates (only used by rules with cert = ...).
@@ -582,6 +583,7 @@ func ParseConfig(text string) (*Config, error) {
 		ReloadInterval:     5 * time.Second,
 		StatsInterval:      60 * time.Second,
 		Splice:             true,
+		RememberNonce:      true,
 		Log:                defaultLogConfig(),
 
 		CertPath:            "./certs",
@@ -725,6 +727,10 @@ func ParseConfig(text string) (*Config, error) {
 			case "splice":
 				if cfg.Splice, err = parseBool(value); err != nil {
 					err = fail("splice: %v", err)
+				}
+			case "remember_nonce":
+				if cfg.RememberNonce, err = parseBool(value); err != nil {
+					err = fail("remember_nonce: %v", err)
 				}
 			case "http_to_https_redirect":
 				if httpRedirect, err = parseBool(value); err != nil {

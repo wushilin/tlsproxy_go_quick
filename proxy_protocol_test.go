@@ -136,15 +136,14 @@ func TestProxyProtocolOutboundHeaders(t *testing.T) {
 func TestProxyProtocolHeadersAreNotForwarded(t *testing.T) {
 	port := echoBackend(t, "up:")
 	p := startProxy(t, "proxy_protocol_from = 127.0.0.1", allowAll(port)) // the test client plays the load balancer
-	payload := clientHello("proxy.example")
-
 	v4 := []byte{203, 0, 113, 9, 127, 0, 0, 1, 0x9c, 0x40, 0x01, 0xbb}
-	inputs := [][]byte{
-		payload,
-		append([]byte("PROXY TCP4 203.0.113.9 127.0.0.1 40000 443\r\n"), payload...),
-		append(proxyV2Header(0x11, v4), payload...),
-	}
-	for _, input := range inputs {
+	for i := range 3 {
+		payload := clientHello("proxy.example") // a fresh one per connection, as a real client's
+		input := [][]byte{
+			payload,
+			append([]byte("PROXY TCP4 203.0.113.9 127.0.0.1 40000 443\r\n"), payload...),
+			append(proxyV2Header(0x11, v4), payload...),
+		}[i]
 		c := dial(t, p)
 		if _, err := c.Write(input); err != nil {
 			t.Fatal(err)
