@@ -157,7 +157,7 @@ func TestConsolePlaintextPasswordIsReplacedByItsHash(t *testing.T) {
 	_, c, path := startConsoleProxy(t, "password = \"s3cret pass\"  # typed by hand", "[[host]]\nlistener=default\npattern=.*\naction=deny\n")
 	data, _ := os.ReadFile(path)
 	text := string(data)
-	if strings.Contains(text, "s3cret") || !strings.Contains(text, "password_hash = \"pbkdf2-sha256$") {
+	if strings.Contains(text, "s3cret") || !strings.Contains(text, "password_hash = \"$argon2id$") {
 		t.Fatalf("plaintext still on disk, or no hash:\n%s", text)
 	}
 	if !strings.Contains(text, "# top comment") || !strings.Contains(text, "# console comment") || !strings.Contains(text, "pattern=.*") {

@@ -41,6 +41,7 @@ type Runtime struct {
 	// max_aggregated_speed buckets.
 	byListener     map[string]*Config
 	listenerLimits map[string]*ruleLimits
+	serve          *serveState // what rules with service_rule keys serve with
 }
 
 func newRuntime(cfg *Config, prev *Runtime) *Runtime {
@@ -107,9 +108,10 @@ type Server struct {
 	stoppedListeners map[string]bool // stopped from the console, in memory only
 	serving          bool            // start-up is over: log each listener that opens
 
-	// The [[local_services]] ports, by name (see services.go).
-	servicesMu sync.Mutex
-	services   map[string]*liveService
+	// Connections served here (rules with service_rule keys), by their TLS
+	// connection, for the web server to find (see serve.go).
+	served sync.Map // *tls.Conn -> *servedConn
+	auth   *authChecker
 
 	dialer *targetDialer // resolves targets (cached) and connects
 
@@ -205,12 +207,14 @@ func (s *Server) sessionTicketKeys() [][32]byte {
 
 // NewServer fails if a CA a rule names cannot be opened.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache()}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache(), auth: newAuthChecker()}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}
 	s.stats.prepare(cfg)
-	s.runtime.Store(newRuntime(cfg, nil))
+	rt := newRuntime(cfg, nil)
+	rt.serve = s.newServeState(cfg)
+	s.runtime.Store(rt)
 	return s, nil
 }
 
@@ -321,7 +325,6 @@ func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error 
 	}
 	s.serving = true
 	s.listenersMu.Unlock()
-	s.syncServices(rt.cfg) // a service that cannot open is logged; the proxy carries on
 	notOpen := ""
 	if closed != nil {
 		notOpen = " (not open: " + strings.Join(closed, ", ") + ")"
@@ -500,10 +503,11 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 		errorf("config reload: %v; logging is unchanged", err)
 	}
 	rt := newRuntime(cfg, old)
+	rt.serve = s.newServeState(cfg)
 	s.stats.prepare(cfg) // before it goes live: connections only read these counters
 	s.runtime.Store(rt)
+	old.serve.retire()
 	problems := s.syncListeners(cfg) // after the store: a new listener's connections need its config
-	problems = append(problems, s.syncServices(cfg)...)
 	extra := ""
 	if rt.pool != old.pool {
 		extra = ", buffer pool replaced (old buffers freed)"
@@ -776,6 +780,9 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	}
 	dest := net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 	destDisp := dest // [2001:db8::1]:443 for an IPv6 target
+	if d.Rule.Serves() {
+		destDisp = "served here"
+	}
 	logf("[#%d] route sni=%s -> %s (ALLOW, rule line %d%s)", id, sniDisp, destDisp, d.RuleLine, cached)
 	ruleKey := d.Rule.Key()
 	l := cfg.listener
@@ -810,6 +817,10 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 			client.Write(alertAccessDenied)
 			return
 		}
+	}
+	if d.Rule.Serves() {
+		s.serveHere(c, client, hello, helloBuf, info, d, cfg, rt)
+		return
 	}
 
 	t0 := time.Now()

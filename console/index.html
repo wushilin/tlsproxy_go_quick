@@ -83,19 +83,6 @@
       </div>
 
       <div id="listeners" class="listeners"></div>
-
-      <div class="panel" id="services-panel" hidden>
-        <div class="panel-head">
-          <h2>Local services</h2>
-          <span class="sub">[[local_services]] and their [[proxy_pass_rules]]; edit them in the Config file tab</span>
-        </div>
-        <div class="scroll">
-          <table class="grid">
-            <thead><tr><th>Name</th><th>Type</th><th>Listening on</th><th>PROXY</th><th>Serves</th></tr></thead>
-            <tbody id="services"></tbody>
-          </table>
-        </div>
-      </div>
     </section>
 
     <!-- ================= Flow log ================= -->
@@ -290,11 +277,20 @@
     <div class="step" data-step="1" hidden>
       <div class="seg" role="radiogroup" aria-label="Action">
         <label><input type="radio" name="f-action" value="allow" checked><span>Forward it <em>allow</em></span></label>
+        <label><input type="radio" name="f-action" value="serve"><span>Serve it here <em>service rules</em></span></label>
         <label><input type="radio" name="f-action" value="deny"><span>Refuse it <em>deny</em></span></label>
       </div>
       <div class="fields" id="target-fields">
         <label class="field"><span>Target host</span><input id="f-target-host" spellcheck="false" placeholder="10.0.0.6 or backend-${1}.lan"></label>
         <label class="field"><span>Target port</span><input id="f-target-port" inputmode="numeric" placeholder="443"></label>
+      </div>
+      <div id="routes-fields" hidden>
+        <label class="field wide"><span>Service rules <em>one per line; the longest prefix serves a request</em></span>
+          <textarea id="f-routes" class="pem routes" rows="5" spellcheck="false" wrap="off" placeholder="type=reverse_proxy; prefix=/api/; target=http://127.0.0.1:8080; strip_prefix=true&#10;type=static_content; prefix=/; base_dir=/opt/www/site"></textarea></label>
+        <p class="field-help">Each line is <code>type=reverse_proxy; prefix=/api/; target=http://host:port</code> (or https://), with optional <code>strip_prefix=true</code>, <code>force_host=name</code>, <code>tls_verify=false</code>;
+          or <code>type=static_content; prefix=/assets/; base_dir=/opt/www/assets</code>, where the prefix stands for the folder (/assets/a.css is base_dir/a.css).
+          Add <code>basic_auth=name</code> to ask for a [[basic_auth]] user from the config file. Lines starting # are left out.
+          Checked as you type; saved as service_rule1, service_rule2, ….</p>
       </div>
       <p class="field-help" id="capture-help" hidden></p>
       <p class="field-help" id="deny-help" hidden>Clients asking for a matching name are disconnected during the handshake. Nothing else to set.</p>
@@ -329,7 +325,7 @@
         </div>
 
         <p class="common-note">For both passed-through and terminated connections:</p>
-        <div class="group">
+        <div class="group" id="proxy-group">
           <h3 class="group-title">PROXY protocol</h3>
           <div class="fields">
             <label class="check wide-check"><input type="checkbox" id="f-proxy"> Tell the target the client's address (PROXY header)</label>

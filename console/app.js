@@ -150,34 +150,6 @@ function meter(key) {
   return m;
 }
 
-// ---------- local services (read only) ----------
-
-function drawServices(services) {
-  $("services-panel").hidden = services.length === 0;
-  const key = JSON.stringify(services);
-  if (ui.servicesKey === key) return; // unchanged: keep the DOM (and any selection) as it is
-  ui.servicesKey = key;
-  const body = $("services");
-  body.replaceChildren();
-  for (const v of services) {
-    const tr = el("tr");
-    const name = el("td", "mono", v.name);
-    if (v.line) name.title = `line ${v.line}`;
-    tr.append(name, el("td", "", v.type));
-    const where = el("td", "mono");
-    where.append(el("span", "", v.addrs.join(", ") + " "));
-    if (v.error) where.append(el("span", "chip bad", v.error));
-    else where.append(el("span", v.open ? "chip ok" : "chip warn", v.open ? "open" : "closed"));
-    tr.append(where, el("td", "mono", v.proxyVersion));
-    const serves = el("td", "mono");
-    if (v.type === "http_server") serves.textContent = v.docRoot;
-    else if (!v.passRules || v.passRules.length === 0) serves.append(el("span", "chip warn", "no proxy_pass_rules: every request gets 404"));
-    else for (const r of v.passRules) serves.append(el("div", "", r));
-    tr.append(serves);
-    body.append(tr);
-  }
-}
-
 // ---------- DOM helpers ----------
 
 function el(tag, cls, text) {
@@ -657,7 +629,7 @@ function connState(c) {
 // addresses), a rule (pattern, target) and a connection (#id, addresses,
 // SNI). Whatever an upper level matches, everything below it matches too.
 const listenerHay = (l) => `${l.name} ${l.bind} ${l.port} ${(l.addrs || []).join(" ")}`.toLowerCase();
-const ruleHay = (r) => `${r.pattern} ${r.target}`.toLowerCase();
+const ruleHay = (r) => `${r.pattern} ${r.target} ${(r.routes || []).join(" ")}`.toLowerCase();
 
 function matches(c, r, l) {
   const f = ui.filter;
@@ -737,7 +709,6 @@ function applyState(s) {
   meter("st").add(s.now, s.status.bytesUp);
   meter("sr").add(s.now, s.status.bytesDown);
 
-  drawServices(s.services || []);
   const container = $("listeners");
   const seenL = new Set();
   const seenR = new Set();
@@ -936,6 +907,7 @@ function paint() {
     rr.pattern.title = r.line ? `[[host]] at line ${r.line} of the config file` : "";
     setText(rr.target, removed ? "removed" : r.allow ? r.target : "deny");
     rr.target.classList.toggle("deny", !removed && !r.allow);
+    rr.target.title = r.routes ? r.routes.join("\n") : "";
     rr.card.classList.toggle("stopped", out);
 
     rr.status.hidden = !out;
@@ -1424,18 +1396,20 @@ function setRadio(name, v) {
 // "" so they leave the file.
 function formValues() {
   const allow = radio("f-action") !== "deny";
-  const term = allow && radio("f-tls") === "terminate";
+  const serve = radio("f-action") === "serve"; // service rules: no target, nothing upstream
+  const term = serve || (allow && radio("f-tls") === "terminate");
   const src = radio("f-certsrc");
   const auto = term && src === "auto";
   const local = term && src === "local";
-  const upTLS = term && $("f-upstream-tls").value !== "false";
-  const proxy = allow && $("f-proxy").checked;
+  const upTLS = term && !serve && $("f-upstream-tls").value !== "false";
+  const proxy = allow && !serve && $("f-proxy").checked;
   const v = {
     listener: $("f-listener").value,
     pattern: val("f-pattern"),
     action: allow ? "allow" : "deny",
-    target_host: allow ? val("f-target-host") : null,
-    target_port: allow ? val("f-target-port") : null,
+    target_host: allow && !serve ? val("f-target-host") : null,
+    target_port: allow && !serve ? val("f-target-port") : null,
+    service_rules: serve ? $("f-routes").value : null,
     max_aggregated_speed: allow ? val("f-agg") : null,
     max_single_connection_speed: allow ? val("f-conn") : null,
     proxy: allow ? (proxy ? "true" : "") : null,
@@ -1444,7 +1418,7 @@ function formValues() {
     cert_domains: auto || local ? val("f-cert-domains") : null,
     cert_validate_script: auto ? val("f-cert-script") : null,
     cert_validate_args: auto && val("f-cert-script") ? val("f-cert-args") : null,
-    upstream_tls: term ? $("f-upstream-tls").value : null,
+    upstream_tls: term && !serve ? $("f-upstream-tls").value : null,
     upstream_tls_verify: upTLS ? $("f-upstream-verify").value : null,
     upstream_sni: upTLS ? val("f-upstream-sni") : null,
   };
@@ -1454,7 +1428,15 @@ function formValues() {
     const o = orig[k] ?? "";
     if (normal(k, o) === normal(k, v[k])) v[k] = o;
   }
+  // Unchanged service rules are not sent, so their keys stay as written
+  // (a change rewrites them as service_rule1, 2, ...).
+  if (routeLines(v.service_rules) === routeLines(orig.service_rules)) delete v.service_rules;
   return v;
+}
+
+// routeLines is the service rules that count: blank lines and # comments out.
+function routeLines(text) {
+  return String(text ?? "").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).join("\n");
 }
 
 // localCAOf is the CA a cert value names ("local-ca" is ca001), "" if none.
@@ -1500,7 +1482,8 @@ function boolSelect(raw) {
 function prefill(values) {
   const v = values || {};
   $("f-pattern").value = v.pattern || "";
-  setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : "allow");
+  setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : v.service_rules ? "serve" : "allow");
+  $("f-routes").value = v.service_rules || "";
   $("f-target-host").value = v.target_host || "";
   $("f-target-port").value = v.target_port || "";
   const cert = (v.cert || "").trim();
@@ -1567,7 +1550,10 @@ function quickChecks(v) {
   if (!$("f-listener").value) out.push([0, "Choose the listener this rule belongs to."]);
   if (!v.pattern) out.push([0, "The pattern is required."]);
   else if (info.bad) out.push([0, info.text]);
-  if (v.action !== "deny") {
+  if (radio("f-action") === "serve") {
+    if (!routeLines($("f-routes").value)) out.push([1, "Write at least one service rule, e.g. type=static_content; prefix=/; base_dir=/opt/www/site"]);
+    if (radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the CAs page first."]);
+  } else if (v.action !== "deny") {
     const host = val("f-target-host");
     if (!host) out.push([1, "A target host is required for an allow rule."]);
     const bare = /\$(?!\{)(\d*)/.exec(host);
@@ -1598,14 +1584,16 @@ function syncWizard() {
   $("pattern-help").classList.toggle("bad", !!info.bad);
 
   const allow = radio("f-action") !== "deny";
-  $("target-fields").hidden = !allow;
+  const serve = radio("f-action") === "serve";
+  $("target-fields").hidden = !allow || serve;
+  $("routes-fields").hidden = !serve;
   $("deny-help").hidden = allow;
   $("options-allow").hidden = !allow;
   $("options-deny").hidden = allow;
 
   // ${1}, ${2}, ... in the target: explain them with a sample name.
   const cap = $("capture-help");
-  cap.hidden = !allow || info.kind !== "wildcard";
+  cap.hidden = !allow || serve || info.kind !== "wildcard";
   if (!cap.hidden) {
     const sample = tryNames().find((n) => n) || sampleNames(pattern);
     const re = patternRegex(pattern);
@@ -1623,9 +1611,13 @@ function syncWizard() {
     }
   }
 
+  if (serve) setRadio("f-tls", "terminate"); // serving needs the requests decrypted
+  for (const r of document.querySelectorAll('input[name="f-tls"]')) r.disabled = serve && r.value === "pass";
   const term = radio("f-tls") === "terminate";
   $("tls-fields").hidden = !term;
-  setText($("tls-help"), term
+  setText($("tls-help"), serve
+    ? "The proxy decrypts here with its own certificate and answers the requests itself, by the service rules."
+    : term
     ? "The proxy decrypts here with its own certificate and opens a new connection to the target."
     : "The encrypted stream goes to the target untouched; the target presents its own certificate.");
   const src = radio("f-certsrc");
@@ -1633,7 +1625,9 @@ function syncWizard() {
   for (const n of document.querySelectorAll(".auto-only")) n.hidden = src !== "auto";
   setText($("cert-names-hint"), src === "local" ? "optional: names or globs (*.dev.abc.com, *.abc.com); any other name is refused" : "optional");
   const upTLS = $("f-upstream-tls").value !== "false";
-  for (const n of document.querySelectorAll(".upstream-tls-only")) n.hidden = !upTLS;
+  for (const n of document.querySelectorAll(".upstream-tls-only")) n.hidden = !upTLS || serve;
+  $("f-upstream-tls").closest(".field").hidden = serve;
+  $("proxy-group").hidden = serve;
   $("proxy-version-field").hidden = !$("f-proxy").checked;
 }
 

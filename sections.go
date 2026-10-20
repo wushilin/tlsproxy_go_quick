@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -236,7 +237,16 @@ func checkKeys(keys []string, values map[string]string, section string) error {
 // whose header is on line (1-based; 0 adds a new rule), or its deletion.
 // An empty value removes that option.
 func editRules(text string, line int, values map[string]string, del bool) (string, error) {
+	routes, setRoutes := values[serviceRulesValue]
+	if setRoutes {
+		values = maps.Clone(values)
+		delete(values, serviceRulesValue)
+	}
 	if err := checkKeys(hostKeys, values, hostHeader); err != nil {
+		return "", err
+	}
+	routeLines, err := serviceRuleLines(routes)
+	if err != nil {
 		return "", err
 	}
 	lines := strings.Split(text, "\n")
@@ -253,6 +263,7 @@ func editRules(text string, line int, values map[string]string, del bool) (strin
 		if err != nil {
 			return "", err
 		}
+		sec = append(sec, routeLines...)
 		if len(blocks) == 0 {
 			return strings.Join(insertBlock(lines, len(lines), sec), "\n"), nil
 		}
@@ -260,7 +271,92 @@ func editRules(text string, line int, values map[string]string, del bool) (strin
 		return strings.Join(slices.Concat(lines[:at], []string{""}, sec, lines[at:]), "\n"), nil
 	}
 	out, err := setValues(lines, *b, hostKeys, values)
-	return strings.Join(out, "\n"), err
+	if err != nil || !setRoutes {
+		return strings.Join(out, "\n"), err
+	}
+	return strings.Join(replaceServiceRules(out, *blockAt(hostBlocks(out), line), routeLines), "\n"), nil
+}
+
+// serviceRulesValue is the rule editor's one text box for a rule's
+// service_rule keys: one per line, written back as service_rule1, 2, ...
+const serviceRulesValue = "service_rules"
+
+// serviceRuleLines turns the text box into service_rule lines, checking
+// each the way the config loader will. Blank lines and # comments are left
+// out.
+func serviceRuleLines(text string) ([]string, error) {
+	var out []string
+	for i, l := range strings.Split(text, "\n") {
+		if l = strings.TrimSpace(l); l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		key := fmt.Sprintf("service_rule%d", len(out)+1)
+		if _, err := parseServiceRule(key, l, 0); err != nil {
+			return nil, fmt.Errorf("service rule on line %d: %v", i+1, err)
+		}
+		fv, err := fmtValue(l)
+		if err != nil {
+			return nil, fmt.Errorf("service rule on line %d: %v", i+1, err)
+		}
+		out = append(out, key+" = "+fv)
+	}
+	return out, nil
+}
+
+// replaceServiceRules swaps a block's service_rule lines for routes, put
+// where the first one was (after the last option if there was none).
+func replaceServiceRules(lines []string, b block, routes []string) []string {
+	out := []string{lines[b.start]}
+	at := -1
+	for _, l := range lines[b.start+1 : b.end] {
+		if k, _, ok := strings.Cut(l, "="); ok && !isComment(l) && isServiceRuleKey(strings.TrimSpace(k)) {
+			if at < 0 {
+				at = len(out)
+			}
+			continue
+		}
+		out = append(out, l)
+	}
+	if at < 0 {
+		at = len(out)
+		for at > 1 && (isBlank(out[at-1]) || isComment(out[at-1])) {
+			at--
+		}
+	}
+	out = slices.Insert(out, at, routes...)
+	return slices.Concat(lines[:b.start], out, lines[b.end:])
+}
+
+// hostValues is blockValues for a [[host]] block, with its service_rule
+// keys gathered into the editor's one text box (each key's last value, in
+// the order the keys first appear).
+func hostValues(lines []string, b block) map[string]string {
+	vals := blockValues(lines, b)
+	var order []string
+	last := map[string]string{}
+	for _, l := range lines[b.start+1 : b.end] {
+		k, v, ok := strings.Cut(l, "=")
+		if k = strings.TrimSpace(k); !ok || isComment(l) || !isServiceRuleKey(k) {
+			continue
+		}
+		val, err := parseValue(v)
+		if err != nil {
+			continue
+		}
+		if _, seen := last[k]; !seen {
+			order = append(order, k)
+		}
+		last[k] = val
+		delete(vals, k)
+	}
+	if len(order) > 0 {
+		var text []string
+		for _, k := range order {
+			text = append(text, last[k])
+		}
+		vals[serviceRulesValue] = strings.Join(text, "\n")
+	}
+	return vals
 }
 
 func orDefault(v, def string) string {

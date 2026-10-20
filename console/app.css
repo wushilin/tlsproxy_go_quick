@@ -835,3 +835,4 @@ textarea.pem {
 }
 textarea.pem:focus { outline: 2px solid var(--focus); outline-offset: 0; border-color: transparent; }
 .ca-set-text { flex: 1; min-height: 360px; white-space: pre; }
+textarea.routes { white-space: pre; font-weight: 400; }

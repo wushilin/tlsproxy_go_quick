@@ -66,6 +66,7 @@ type ruleView struct {
 	Kind         string            `json:"kind"`
 	Allow        bool              `json:"allow"`
 	Target       string            `json:"target"`
+	Routes       []string          `json:"routes,omitempty"` // service rules: "/prefix → where"
 	Terminates   bool              `json:"terminates"`
 	Cert         string            `json:"cert"`
 	Proxy        bool              `json:"proxy"`
@@ -129,21 +130,6 @@ type consoleState struct {
 	Status    statusView     `json:"status"`
 	File      fileView       `json:"file"`
 	Listeners []listenerView `json:"listeners"`
-	Services  []serviceView  `json:"services"`
-}
-
-// serviceView is a [[local_services]] section as the console shows it
-// (read only), with its port's state.
-type serviceView struct {
-	Name         string   `json:"name"`
-	Line         int      `json:"line"`
-	Type         string   `json:"type"`
-	Addrs        []string `json:"addrs"`
-	Open         bool     `json:"open"`
-	Error        string   `json:"error,omitempty"`
-	ProxyVersion string   `json:"proxyVersion"`
-	DocRoot      string   `json:"docRoot,omitempty"`
-	PassRules    []string `json:"passRules,omitempty"` // "/prefix → host:port"
 }
 
 // parsedFile is the config file as last read, re-read only when it changes.
@@ -258,6 +244,12 @@ func (c *Console) state() consoleState {
 		}
 		return map[string]string{}
 	}
+	ruleValues := func(line int) map[string]string {
+		if b, ok := pf.blocks[line]; ok && pf.cfg != nil {
+			return hostValues(pf.lines, b)
+		}
+		return values(line)
+	}
 
 	byRule := map[string][]*ConnState{}
 	ruleListener, rulePattern := map[string]string{}, map[string]string{}
@@ -337,8 +329,14 @@ func (c *Console) state() consoleState {
 		v := ruleView{Listener: r.Listener, Line: r.Line, Key: r.Key(), Pattern: r.Source, Kind: r.Kind.String(), Allow: r.Allow,
 			Terminates: r.Terminates(), Cert: r.Cert, Proxy: r.Proxy, ProxyVersion: r.ProxyVersion,
 			AggSpeed: r.MaxAggregatedSpeed, ConnSpeed: r.MaxSingleConnectionSpeed,
-			Stopped: stopped[r.Key()], Running: running[r.Key()], Values: values(r.Line)}
-		if r.Allow {
+			Stopped: stopped[r.Key()], Running: running[r.Key()], Values: ruleValues(r.Line)}
+		switch {
+		case r.Serves():
+			v.Target = "served here"
+			for _, route := range r.Routes {
+				v.Routes = append(v.Routes, route.Describe())
+			}
+		case r.Allow:
 			v.Target = net.JoinHostPort(r.TargetHost, strconv.Itoa(r.TargetPort))
 		}
 		if pf.cfg == nil {
@@ -375,7 +373,7 @@ func (c *Console) state() consoleState {
 	}
 	host, _ := os.Hostname()
 	return consoleState{
-		Host: host, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, Services: c.serviceViews(shown),
+		Host: host, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners,
 		Status: statusView{Active: st.Active.Load(), Accepted: st.Accepted.Load(),
 			Completed: st.Completed.Load(), Denied: st.Denied.Load(), Failed: st.Failed.Load(), Rejected: st.Rejected.Load(),
 			MaxConnections: rt.cfg.MaxConnections, BytesUp: st.BytesUp.Load(), BytesDown: st.BytesDown.Load()},
@@ -865,29 +863,4 @@ func (c *Console) commit(w http.ResponseWriter, r *http.Request, onDisk []byte, 
 	running := c.srv.runtime.Load().cfg
 	writeJSON(w, 200, map[string]any{"ok": true, "hash": now.Hash, "mtime": now.Mtime, "backup": filepath.Base(backup),
 		"warnings": cfg.Warnings, "problems": problems, "restartNeeded": consoleMoved(cfg.Console, running.Console)})
-}
-
-// serviceViews lists cfg's local services with their ports' state.
-func (c *Console) serviceViews(cfg *Config) []serviceView {
-	out := []serviceView{}
-	for i := range cfg.Services {
-		l := &cfg.Services[i]
-		v := serviceView{Name: l.Name, Line: l.Line, Type: l.Type, ProxyVersion: l.ProxyVersion, DocRoot: l.DocRoot}
-		v.Addrs, v.Open, v.Error = c.srv.serviceStatus(l.Name)
-		if v.Addrs == nil {
-			v.Addrs = l.Addrs()
-		}
-		for _, r := range l.PassRules {
-			pr := r.Prefix + " → " + net.JoinHostPort(r.TargetHost, strconv.Itoa(r.TargetPort))
-			if r.StripPrefix {
-				pr += " (prefix stripped)"
-			}
-			if r.ForceHost != "" {
-				pr += " Host: " + r.ForceHost
-			}
-			v.PassRules = append(v.PassRules, pr)
-		}
-		out = append(out, v)
-	}
-	return out
 }

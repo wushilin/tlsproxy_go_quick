@@ -4,21 +4,28 @@
 
 Breaking:
 - `proxy_protocol_from` is renamed `proxy_trust_source`, in `[global]` and
-  `[[listener]]` (and the new `[[local_services]]`). The old name is a load
-  error that shows the line to write.
+  `[[listener]]`. The old name is a load error that shows the line to write.
+- New password hashes (`tlsproxy --hash-password`, and the plaintext
+  `[console] password` the proxy replaces) are argon2id. Existing
+  `pbkdf2-sha256$...` hashes keep working.
 
 New:
-- `[[local_services]]`: HTTP services the proxy runs itself, each on its own
-  port (`bind` default 127.0.0.1): `type = http_server` serves `doc_root`
-  (no listings, no hidden files except `/.well-known/`, no symlinks out of
-  it; files go out with sendfile(2) where the OS has it); `type = reverse_proxy` passes requests on by `[[proxy_pass_rules]]`
-  (`server`, `prefix` (longest wins, none = 404), `target_host`,
-  `target_port`, `strip_prefix`, `force_host`). `proxy_version = auto |
-  none | v1 | v2` reads the client's address from a PROXY header sent by a
-  peer in `proxy_trust_source` (default 127.0.0.0/8 and ::1). Upstream gets
-  `X-Forwarded-For` / `X-Real-IP`, `X-Forwarded-Proto` (`forwarded_proto`,
-  default https) and `X-Forwarded-Host`; the client's own are replaced.
-  They follow hot reload, and the console lists them (read only).
+- Service rules: a `[[host]]` rule with `service_rule` keys serves HTTP
+  itself, inside the TLS connection it terminates, with no target and no
+  second hop. `type=reverse_proxy; prefix=/api/; target=http://h:p` (or
+  `https://`; `strip_prefix`, `force_host`, `tls_verify`) and
+  `type=static_content; prefix=/assets/; base_dir=/folder` (the prefix
+  stands for the folder; no listings, no hidden files except `.well-known`,
+  no symlinks out of it). The longest prefix wins; none is 404. The target
+  gets the client's own address in `X-Forwarded-For` / `X-Real-IP`, and
+  `X-Forwarded-Proto: https`; what the client sent in those is replaced.
+  Clients get HTTP/2 if they ask. Each request is routed by its Host with the
+  running configuration (a reload applies to the next request; a Host another
+  rule serves gets 421). The console's rule editor has *Serve it here*, with
+  the service rules in one box, checked as you type.
+- `[[basic_auth]]`: users (`username` with `password_hash` (argon2id or
+  pbkdf2-sha256) or `password_plain`) that a service rule asks for with
+  `basic_auth=<name>`. A matched password is remembered for 5 minutes.
 - `cert = local-ca` serves clients without SNI (`pattern = NONE`, or `ANY`):
   a certificate for the IP address they connected to, or with IP addresses
   in `cert_domains`, one certificate for all of them (a `NONE` rule may add

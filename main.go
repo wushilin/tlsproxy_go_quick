@@ -24,7 +24,7 @@ func main() {
 			return
 		}
 		if a == "-h" || a == "--help" {
-			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--test <sni>...]\n       %s --hash-password    (reads a password from stdin, prints a [console] password_hash line)\n       %s --version\n", os.Args[0], os.Args[0], os.Args[0])
+			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--test <sni>...]\n       %s --hash-password    (reads a password from stdin, prints an argon2id password_hash for [console] or [[basic_auth]])\n       %s --version\n", os.Args[0], os.Args[0], os.Args[0])
 			return
 		}
 		if a == "--hash-password" {

@@ -284,88 +284,27 @@
         "key": "max_single_connection_speed",
         "default": "unlimited",
         "meaning": "For each connection of this rule, each direction."
+      },
+      {
+        "key": "service_rule1",
+        "default": "(none)",
+        "meaning": "Serve HTTP here instead of connecting to a target (any key starting service_rule; needs cert, and no target_host, upstream_* or proxy). Options separated by ;: type=reverse_proxy; prefix=/api/; target=http://127.0.0.1:8080 (or https://; tls_verify=false to skip checking its certificate); strip_prefix=true; force_host=name. Or type=static_content; prefix=/assets/; base_dir=/opt/www/assets (prefix stands for base_dir: /assets/a.css is base_dir/a.css; no listings, no hidden files but .well-known). basic_auth=\u003c[[basic_auth]] name\u003e on either. The longest prefix wins; none = 404. The client's address goes upstream as X-Forwarded-For; what it sent is replaced."
       }
     ]
   },
   {
-    "section": "[[local_services]]",
-    "about": "A small HTTP service this proxy runs itself, on its own port: static files, or a reverse proxy. Plain HTTP; put a terminating [[host]] rule in front (target_host = 127.0.0.1, target_port = its port). Follows hot reload.",
+    "section": "[[basic_auth]]",
+    "about": "Users and passwords that service rules can ask for (basic_auth=\u003cname\u003e in a service_rule). A password a browser sends is checked once and remembered for 5 minutes.",
     "keys": [
       {
         "key": "name",
         "default": "(required)",
-        "meaning": "Unique, ignoring case; what server = in [[proxy_pass_rules]] refers to."
+        "meaning": "What basic_auth= in a service_rule names. A second section with the same name replaces the first."
       },
       {
-        "key": "type",
-        "default": "(required)",
-        "meaning": "http_server (files from doc_root) or reverse_proxy (by [[proxy_pass_rules]])."
-      },
-      {
-        "key": "bind",
-        "default": "127.0.0.1",
-        "meaning": "Listen address: 127.0.0.1, 0.0.0.0, ::, or addresses separated by ;."
-      },
-      {
-        "key": "port",
-        "default": "(required)",
-        "meaning": "Listen port; may not clash with a listener, [console] or another service."
-      },
-      {
-        "key": "doc_root",
-        "default": "(required for http_server)",
-        "meaning": "The folder served: index.html for folders, no listings, no hidden files except /.well-known/, no symlinks out of it."
-      },
-      {
-        "key": "proxy_version",
-        "default": "auto",
-        "meaning": "auto: a PROXY v1/v2 header from a trusted peer is used if present. none: never looked for. v1, v2: required, or the connection is dropped. The address it states is the client's."
-      },
-      {
-        "key": "proxy_trust_source",
-        "default": "127.0.0.0/8; ::1",
-        "meaning": "Who may send a PROXY header: addresses or networks, separated by ;."
-      },
-      {
-        "key": "forwarded_proto",
-        "default": "https",
-        "meaning": "reverse_proxy: X-Forwarded-Proto sent upstream (http or https)."
-      }
-    ]
-  },
-  {
-    "section": "[[proxy_pass_rules]]",
-    "about": "Where a reverse_proxy service sends a request: the longest matching prefix wins; none matches = 404. The client's X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host and Forwarded are replaced, never kept.",
-    "keys": [
-      {
-        "key": "server",
-        "default": "(required)",
-        "meaning": "The [[local_services]] (type = reverse_proxy) this rule belongs to."
-      },
-      {
-        "key": "prefix",
-        "default": "(required)",
-        "meaning": "Path prefix, starting with /. / matches everything. For /asdf/, a request for /asdf is redirected (301) to /asdf/."
-      },
-      {
-        "key": "target_host",
-        "default": "(required)",
-        "meaning": "Upstream host name or IP address, plain HTTP."
-      },
-      {
-        "key": "target_port",
-        "default": "(required)",
-        "meaning": "Upstream port."
-      },
-      {
-        "key": "strip_prefix",
-        "default": "false",
-        "meaning": "true: /asdf/x is sent upstream as /x."
-      },
-      {
-        "key": "force_host",
-        "default": "the client's Host",
-        "meaning": "Host header sent upstream instead of the client's."
+        "key": "user1",
+        "default": "(at least one)",
+        "meaning": "Any key starting user: username=\u003cname\u003e; password_hash=\u003chash\u003e (argon2id, or pbkdf2-sha256; make one with tlsproxy --hash-password), or password_plain=\u003cpassword\u003e (no ; in it). A key given twice keeps its last value."
       }
     ]
   },
@@ -422,7 +361,7 @@
       {
         "key": "password_hash",
         "default": "",
-        "meaning": "pbkdf2-sha256$...; make one with tlsproxy --hash-password."
+        "meaning": "$argon2id$... (or pbkdf2-sha256$... from older versions); make one with tlsproxy --hash-password."
       },
       {
         "key": "secure_cookie",

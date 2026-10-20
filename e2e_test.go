@@ -65,11 +65,7 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 			live.close()
 		}
 		srv.listenersMu.Unlock()
-		srv.servicesMu.Lock()
-		for _, live := range srv.services {
-			live.close()
-		}
-		srv.servicesMu.Unlock()
+		srv.runtime.Load().serve.retire()
 	})
 	return &proxyUnderTest{addr: l.Addr().String(), srv: srv}
 }

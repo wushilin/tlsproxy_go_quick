@@ -70,11 +70,10 @@ type Config struct {
 	AcmeCAFile          string   // extra root CA for the ACME server's HTTPS (private CAs, Pebble)
 	Warnings            []string // non-fatal findings, logged at startup / reload
 
-	Console   *ConsoleConfig  // the [console] section; nil = no web console
-	Rules     []Rule          // in file order
-	Listeners []Listener      // in file order; at least one
-	Services  []LocalService  // [[local_services]], in file order
-	PassRules []ProxyPassRule // [[proxy_pass_rules]], in file order
+	Console   *ConsoleConfig        // the [console] section; nil = no web console
+	Rules     []Rule                // in file order
+	Listeners []Listener            // in file order; at least one
+	BasicAuth map[string]*BasicAuth // [[basic_auth]] sections, by name
 	// Redirect is the port 80 listener of http_to_https_redirect = true, nil
 	// when off. It has no rules and is not in Listeners: it answers every
 	// plain HTTP request with a redirect to https:// (see redirect.go).
@@ -235,6 +234,10 @@ type Rule struct {
 	// Speed limits in bytes per second, each direction separately; 0 = none.
 	MaxAggregatedSpeed       float64 // shared by every connection of this rule
 	MaxSingleConnectionSpeed float64 // for each connection
+
+	// Routes are the rule's service_rule keys, the longest prefix first: a
+	// rule with routes serves HTTP itself instead of connecting to a target.
+	Routes []*ServiceRoute
 }
 
 // Key identifies a rule across reloads and edits: two rules with the same key
@@ -308,6 +311,9 @@ func (c *Config) RouteExcept(sni string, stopped map[string]bool) Decision {
 func (r *Rule) decide(sni string, m []int) Decision {
 	if !r.Allow {
 		return Decision{RuleLine: r.Line, Rule: r}
+	}
+	if r.Serves() {
+		return Decision{Allow: true, RuleLine: r.Line, Rule: r} // served here: no target
 	}
 	host, err := expand(r.TargetHost, sni, m)
 	if err == nil {
@@ -571,6 +577,7 @@ type rawRule struct {
 	aggSpeed, connSpeed, listener                                                     *string
 	line                                                                              int
 	pattern, action, targetHost, tport                                                *string
+	serviceRules                                                                      []rawServiceRule
 }
 
 // buffer_size is clamped to this range.
@@ -605,6 +612,7 @@ func ParseConfig(text string) (*Config, error) {
 	poolMaxIdle := -1
 	httpRedirect := false
 	var raws []rawRule
+	var auths []*BasicAuth
 	section := ""
 
 	for idx, line := range strings.Split(text, "\n") {
@@ -626,10 +634,8 @@ func ParseConfig(text string) (*Config, error) {
 				raws = append(raws, rawRule{line: lineno})
 			case "listener":
 				cfg.Listeners = append(cfg.Listeners, Listener{Line: lineno, Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}})
-			case "local_services":
-				cfg.Services = append(cfg.Services, LocalService{Line: lineno, Bind: "127.0.0.1", Binds: []string{"127.0.0.1"}})
-			case "proxy_pass_rules":
-				cfg.PassRules = append(cfg.PassRules, ProxyPassRule{Line: lineno})
+			case "basic_auth":
+				auths = append(auths, &BasicAuth{Line: lineno, Users: map[string]credential{}, keys: map[string]string{}})
 			default:
 				return nil, fail("unknown section [[%s]]", section)
 			}
@@ -806,7 +812,7 @@ func ParseConfig(text string) (*Config, error) {
 			case "password":
 				cfg.Console.Password = value
 			case "password_hash":
-				if _, _, _, herr := parseHash(value); herr != nil {
+				if herr := validHash(value); herr != nil {
 					return nil, fail("password_hash: %v", herr)
 				}
 				cfg.Console.PasswordHash = value
@@ -843,12 +849,8 @@ func ParseConfig(text string) (*Config, error) {
 			if err := listenerOption(&cfg.Listeners[len(cfg.Listeners)-1], key, value); err != nil {
 				return nil, fail("%v", err)
 			}
-		case "local_services":
-			if err := serviceOption(&cfg.Services[len(cfg.Services)-1], key, value); err != nil {
-				return nil, fail("%v", err)
-			}
-		case "proxy_pass_rules":
-			if err := passRuleOption(&cfg.PassRules[len(cfg.PassRules)-1], key, value); err != nil {
+		case "basic_auth":
+			if err := basicAuthOption(auths[len(auths)-1], key, value); err != nil {
 				return nil, fail("%v", err)
 			}
 		case "host":
@@ -888,7 +890,16 @@ func ParseConfig(text string) (*Config, error) {
 			case "max_single_connection_speed":
 				r.connSpeed = &v
 			default:
-				return nil, fail("unknown key %q in [[host]]", key)
+				if !isServiceRuleKey(key) {
+					return nil, fail("unknown key %q in [[host]]", key)
+				}
+				i := slices.IndexFunc(r.serviceRules, func(x rawServiceRule) bool { return x.key == key })
+				if i < 0 {
+					r.serviceRules = append(r.serviceRules, rawServiceRule{key, v, lineno})
+					break
+				}
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("line %d: %s is also set at line %d; the last one wins", lineno, key, r.serviceRules[i].line))
+				r.serviceRules[i] = rawServiceRule{key, v, lineno}
 			}
 		default:
 			return nil, fail("key outside of any section")
@@ -948,6 +959,9 @@ func ParseConfig(text string) (*Config, error) {
 		case "deny":
 		case "allow":
 			rule.Allow = true
+			if len(r.serviceRules) > 0 {
+				break // served here: serveSettings checks the rest
+			}
 			if r.targetHost == nil {
 				return nil, fail("target_host is required for allow")
 			}
@@ -973,8 +987,14 @@ func ParseConfig(text string) (*Config, error) {
 		default:
 			return nil, fail("action must be allow or deny, got %q", action)
 		}
+		if err := serveSettings(&rule, &r); err != nil {
+			return nil, fail("%v", err)
+		}
 		if err := tlsSettings(cfg, &rule, r); err != nil {
 			return nil, fail("%v", err)
+		}
+		if rule.Serves() {
+			rule.UpstreamTLS, rule.UpstreamTLSVerify = false, false // nothing upstream
 		}
 		if err := proxySettings(&rule, r); err != nil {
 			return nil, fail("%v", err)
@@ -1003,7 +1023,7 @@ func ParseConfig(text string) (*Config, error) {
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("[console] listens on %s over plain HTTP: the password crosses the network unencrypted. Prefer listen = 127.0.0.1 behind a terminating rule", c.Listen))
 		}
 	}
-	if err := cfg.resolveServices(); err != nil {
+	if err := cfg.resolveServe(auths); err != nil {
 		return nil, err
 	}
 	if auto := cfg.AutoDomains(); len(auto) > 0 {

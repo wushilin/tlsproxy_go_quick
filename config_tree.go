@@ -7,9 +7,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
+	"maps"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -192,34 +193,23 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 
 	out := []treeNode{global, listeners}
 
-	if len(cfg.Services) > 0 {
-		svcs := treeNode{Title: "Local services", Note: fmt.Sprintf("%d", len(cfg.Services))}
-		blocks := sectionBlocks(lines, "[[local_services]]")
-		for i := range cfg.Services {
-			l := &cfg.Services[i]
-			set := at(blocks, l.Line)
-			n := treeNode{Title: l.Name, Note: l.Type + " · " + strings.Join(l.Addrs(), ", "), Tag: l.Type, Line: toEditor(l.Line)}
-			n.Items = []treeItem{
-				item(set, "bind", l.Bind),
-				item(set, "port", strconv.Itoa(l.Port)),
-				item(set, "proxy_version", l.ProxyVersion),
-				item(set, "proxy_trust_source", prefixes(l.ProxyTrustSource)),
+	if len(cfg.BasicAuth) > 0 {
+		auths := treeNode{Title: "Basic auth", Note: fmt.Sprintf("%d", len(cfg.BasicAuth))}
+		names := slices.Sorted(maps.Keys(cfg.BasicAuth))
+		for _, name := range names {
+			a := cfg.BasicAuth[name]
+			users := slices.Sorted(maps.Keys(a.Users))
+			n := treeNode{Title: name, Note: fmt.Sprintf("%d user(s)", len(users)), Line: toEditor(a.Line)}
+			for _, u := range users {
+				how := "password hash"
+				if a.Users[u].hash == "" {
+					how = "plain password"
+				}
+				n.Items = append(n.Items, treeItem{Key: u, Value: how})
 			}
-			if l.Type == serviceHTTP {
-				n.Items = append(n.Items, item(set, "doc_root", l.DocRoot))
-			} else {
-				n.Items = append(n.Items, item(set, "forwarded_proto", l.ForwardedProto))
-			}
-			for _, r := range l.PassRules {
-				pr := treeNode{Title: r.Prefix, Line: toEditor(r.Line), Note: "proxy_pass_rules"}
-				pr.Items = []treeItem{{Key: "target", Value: net.JoinHostPort(r.TargetHost, strconv.Itoa(r.TargetPort))},
-					{Key: "strip_prefix", Value: strconv.FormatBool(r.StripPrefix)},
-					{Key: "host sent", Value: map[bool]string{true: "the client's", false: r.ForceHost}[r.ForceHost == ""]}}
-				n.Children = append(n.Children, pr)
-			}
-			svcs.Children = append(svcs.Children, n)
+			auths.Children = append(auths.Children, n)
 		}
-		out = append(out, svcs)
+		out = append(out, auths)
 	}
 
 	if auto := cfg.AutoDomains(); len(auto) > 0 || cfg.AcmeAgreeTOS {
@@ -257,8 +247,18 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 		add("action", "deny (TLS access_denied alert)")
 		return n
 	}
-	add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
-	if r.Terminates() {
+	switch {
+	case r.Serves():
+		n.Tag = "serve"
+		add("cert", r.Cert)
+		if len(r.CertDomains) > 0 {
+			add("cert_domains", strings.Join(r.CertDomains, ", "))
+		}
+		for _, route := range r.Routes {
+			add(route.Key, route.Describe())
+		}
+	case r.Terminates():
+		add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
 		n.Tag = "terminate"
 		add("cert", r.Cert)
 		if len(r.CertDomains) > 0 {
@@ -276,7 +276,8 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 		} else {
 			add("upstream", "plaintext")
 		}
-	} else {
+	default:
+		add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
 		n.Tag = "passthrough"
 	}
 	if r.Proxy {

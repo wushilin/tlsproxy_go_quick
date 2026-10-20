@@ -228,6 +228,8 @@ func route(t *testing.T, c *Config, sni string) string {
 	switch {
 	case d.Err != "":
 		return "ERROR"
+	case d.Allow && d.Rule != nil && d.Rule.Serves():
+		return "SERVED"
 	case d.Allow:
 		return net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 	}
@@ -598,7 +600,7 @@ func TestFormats(t *testing.T) {
 // parserSource is the code that reads config.toml's keys.
 func parserSource() ([]byte, error) {
 	var out []byte
-	for _, f := range []string{"config.go", "services_config.go"} {
+	for _, f := range []string{"config.go", "serve_config.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return nil, err
@@ -610,9 +612,12 @@ func parserSource() ([]byte, error) {
 
 // parserNotOptions are the strings in the parser's case clauses that are
 // sections, values or retired keys, not options.
-var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, "local_services": true, "proxy_pass_rules": true, // sections
+var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, // sections
 	"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true, "auto": true, "none": true, "v1": true, "v2": true, // values
-	"proxy_protocol_from": true} // renamed: a load error that names proxy_trust_source
+	"proxy_protocol_from": true, // renamed: a load error that names proxy_trust_source
+	// options inside a service_rule or [[basic_auth]] user value, documented under those keys
+	"basic_auth": true, "type": true, "prefix": true, "target": true, "strip_prefix": true, "force_host": true, "tls_verify": true,
+	"base_dir": true, "username": true, "password_plain": true}
 
 // Every option the parser accepts must appear in the complete-reference sample,
 // in the commented config.toml and in the README, so documentation can't drift.

@@ -274,9 +274,8 @@ option is missing from it, from `config.toml` or from this README):
 |---|---|
 | `[global]` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
 | `[[listener]]` | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
-| `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` |
-| `[[local_services]]` | `name` `type` `bind` `port` · `doc_root` · `proxy_version` `proxy_trust_source` · `forwarded_proto` |
-| `[[proxy_pass_rules]]` | `server` `prefix` `target_host` `target_port` `strip_prefix` `force_host` |
+| `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` · `service_rule1`, ... (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `basic_auth`) |
+| `[[basic_auth]]` | `name` · `user1`, `user2`, ... (`username` with `password_hash` or `password_plain`) |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | `[console]` | `listen` `port` `password` `password_hash` `hostnames` `secure_cookie` |
 
@@ -447,77 +446,82 @@ ClientHello it passes through, and refuses one that arrives again:
 - The console's `listen` follows the same rules, and its Host check accepts
   IPv6 literals.
 
-## Local services
+## Serving HTTP here (service rules)
 
-Small HTTP services the proxy runs itself, each on its own port: static
-files (`http_server`), or a reverse proxy by path prefix (`reverse_proxy`).
-They speak plain HTTP; a terminating rule in front gives them TLS. They
-follow hot reload like the listeners: a new service opens its port, a moved
-one reopens, a removed one closes (open connections finish), and a changed
-`doc_root` or set of `[[proxy_pass_rules]]` applies without reopening.
+A rule can answer HTTP requests itself instead of connecting to a target:
+give it `service_rule` keys. The proxy terminates TLS as for any `cert`
+rule and hands the connection straight to an HTTP server inside the
+process, with no second hop, no extra port and no PROXY header to set up:
+the client's address is the connection's own.
 
 ```toml
 [[host]]
 listener = https
-pattern = apps.example.com
+pattern = www.example.com
 cert = auto
-upstream_tls = false
-proxy = true                  # pass the client's address on
-target_host = 127.0.0.1
-target_port = 1081
+service_rule1 = type=reverse_proxy; prefix=/; target=http://127.0.0.1:8080
+service_rule2 = type=reverse_proxy; prefix=/api/; target=http://127.0.0.1:7882; strip_prefix=true; basic_auth=team
+service_rule3 = type=static_content; prefix=/assets/; base_dir=/opt/www/www.example.com/assets
 
-[[local_services]]
-name = web1
-type = http_server
-port = 1080                   # bind defaults to 127.0.0.1
-doc_root = /opt/www/domain1
-
-[[local_services]]
-name = api
-type = reverse_proxy
-port = 1081
-proxy_version = auto          # the default
-
-[[proxy_pass_rules]]
-server = api
-prefix = /asdf/
-target_host = 127.0.0.1
-target_port = 8888
-strip_prefix = false          # true: /asdf/x is sent as /x
-force_host = localhost002     # default: the client's Host
+[[basic_auth]]
+name = team
+user1 = username=jack; password_hash=$argon2id$v=19$m=65536,t=3,p=4$...
+user2 = username=jill; password_plain=open sesame
 ```
 
-- **Ports** may not clash with a listener, the redirect listener, `[console]`
-  or another service (a wildcard address overlaps everything on its port).
-- **The client's address** comes from a PROXY header (`proxy_version`):
-  `auto`, the default, uses a v1 or v2 header when a trusted peer sends one;
-  `none` never looks for one; `v1` or `v2` require it and drop connections
-  without it. Only peers in `proxy_trust_source` may send one, by default
-  this machine (`127.0.0.0/8; ::1`), which is where this proxy's own rules
-  connect from. Link-local addresses (`fe80::/10`) are other machines on the
-  network and are not in the default. From anyone else the header is not
-  read: with `auto` it reaches the HTTP parser and gets a `400`. Startup
-  warns about a rule whose `proxy` setting does not suit the service it
-  connects to.
-- **`http_server`** answers `GET` and `HEAD` from `doc_root`: `index.html`
-  for a folder, never a listing (a folder without one is `404`), nothing
-  hidden (a path part starting with `.`) except `/.well-known/`, and nothing
-  through a symlink that leads out of `doc_root` (`os.Root`).
-- **`reverse_proxy`** picks the longest `prefix` that matches the path; with
-  none, the client gets `404`. For a prefix ending in `/`, the bare folder
-  (`/asdf`) is redirected (`301`) to `/asdf/`, as nginx does. Upstreams are
-  plain HTTP, connected with `connect_timeout`; one that can't be reached
-  gives `502`. WebSocket upgrades and streamed responses pass through.
-- **Forwarding headers are set, never trusted.** Upstream gets
-  `X-Forwarded-For` and `X-Real-IP` (the client's address, as above),
-  `X-Forwarded-Proto` (`forwarded_proto`, default `https`) and
-  `X-Forwarded-Host`. Whatever the client sent in those, or in `Forwarded`,
-  is replaced: behind a terminating rule, the client's own headers arrive
-  from a trusted peer byte for byte, so keeping them would let any client
-  choose the address your backend sees.
-- `max_connections`, `handshake_timeout` (for the request headers) and
-  `idle_timeout` from `[global]` apply to each service. Every request is
-  logged with the client's address, status, size and time.
+- **Keys.** Any key starting `service_rule` is one (`service_rule1`,
+  `service_rule_api`, ...). A key given twice keeps its last value, with a
+  warning. A rule with service rules needs `cert = auto` or `local-ca`
+  (the proxy has to decrypt the requests) and takes no `target_host`,
+  `target_port`, `upstream_*` or `proxy`; speed limits apply as usual.
+- **Options**, separated by `;` (a trailing `;` is fine; an unknown option is
+  a load error):
+  - `type=reverse_proxy`: `target=http://host:port` or `https://host:port`
+    (no path), `strip_prefix=true` sends `/api/x` as `/x`,
+    `force_host=name` replaces the Host sent on (default: the client's),
+    `tls_verify=false` skips checking an `https://` target's certificate.
+  - `type=static_content`: `base_dir=/folder`. The prefix stands for the
+    folder, so `/assets/a.css` is `base_dir/a.css` (as nginx's `alias`); it
+    ends in `/`. `GET` and `HEAD` only, `index.html` for a folder, never a
+    listing, nothing hidden (a path part starting with `.`) except
+    `.well-known` at its top, nothing through a symlink that leads out
+    (`os.Root`). A `base_dir` that can't be opened answers `503`.
+  - `basic_auth=<name>` on either type asks for a user of that
+    `[[basic_auth]]` section; the `Authorization` header is not passed on.
+- **Matching.** The longest `prefix` that matches the path serves the
+  request, whatever its key is called; the same prefix twice is a load
+  error, and a path no prefix matches gets `404`. For a prefix ending in
+  `/`, the bare folder (`/api`) is redirected (`301`) to `/api/`, unless a
+  prefix at least that long takes it.
+- **Forwarding headers are set, never trusted.** The target gets
+  `X-Forwarded-For` and `X-Real-IP` (the client's address: the TCP peer's,
+  or what a trusted PROXY header in front of the listener said),
+  `X-Forwarded-Proto: https` and `X-Forwarded-Host`. Whatever the client
+  sent in those, or in `Forwarded`, is replaced.
+- **HTTP/2** is offered to clients that ask for it; targets are spoken to in
+  HTTP/1.1 (or HTTP/2 over `https://` when the target offers it). WebSocket
+  upgrades and streamed responses pass through. An unreachable target gives
+  `502`.
+- **One connection, one rule.** Each request is routed again by its Host,
+  with the configuration running at that moment: a reload applies to the
+  next request even on a connection that is already open. A request for a
+  name another rule serves (a browser reusing an HTTP/2 connection for a
+  second name its certificate covers) is answered `421 Misdirected
+  Request`, and the browser opens a connection of its own for it.
+- **Logs.** Every request is logged on the connection's `[#id]`, with the
+  service rule that served it, status, size and time.
+- **`[[basic_auth]]`**: `name` and any number of keys starting `user`, each
+  `username=<name>; password_hash=<hash>` or `username=<name>;
+  password_plain=<password>` (a plain password can't contain `;`).
+  `tlsproxy --hash-password` prints an argon2id hash; argon2id hashes from
+  other tools and the older `pbkdf2-sha256` format work too. A browser
+  sends the password with every request, so one that matched is remembered
+  (in memory) for 5 minutes, and at most two hashes are worked out at once.
+  A second section with the same name replaces the first, with a warning.
+- **In the console**, the rule editor's *Serve it here* takes the service
+  rules in one box, one per line, checked as you type, and saves them as
+  `service_rule1`, `service_rule2`, ... `[[basic_auth]]` is edited in the
+  Config file tab.
 
 ## The client's address (PROXY protocol)
 
@@ -976,7 +980,7 @@ target_port = 9443
 | `listen` | 127.0.0.1 | bind address. The console is **plain HTTP by design**; anything but loopback logs a warning, because the password would cross the network unencrypted. Keep it on loopback and publish it through a terminating rule as above |
 | `port` | (required) | listen port |
 | `password` | | plain text, for convenience. At start-up and on every reload the proxy replaces this line with `password_hash` and logs it, so the secret is on disk only briefly. To change the password, put a `password =` line back |
-| `password_hash` | | `pbkdf2-sha256$<iterations>$<salt>$<hash>` (PBKDF2-HMAC-SHA256, 600,000 iterations). Generate one with `tlsproxy --hash-password`. One of the two is required |
+| `password_hash` | | `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>` (argon2id, 64 MiB, 3 passes), or `pbkdf2-sha256$<iterations>$<salt>$<hash>` from older versions. Generate one with `tlsproxy --hash-password`. One of the two is required |
 | `secure_cookie` | false | set true when publishing through HTTPS: session cookies are only sent over HTTPS. Leave false for direct local HTTP; direct TLS requests always get Secure cookies |
 | `hostnames` | (none) | `;` or `,` separated names the console answers to, besides IP addresses and `localhost`. Any other `Host` is refused: that defeats DNS rebinding |
 
