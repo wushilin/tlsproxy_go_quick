@@ -5,8 +5,14 @@
 Breaking:
 - `proxy_protocol_from` is renamed `proxy_trust_source`, in `[global]` and
   `[[listener]]`. The old name is a load error that shows the line to write.
+- The web console's settings move out of `config.toml` into a file of their
+  own, given with `--console console.toml`; without it there is no console.
+  The console can edit `config.toml` but never that file, so no edit made
+  from it can change its password or take it off the network. A `[console]`
+  section in `config.toml` is a load error saying so, and `listen` is now
+  `bind` (also a load error that says so).
 - New password hashes (`tlsproxy --hash-password`, and the plaintext
-  `[console] password` the proxy replaces) are argon2id. Existing
+  console `password` the proxy replaces) are argon2id. Existing
   `pbkdf2-sha256$...` hashes keep working.
 
 New:
@@ -23,6 +29,15 @@ New:
   running configuration (a reload applies to the next request; a Host another
   rule serves gets 421). The console's rule editor has *Serve it here*, with
   the service rules in one box, checked as you type.
+- The console over TLS: with `cert` and `hostname` in `console.toml`, it is
+  served like a rule with service rules, on the `[[listener]]` with exactly
+  its `bind` and `port` (one more rule there, which `config.toml` can't
+  override), or on a listener of its own. The console can't stop its rule or
+  listener; deleting that listener moves it to one of its own, handing the
+  open socket over. Every load of `config.toml` (start-up, reload, each check
+  and save in the console) merges `console.toml` in, which is read again on
+  every reload. A listener whose addresses another takes over (a rename, the
+  console moving) keeps its socket open instead of reopening it.
 - `[[basic_auth]]`: users (`username` with `password_hash` (argon2id or
   pbkdf2-sha256) or `password_plain`) that a service rule asks for with
   `basic_auth=<name>`. A matched password is remembered for 5 minutes.

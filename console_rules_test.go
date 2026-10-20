@@ -51,9 +51,8 @@ listener = default
 pattern = ANY
 action = deny
 
-[console]
-port = 9443
-password = pw
+[logging]
+max_keep = 3
 `
 
 func TestEditRulesKeepsTheRestOfTheFile(t *testing.T) {
@@ -83,12 +82,12 @@ func TestEditRulesKeepsTheRestOfTheFile(t *testing.T) {
 		t.Fatalf("delete:\n%s", got)
 	}
 
-	// Add goes after the last rule, before [console].
+	// Add goes after the last rule, before [logging].
 	got, err = editRules(rulesFile, 0, map[string]string{"listener": "default", "pattern": "a.test", "target_host": "10.0.0.1", "target_port": "443", "proxy": "true", "max_aggregated_speed": "1Gbit"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "action = deny\n\n[[host]]\nlistener = default\npattern = a.test\ntarget_host = 10.0.0.1\ntarget_port = 443\nmax_aggregated_speed = 1Gbit\nproxy = true\n\n[console]") {
+	if !strings.Contains(got, "action = deny\n\n[[host]]\nlistener = default\npattern = a.test\ntarget_host = 10.0.0.1\ntarget_port = 443\nmax_aggregated_speed = 1Gbit\nproxy = true\n\n[logging]") {
 		t.Fatalf("add:\n%s", got)
 	}
 	if c := mustParse(t, got); len(c.Rules) != 3 {
@@ -286,7 +285,7 @@ func TestConsoleRuleManager(t *testing.T) {
 		}
 	}
 	text, _ := os.ReadFile(path)
-	if !strings.Contains(string(text), "[console]\n# console comment") || len(backupFiles(path)) != 1 {
+	if !strings.Contains(string(text), "# top comment\n") || len(backupFiles(path)) != 1 {
 		t.Fatalf("file:\n%s", text)
 	}
 

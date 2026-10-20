@@ -25,6 +25,7 @@ or linker, so anything that needs one cannot be built on it, while Go can:
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(git describe --tags --always)" -o tlsproxy .
 ./tlsproxy --version                                   # tlsproxy v1.1.1
 ./tlsproxy config.toml                                 # run (logs to stderr)
+./tlsproxy config.toml --console console.toml          # with the web console (its own file)
 ./tlsproxy config.toml --test foo.wushilin.net x.com   # dry run: show routing only
 ./tlsproxy config.toml --test ""                       # dry run for a client without SNI
 go test ./...                                          # ~50 s; needs no network
@@ -40,7 +41,8 @@ and the same image on the GitHub Container Registry,
 `linux/arm64`: the static binary on a distroless base (CA certificates,
 nothing else), running as uid 65532, about 12 MB.
 
-These steps were run as written against the published `v1.2.0` image.
+These steps were run as written against the published `v1.2.0` image; they
+are updated for v1.5.0 (the console's own file).
 
 **1. A folder for the configuration and one for state:**
 
@@ -57,27 +59,32 @@ cat > /srv/tlsproxy/etc/config.toml <<'CONFIG'
 name = https
 port = 443
 
-[console]
-listen = 0.0.0.0          # inside the container; publish it on the host's loopback only
-port = 9443
-password = change-me      # replaced by password_hash on first start
-
 # Pass TLS for this name through to a backend, untouched.
 [[host]]
+listener = https
 pattern = www.example.com
 target_host = 192.0.2.10
 target_port = 443
 
 # Everything else is refused.
 [[host]]
+listener = https
 pattern = ANY
 action = deny
 CONFIG
+
+# The web console has a file of its own, which the console itself can't change.
+cat > /srv/tlsproxy/etc/console.toml <<'CONSOLE'
+[console]
+bind = 0.0.0.0            # inside the container; publish it on the host's loopback only
+port = 9443
+password = change-me      # replaced by password_hash on first start
+CONSOLE
 ```
 
-**3. Let the container's user own both** (it writes the config: the
-password becomes a hash, and the console saves edits; and its state:
-certificates, CAs):
+**3. Let the container's user own both** (it writes the configuration:
+the password in `console.toml` becomes a hash, and the console saves its
+edits to `config.toml`; and its state: certificates, CAs):
 
 ```sh
 sudo chown -R 65532:65532 /srv/tlsproxy
@@ -90,8 +97,12 @@ docker run -d --name tlsproxy --restart unless-stopped \
   -p 443:443 -p 127.0.0.1:9443:9443 \
   -v /srv/tlsproxy/etc:/etc/tlsproxy:Z \
   -v /srv/tlsproxy/data:/var/lib/tlsproxy:Z \
-  docker.io/wushilin/tlsproxy_go_quick:latest
+  docker.io/wushilin/tlsproxy_go_quick:latest \
+  /etc/tlsproxy/config.toml --console /etc/tlsproxy/console.toml
 ```
+
+Without the last line the image runs `/etc/tlsproxy/config.toml` alone:
+no console.
 
 `:Z` lets the container use the folders on SELinux hosts (Fedora, RHEL and
 the like); elsewhere it does nothing. Without it, SELinux refuses with
@@ -102,7 +113,7 @@ the like); elsewhere it does nothing. Without it, SELinux refuses with
 ```sh
 docker logs tlsproxy
 #   listening on https 0.0.0.0:443 with 1 listener(s), 2 rules (...)
-#   console: replaced the plaintext password in /etc/tlsproxy/config.toml with its hash
+#   console: replaced the plaintext password in /etc/tlsproxy/console.toml with its hash
 #   console: listening on http://0.0.0.0:9443/tlsproxy_quick/ (plain HTTP; password required)
 ```
 
@@ -120,7 +131,7 @@ docker run --rm -v /srv/tlsproxy/etc:/etc/tlsproxy:Z docker.io/wushilin/tlsproxy
 #   www.example.com -> 192.0.2.10:443 (rule line 10, literal: www.example.com)
 #   other.example -> DENY (rule line 16, catch-all: ANY)
 
-# A password_hash line for [console], without the password in a file
+# A password_hash line for console.toml or [[basic_auth]], without the password in a file
 echo 'my secret' | docker run --rm -i docker.io/wushilin/tlsproxy_go_quick:latest --hash-password
 
 # Upgrade: the configuration and state stay in the folders
@@ -277,7 +288,7 @@ option is missing from it, from `config.toml` or from this README):
 | `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` · `service_rule1`, ... (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `basic_auth`) |
 | `[[basic_auth]]` | `name` · `user1`, `user2`, ... (`username` with `password_hash` or `password_plain`) |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
-| `[console]` | `listen` `port` `password` `password_hash` `hostnames` `secure_cookie` |
+| `[console]` (in `console.toml`) | `bind` `port` `hostname` `cert` · `password` `password_hash` · `hostnames` `secure_cookie` |
 
 `proxy_trust_source` was called `proxy_protocol_from` before v1.5.0; the old
 name is a load error that shows the line to write instead.
@@ -296,7 +307,7 @@ Samples, each with its expected routing checked by `go test`:
 | [`08-no-sni`](samples/08-no-sni.toml) | `pattern = NONE` for clients without SNI |
 | [`09-tls-termination`](samples/09-tls-termination.toml) | `cert = auto`, `cert_domains`, plaintext and TLS upstreams, pass-through side by side |
 | [`10-logging`](samples/10-logging.toml) | rotating, compressed log files |
-| [`11-web-console`](samples/11-web-console.toml) | the console on loopback, published through a terminating rule |
+| [`11-web-console`](samples/11-web-console.toml) | the console on port 443 over TLS, sharing the listener ([its `console.toml`](samples/11-web-console.console.toml)) |
 | [`12-everything`](samples/12-everything.toml) | every option, annotated |
 | [`13-rule-precedence`](samples/13-rule-precedence.toml) | literal, wildcard and `ANY` rules written broadest first, and which one wins |
 | [`14-listeners`](samples/14-listeners.toml) | several listeners (a public port and a VPN-only port), each with its own rules and overrides |
@@ -443,8 +454,8 @@ ClientHello it passes through, and refuses one that arrives again:
   `public_ip_address` and an IPv4-only `bind`, a warning tells you the CA could
   not reach the proxy. `dns_resolvers` may be IPv6 (`2606:4700:4700::1111`, or
   `[2606:4700:4700::1111]:53` with a port).
-- The console's `listen` follows the same rules, and its Host check accepts
-  IPv6 literals.
+- The console's `bind` (in `console.toml`) follows the same rules, and its
+  Host check accepts IPv6 literals.
 
 ## Serving HTTP here (service rules)
 
@@ -952,40 +963,73 @@ compress_after = 3      # file.1-.3 stay plain, file.4.gz and older are gzip; de
 
 ## Web console
 
-An optional console on its own port: live listeners, rules and connections,
-all editable (start, stop, add, edit, delete), a flow log, certificates, the
-recent log and a config editor. It is served under `/tlsproxy_quick/`
-(`http://127.0.0.1:9443/tlsproxy_quick/`); `/` redirects there.
+An optional console: live listeners, rules and connections, all editable
+(start, stop, add, edit, delete), a flow log, certificates, the recent log and
+a config editor. It is served under `/tlsproxy_quick/`; `/` redirects there.
+
+Its settings are in a file of their own, given at start-up, which the console
+can't see or change. No edit made from the console can change its password or
+take it off the network:
+
+```sh
+tlsproxy config.toml --console console.toml
+```
+
+Without `--console` there is no console. A `[console]` section in
+`config.toml` is an error that says to move it.
 
 ```toml
+# console.toml
 [console]
-listen = 127.0.0.1                 # default
-port = 9443                        # required
+bind = 0.0.0.0                     # default 127.0.0.1
+port = 443                         # required
+hostname = console.example.com     # with cert: the name it is served under
+cert = auto                        # auto or local-ca[:caNNN]: served over TLS; none = plain HTTP
 password = change-me               # replaced by password_hash on start (see below)
-hostnames = console.example.com    # names it may be addressed by, besides IPs and localhost
-secure_cookie = true               # require HTTPS for browser sessions
-
-# Publish it through the proxy itself, with a real certificate:
-[[host]]
-listener = https
-pattern = console.example.com
-cert = auto
-upstream_tls = false
-target_host = 127.0.0.1
-target_port = 9443
 ```
+
+**Over TLS (with `cert`).** The console is served like a rule with
+`service_rule` keys, inside the TLS connection the proxy terminates, with a
+certificate for `hostname`:
+
+- On the `[[listener]]` of `config.toml` with **exactly** its `bind` and
+  `port`, it is one more rule there, for `hostname`. Nothing in `config.toml`
+  can override it: a `[[host]]` for that exact name on that listener is an
+  error. Wildcards and `ANY` don't take it, since an exact name always wins.
+- With no such listener, it gets **one of its own**, `(console)`. A listener
+  that only partly overlaps its address (`0.0.0.0` against `::`, or one of
+  several addresses) is an error: make the binds the same, or use another
+  port.
+- The console can't stop its rule or its listener. Deleting that listener
+  in `config.toml` moves the console to a listener of its own, and adding
+  one back moves it there. Either way the open socket is handed over, not
+  reopened, so the port never closes, even for the signed-in session.
+- Session cookies are HTTPS-only.
+
+**Plain HTTP (no `cert`).** It listens on `bind:port` itself, as before
+v1.5.0. Keep it on loopback: any other address logs a warning, because the
+password would cross the network unencrypted. Its port may not overlap a
+listener (to share one, set `cert` and `hostname`).
 
 | `[console]` | default | meaning |
 |---|---|---|
-| `listen` | 127.0.0.1 | bind address. The console is **plain HTTP by design**; anything but loopback logs a warning, because the password would cross the network unencrypted. Keep it on loopback and publish it through a terminating rule as above |
-| `port` | (required) | listen port |
+| `bind` | 127.0.0.1 | addresses, separated by `;`. With `cert`: the listener with exactly this bind and port serves it. `listen`, its name before v1.5.0, is an error that says so |
+| `port` | (required) | its port |
+| `hostname` | (required with `cert`) | the name it is served under. Without `cert`, one more name the Host check accepts |
+| `cert` | (plain HTTP) | `auto` (ACME, with `acme_agree_tos` from `config.toml`) or `local-ca` / `local-ca:ca002` |
 | `password` | | plain text, for convenience. At start-up and on every reload the proxy replaces this line with `password_hash` and logs it, so the secret is on disk only briefly. To change the password, put a `password =` line back |
 | `password_hash` | | `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>` (argon2id, 64 MiB, 3 passes), or `pbkdf2-sha256$<iterations>$<salt>$<hash>` from older versions. Generate one with `tlsproxy --hash-password`. One of the two is required |
-| `secure_cookie` | false | set true when publishing through HTTPS: session cookies are only sent over HTTPS. Leave false for direct local HTTP; direct TLS requests always get Secure cookies |
-| `hostnames` | (none) | `;` or `,` separated names the console answers to, besides IP addresses and `localhost`. Any other `Host` is refused: that defeats DNS rebinding |
+| `secure_cookie` | false | plain HTTP only: set true when another proxy publishes the console over HTTPS, so session cookies are only sent over HTTPS |
+| `hostnames` | (none) | plain HTTP only: `;` or `,` separated names the console answers to, besides IP addresses and `localhost`. Any other `Host` is refused: that defeats DNS rebinding |
 
-`listen` and `port` need a restart; `password`, `secure_cookie` and `hostnames` follow hot
-reload (a changed password or cookie policy signs everyone out).
+`console.toml` is read again on every reload, like `config.toml`; one that
+doesn't parse is logged and the console keeps its last good settings. Every
+version of `config.toml` is loaded with it merged in: at start-up, on reload,
+and for every check and save in the console, so what passes a check is what a
+reload runs. The password, `hostname` and (with `cert`) `bind` and `port`
+follow a reload; a plain HTTP `bind` or `port`, or switching between plain
+HTTP and TLS, needs a restart. A changed password or cookie policy signs
+everyone out.
 
 **Pages**
 
@@ -1073,9 +1117,8 @@ written to it (and every change to the file shows up in the console).
     loaded. If the file was changed by anything else in between (vim, another
     session, the proxy hashing a password), that save fails and nothing is
     written.
-  - The `[console]` section is hidden from the editor and kept as it is; text
-    containing its own `[console]` is rejected. Errors use the editor's line
-    numbers.
+  - The editor shows `config.toml` only; `console.toml` is never shown or
+    written. Text with a `[console]` section is rejected.
 
 **Security**: a password is always required, even on loopback (a web page in
 your browser could otherwise reach it). Sign-ins are rate limited globally
@@ -1211,8 +1254,8 @@ per GiB.
   together through one `atomic.Pointer`: caches start empty, a changed buffer
   size gets a fresh pool, an invalid file is logged and ignored, existing
   connections keep the settings they started with. Listeners open, move and
-  close to match (see [Listeners](#listeners)); only `[console]` `listen` and
-  `port` need a restart.
+  close to match (see [Listeners](#listeners)); only a plain HTTP console's
+  `bind` and `port` need a restart.
 - **Half-close and interruptions.** EOF on one side is forwarded as a
   half-close and starts the `half_close_timeout` clock; the other direction
   keeps flowing until it ends or the clock fires. A write failure (receiver

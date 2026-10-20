@@ -341,17 +341,27 @@
   },
   {
     "section": "[console]",
-    "about": "This web console. Hidden from this editor: change it in the file itself. listen and port need a restart.",
+    "about": "This web console, in console.toml (given with --console), not in this file: the console can't change it. It is read again on every reload.",
     "keys": [
       {
-        "key": "listen",
+        "key": "bind",
         "default": "127.0.0.1",
-        "meaning": "Bind address. The console is plain HTTP; keep it on loopback."
+        "meaning": "Addresses, separated by ;. With cert: the [[listener]] with exactly this bind and port serves the console (one of its own if none has)."
       },
       {
         "key": "port",
         "default": "(required)",
-        "meaning": "Console port."
+        "meaning": "Console port, e.g. 443 to share a listener."
+      },
+      {
+        "key": "hostname",
+        "default": "(required with cert)",
+        "meaning": "The name the console is served under, as a rule of its listener that config.toml can't override."
+      },
+      {
+        "key": "cert",
+        "default": "(plain HTTP)",
+        "meaning": "auto or local-ca / local-ca:ca002: serve the console over TLS. Without it, plain HTTP on bind:port (keep it on loopback); a change of bind or port then needs a restart."
       },
       {
         "key": "password",
@@ -366,12 +376,12 @@
       {
         "key": "secure_cookie",
         "default": "false",
-        "meaning": "Mark the session cookie Secure; set true when the console is published through HTTPS."
+        "meaning": "Plain HTTP only: mark the session cookie Secure, when another proxy publishes the console over HTTPS."
       },
       {
         "key": "hostnames",
         "default": "(none)",
-        "meaning": "Names the console may be addressed by, besides IP addresses and localhost."
+        "meaning": "Plain HTTP only: names the console may be addressed by, besides IP addresses and localhost."
       }
     ]
   }

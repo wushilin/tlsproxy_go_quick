@@ -2,15 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -75,8 +78,10 @@ func (c *consoleClient) login(password string) int {
 	return code
 }
 
-// startConsoleProxy writes a config file with a [console] section placed
-// between [global] and the rules, and starts the proxy from it.
+// startConsoleProxy writes a config file and a console.toml with
+// consoleLines (plain HTTP on a free loopback port), and starts the proxy
+// with both. It returns the config file's path; the console file is
+// p.consolePath.
 func startConsoleProxy(t *testing.T, consoleLines, rules string) (*proxyUnderTest, *consoleClient, string) {
 	t.Helper()
 	return startConsoleProxyGlobal(t, "", consoleLines, rules)
@@ -85,13 +90,17 @@ func startConsoleProxy(t *testing.T, consoleLines, rules string) (*proxyUnderTes
 // startConsoleProxyGlobal is startConsoleProxy with extra [global] lines.
 func startConsoleProxyGlobal(t *testing.T, globalLines, consoleLines, rules string) (*proxyUnderTest, *consoleClient, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.toml")
+	dir := t.TempDir()
+	path, conPath := filepath.Join(dir, "config.toml"), filepath.Join(dir, "console.toml")
 	port := freePort(t)
-	text := fmt.Sprintf("# top comment\n[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=0\n%s\n\n[console]\n# console comment\nport = %d\n%s\n\n%s", globalLines, port, consoleLines, rules)
+	text := fmt.Sprintf("# top comment\n[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=0\n%s\n\n%s", globalLines, rules)
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	p := startProxyText(t, text, path)
+	if err := os.WriteFile(conPath, []byte(fmt.Sprintf("# console comment\n[console]\nport = %d\n%s\n", port, consoleLines)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := startProxyConsole(t, text, path, conPath)
 	waitForPort(t, fmt.Sprintf("127.0.0.1:%d", port))
 	jar, _ := cookiejar.New(nil)
 	return p, &consoleClient{t: t, base: fmt.Sprintf("http://127.0.0.1:%d%s", port, consolePath), http: &http.Client{Jar: jar, Timeout: T}}, path
@@ -154,16 +163,16 @@ func TestConsoleAuthAndRequestGuards(t *testing.T) {
 
 func TestConsolePlaintextPasswordIsReplacedByItsHash(t *testing.T) {
 	t.Parallel()
-	_, c, path := startConsoleProxy(t, "password = \"s3cret pass\"  # typed by hand", "[[host]]\nlistener=default\npattern=.*\naction=deny\n")
-	data, _ := os.ReadFile(path)
+	p, c, _ := startConsoleProxy(t, "password = \"s3cret pass\"  # typed by hand", "[[host]]\nlistener=default\npattern=.*\naction=deny\n")
+	data, _ := os.ReadFile(p.consolePath)
 	text := string(data)
 	if strings.Contains(text, "s3cret") || !strings.Contains(text, "password_hash = \"$argon2id$") {
 		t.Fatalf("plaintext still on disk, or no hash:\n%s", text)
 	}
-	if !strings.Contains(text, "# top comment") || !strings.Contains(text, "# console comment") || !strings.Contains(text, "pattern=.*") {
+	if !strings.Contains(text, "# console comment\n[console]\nport = ") {
 		t.Fatalf("only the password line may change:\n%s", text)
 	}
-	if _, err := ParseConfig(text); err != nil {
+	if _, err := ParseConsole(text); err != nil {
 		t.Fatalf("rewritten file must still load: %v", err)
 	}
 	if c.login("s3cret pass") != 200 || c.login("other") == 200 {
@@ -191,9 +200,10 @@ func TestConsoleConfigEditing(t *testing.T) {
 
 	_, cfg := c.get("/api/config")
 	text := cfg["text"].(string)
-	if strings.Contains(text, "password") || strings.Contains(text, "pbkdf2") || strings.Contains(text, "\n[console]") || strings.Contains(text, "console comment") || !strings.Contains(text, consoleHidden) {
-		t.Fatalf("the [console] section must be hidden:\n%s", text)
+	if strings.Contains(text, "password") || strings.Contains(text, "[console]") || strings.Contains(text, "console comment") || !strings.Contains(text, "# top comment") {
+		t.Fatalf("the editor shows config.toml, which has no console in it:\n%s", text)
 	}
+	consoleBefore, _ := os.ReadFile(p.consolePath)
 	save := func(text string, base map[string]any) (int, map[string]any) {
 		return c.post("/api/config/save", map[string]any{"text": text, "baseHash": base["hash"], "baseMtime": base["mtime"]})
 	}
@@ -235,7 +245,7 @@ func TestConsoleConfigEditing(t *testing.T) {
 	if _, out := save(broken, cfg); out["ok"] == true {
 		t.Fatal("an invalid config must not be saved")
 	}
-	if _, out := save(text+"\n[console]\nport=1\npassword=hacked\n", cfg); out["ok"] == true || !strings.Contains(out["error"].(string), "cannot be edited here") {
+	if _, out := save(text+"\n[console]\nport=1\npassword=hacked\n", cfg); out["ok"] == true || !strings.Contains(out["error"].(string), "[console] has a file of its own") {
 		t.Fatalf("[console] must not be settable from the editor: %v", out)
 	}
 	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
@@ -250,16 +260,18 @@ func TestConsoleConfigEditing(t *testing.T) {
 	}
 	roundtrip(t, p, "x.test", "A") // ...without touching the running config
 
-	// A valid save: written, backed up, [console] block kept where it was, applied at once.
+	// A valid save: written, backed up, console.toml untouched, applied at once.
 	_, out = save(edited, cfg)
 	if out["ok"] != true || out["backup"] == nil {
 		t.Fatalf("save: %v", out)
 	}
 	saved, _ := os.ReadFile(path)
 	st := string(saved)
-	if !strings.Contains(st, "# console comment\nport = ") || !strings.Contains(st, "password_hash") || strings.Contains(st, consoleHidden) ||
-		strings.Index(st, "[console]") > strings.Index(st, "[[host]]") || !strings.Contains(st, fmt.Sprintf("target_port=%d", b)) {
+	if st != edited {
 		t.Fatalf("saved file:\n%s", st)
+	}
+	if after, _ := os.ReadFile(p.consolePath); !bytes.Equal(after, consoleBefore) {
+		t.Fatal("console.toml is never written by a save")
 	}
 	if backup, _ := os.ReadFile(filepath.Join(filepath.Dir(path), out["backup"].(string))); !bytes.Equal(backup, before) {
 		t.Fatal("the backup must be the previous file")
@@ -325,7 +337,7 @@ func TestConsoleConfigEditing(t *testing.T) {
 		t.Fatalf("backups: %v", names)
 	}
 	if _, old := c.get("/api/config/backup?name=" + names[len(names)-1].(string)); !strings.Contains(old["text"].(string), fmt.Sprintf("target_port=%d", a)) || strings.Contains(old["text"].(string), "password") {
-		t.Fatal("the oldest backup should be the original, with [console] hidden")
+		t.Fatal("the oldest backup should be the original")
 	}
 	if code, _ := c.get("/api/config/backup?name=../../etc/passwd"); code != 404 {
 		t.Fatalf("path tricks: %d", code)
@@ -350,11 +362,13 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 		"[[host]]\nlistener=default\npattern=auto\\.test\ncert=auto\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n"+
 		"[[host]]\nlistener=default\npattern=pass\\.test\ntarget_host=127.0.0.1\ntarget_port=%d\n",
 		ca.localCA(t), echoBackend(t, ""), echoBackend(t, ""), echoBackend(t, ""))
-	path := filepath.Join(t.TempDir(), "config.toml")
+	dir := t.TempDir()
+	path, conPath := filepath.Join(dir, "config.toml"), filepath.Join(dir, "console.toml")
 	port := freePort(t)
-	text := fmt.Sprintf("[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\ncert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir\n[console]\nport=%d\npassword=pw\n%s", certPath, dead, port, rules)
+	text := fmt.Sprintf("[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\ncert_path=%s\nacme_agree_tos=true\nacme_directory=https://127.0.0.1:%d/dir\n%s", certPath, dead, rules)
 	os.WriteFile(path, []byte(text), 0o600)
-	p := startProxyText(t, text, path)
+	os.WriteFile(conPath, []byte(fmt.Sprintf("[console]\nport=%d\npassword=pw\n", port)), 0o600)
+	p := startProxyConsole(t, text, path, conPath)
 	waitForPort(t, fmt.Sprintf("127.0.0.1:%d", port))
 	jar, _ := cookiejar.New(nil)
 	c := &consoleClient{t: t, base: fmt.Sprintf("http://127.0.0.1:%d%s", port, consolePath), http: &http.Client{Jar: jar, Timeout: T}}
@@ -452,37 +466,221 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 	}
 }
 
-func TestConsoleConfigValidation(t *testing.T) {
-	ok := mustParse(t, "[[listener]]\nname=default\nport=1\n[console]\nlisten=192.168.1.1\nport=9000\npassword=x\nhostnames=a.example.com; B.example.com\n")
-	if ok.Console.Listen != "192.168.1.1" || fmt.Sprint(ok.Console.Hostnames) != "[a.example.com b.example.com]" || len(ok.Warnings) != 1 {
-		t.Fatalf("%+v %v", ok.Console, ok.Warnings) // plain HTTP off loopback is allowed, with a warning
+func TestConsoleFile(t *testing.T) {
+	t.Parallel()
+	mustConsole := func(text string) *ConsoleConfig {
+		t.Helper()
+		c, err := ParseConsole(text)
+		if err != nil {
+			t.Fatalf("%s: %v", text, err)
+		}
+		return c
 	}
-	if c := mustParse(t, "[[listener]]\nname=default\nport=1\n[console]\nport=9000\npassword=x\n"); c.Console.Listen != "127.0.0.1" || len(c.Warnings) != 0 {
-		t.Fatalf("%+v %v", c.Console, c.Warnings)
+	plain := mustConsole("# mine\n[console]\nbind=192.168.1.1\nport=9000\npassword=x\nhostnames=a.example.com; B.example.com\n")
+	if plain.TLS() || plain.Bind != "192.168.1.1" || fmt.Sprint(plain.Hostnames) != "[a.example.com b.example.com]" || len(plain.Warnings) != 1 {
+		t.Fatalf("%+v", plain) // plain HTTP off loopback is allowed, with a warning
 	}
-	if mustParse(t, "[[listener]]\nname=default\nport=1\n").Console != nil {
-		t.Fatal("no [console] section = no console")
+	if c := mustConsole("[console]\nport=9000\npassword=x\n"); c.Bind != "127.0.0.1" || len(c.Warnings) != 0 {
+		t.Fatalf("defaults: %+v", c)
 	}
-	for name, text := range map[string]string{
-		"no password": "[[listener]]\nname=default\nport=1\n[console]\nport=9000\n",
-		"no port":     "[[listener]]\nname=default\nport=1\n[console]\npassword=x\n",
-		"bad hash":    "[[listener]]\nname=default\nport=1\n[console]\nport=9000\npassword_hash=md5$abc\n",
-		"unknown key": "[[listener]]\nname=default\nport=1\n[console]\nport=9000\npassword=x\ntls=true\n",
+	tlsCon := mustConsole("[console]\nbind=::\nport=443\nhostname=Admin.Example.com\ncert=AUTO\npassword=x\n")
+	if !tlsCon.TLS() || tlsCon.Hostname != "admin.example.com" || tlsCon.Cert != "auto" || len(tlsCon.Warnings) != 0 {
+		t.Fatalf("TLS: %+v", tlsCon)
+	}
+	for text, want := range map[string]string{
+		"[console]\nport=9000\n":                                                    "needs a password",
+		"[console]\npassword=x\n":                                                   "port is required",
+		"[console]\nport=9000\npassword_hash=md5$abc\n":                             "password_hash",
+		"[console]\nport=9000\npassword=x\ntls=true\n":                              `unknown key "tls"`,
+		"[console]\nport=9000\npassword=x\nlisten=127.0.0.1\n":                      "listen is now called bind",
+		"[console]\nport=443\npassword=x\ncert=auto\n":                              "needs hostname",
+		"[console]\nport=443\npassword=x\ncert=/etc/certs\nhostname=a.b":            "cert must be auto or local-ca",
+		"[console]\nport=443\npassword=x\ncert=auto\nhostname=*.b.c\n":              "hostname must be a host name",
+		"[console]\nport=443\npassword=x\ncert=auto\nhostname=a.b\nhostnames=c.d\n": "hostnames only applies without cert",
+		"[global]\nport=1\n":                                                        "holds only the [console] section",
+		"[[host]]\n":                                                                "holds only the [console] section",
+		"port=1\n":                                                                  "key outside of [console]",
+		"# nothing\n":                                                               "no [console] section",
 	} {
-		if _, err := ParseConfig(text); err == nil {
-			t.Errorf("%s: should be rejected", name)
+		if _, err := ParseConsole(text); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want %q", text, err, want)
 		}
 	}
-	// Hiding and restoring the section is exact, wherever it sits.
-	for _, text := range []string{
-		"[[listener]]\nname=default\nport=1\n\n[console]\nport=2\npassword=x\n\n[[host]]\nlistener=default\npattern=.*\naction=deny\n",
-		"[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\naction=deny\n[console]\nport=2\npassword=x",
-		"[[listener]]\nname=default\nport=1\n",
-	} {
-		visible, block, _ := hideConsole(text)
-		full, _, err := showConsole(visible, block)
-		if err != nil || full != text || strings.Contains(visible, "password") {
-			t.Errorf("round trip failed for %q: %q (%v)", text, full, err)
+	// [console] in config.toml says where it went.
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[console]\nport=9000\npassword=x\n"); err == nil || !strings.Contains(err.Error(), "--console") {
+		t.Fatalf("[console] in config.toml: %v", err)
+	}
+}
+
+// The console's address decides where it goes: on the listener with exactly
+// its address and port, on a listener of its own, or an error.
+func TestConsoleMerge(t *testing.T) {
+	t.Parallel()
+	head := "[[listener]]\nname=https\nbind=::\nport=443\n[global]\nacme_agree_tos=true\n"
+	con := func(lines string) *ConsoleConfig {
+		c, err := ParseConsole("[console]\npassword=x\nhostname=admin.example.com\ncert=auto\n" + lines)
+		if err != nil {
+			t.Fatal(err)
 		}
+		return c
+	}
+	merged, err := LoadConfig(head+"[[host]]\nlistener=https\npattern=*.example.com\naction=deny\n", con("bind=::\nport=443\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := merged.ConsoleRule()
+	if r == nil || r.Listener != "https" || !r.Serves() || r.Line != 0 || r.Cert != "auto" || len(merged.Listeners) != 1 || !merged.Listeners[0].Console {
+		t.Fatalf("merged: %+v %+v", r, merged.Listeners)
+	}
+	if d := merged.ForListener(&merged.Listeners[0]).Route("admin.example.com"); !d.Allow || d.Rule != r {
+		t.Fatalf("its name beats the wildcard: %+v", d)
+	}
+	if !slices.Contains(merged.AutoDomains(), "admin.example.com") {
+		t.Fatal("cert = auto: the console's name gets a certificate")
+	}
+	own, err := LoadConfig(head, con("bind=127.0.0.1\nport=8443\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := own.Listener(consoleListener); l == nil || !l.Console || l.Line != 0 || l.Port != 8443 || own.ConsoleRule().Listener != consoleListener {
+		t.Fatalf("own listener: %+v", own.Listeners)
+	}
+	for text, want := range map[string]string{
+		head + "[[host]]\nlistener=https\npattern=admin.example.com\naction=deny\n":         "is the console's hostname",
+		"[[listener]]\nname=https\nbind=0.0.0.0\nport=443\n[global]\nacme_agree_tos=true\n": "exactly the same addresses: bind = 0.0.0.0",
+		"[[listener]]\nname=https\nbind=::\nport=443\n":                                     "acme_agree_tos",
+		"[[listener]]\nname=(console)\nport=5\n[global]\nacme_agree_tos=true\n":             "reserved for the console",
+		head + "http_to_https_redirect=true\n":                                              "",
+	} {
+		c := con("bind=::\nport=443\n")
+		if strings.Contains(text, "http_to_https_redirect") {
+			c = con("bind=::\nport=80\n")
+			want = "http_to_https_redirect listener"
+		}
+		if _, err := LoadConfig(text, c); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", text, err, want)
+		}
+	}
+	plain, err := ParseConsole("[console]\npassword=x\nbind=::\nport=443\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(head, plain); err == nil || !strings.Contains(err.Error(), "set cert and hostname") {
+		t.Errorf("plain HTTP on a listener's port: %v", err)
+	}
+}
+
+// No code but the loader parses config.toml: a check that skipped the
+// console would pass versions a reload then refuses.
+func TestEveryLoadMergesTheConsole(t *testing.T) {
+	files, _ := filepath.Glob("*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "config.go" {
+			continue
+		}
+		src := string(mustRead(t, f))
+		if strings.Contains(src, "ParseConfig(") {
+			t.Errorf("%s calls ParseConfig: load through Server.loadConfig (or LoadConfig with the console) instead", f)
+		}
+		if strings.Contains(src, "LoadConfig(") && f != "main.go" && f != "proxy.go" {
+			t.Errorf("%s calls LoadConfig: load through Server.loadConfig instead", f)
+		}
+	}
+}
+
+// The console over TLS: a rule of the listener with its address, locked
+// against stopping, and moving to a listener of its own (and back) without
+// its port ever closing.
+func TestConsoleOverTLS(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	dir := t.TempDir()
+	path, conPath := filepath.Join(dir, "config.toml"), filepath.Join(dir, "console.toml")
+	port := freePort(t)
+	head := fmt.Sprintf("[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=0\nca_root=%s\n", testCARoot())
+	web := fmt.Sprintf("[[listener]]\nname=web\nbind=127.0.0.1\nport=%d\n", port)
+	rules := "[[host]]\nlistener=default\npattern=ANY\naction=deny\n"
+	os.WriteFile(path, []byte(head+web+rules), 0o600)
+	os.WriteFile(conPath, []byte(fmt.Sprintf("[console]\nbind=127.0.0.1\nport=%d\nhostname=console.test\ncert=%s\npassword=pw\n", port, ca.localCA(t))), 0o600)
+	p := startProxyConsole(t, head+web+rules, path, conPath)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	waitForPort(t, addr)
+	jar, _ := cookiejar.New(nil)
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		},
+		TLSClientConfig:   &tls.Config{RootCAs: ca.pool},
+		ForceAttemptHTTP2: true,
+	}
+	c := &consoleClient{t: t, base: fmt.Sprintf("https://console.test:%d%s", port, consolePath), http: &http.Client{Jar: jar, Timeout: T, Transport: tr}}
+	if code := c.login("pw"); code != 200 {
+		t.Fatalf("sign-in over TLS: %d", code)
+	}
+	_, st := c.get("/api/state")
+	var consoleRule map[string]any
+	for _, l := range st["listeners"].([]any) {
+		lv := l.(map[string]any)
+		for _, r := range lv["rules"].([]any) {
+			if r.(map[string]any)["console"] == true {
+				consoleRule = r.(map[string]any)
+				if lv["name"] != "web" || lv["console"] != true {
+					t.Errorf("the console's listener: %v", lv["name"])
+				}
+			}
+		}
+	}
+	if consoleRule == nil || consoleRule["pattern"] != "console.test" || consoleRule["target"] != "the console" {
+		t.Fatalf("the console's rule in the state: %v", consoleRule)
+	}
+	// Nothing in the console can cut it off.
+	if code, _ := c.post("/api/rules/stop", map[string]string{"key": consoleRule["key"].(string)}); code != 409 {
+		t.Errorf("stopping the console's rule: %d", code)
+	}
+	if code, _ := c.post("/api/listeners/stop", map[string]string{"name": "web"}); code != 409 {
+		t.Errorf("stopping the console's listener: %d", code)
+	}
+	_, cfg := c.get("/api/config")
+	text := cfg["text"].(string)
+	if _, out := c.post("/api/config/validate", map[string]string{"text": text + "[[host]]\nlistener=web\npattern=console.test\naction=deny\n"}); out["ok"] == true ||
+		!strings.Contains(out["error"].(string), "is the console's hostname") {
+		t.Errorf("a rule for the console's name: %v", out)
+	}
+	// Another Host on the console's connection: not the console's.
+	if code, _ := c.do("GET", "/api/status", nil, ""); code != 200 {
+		t.Fatalf("status: %d", code)
+	}
+
+	save := func(text string) {
+		t.Helper()
+		_, now := c.get("/api/config")
+		if _, out := c.post("/api/config/save", map[string]any{"text": text, "baseHash": now["hash"], "baseMtime": now["mtime"]}); out["ok"] != true {
+			t.Fatalf("save: %v", out)
+		}
+	}
+	// Delete the listener: the console moves to one of its own, and the
+	// socket is handed over, so the signed-in session's next request works.
+	save(head + rules)
+	if l := p.srv.runtime.Load().cfg.Listener(consoleListener); l == nil || p.srv.runtime.Load().cfg.ConsoleRule().Listener != consoleListener {
+		t.Fatal("the console has a listener of its own")
+	}
+	if code, _ := c.get("/api/status"); code != 200 {
+		t.Fatalf("after its listener was deleted: %d", code)
+	}
+	tr.CloseIdleConnections() // a new connection, too
+	if code, _ := c.get("/api/status"); code != 200 {
+		t.Fatalf("new connection after the move: %d", code)
+	}
+	// And back.
+	save(head + web + rules)
+	if p.srv.runtime.Load().cfg.ConsoleRule().Listener != "web" {
+		t.Fatal("back on web")
+	}
+	tr.CloseIdleConnections()
+	if code, _ := c.get("/api/status"); code != 200 {
+		t.Fatalf("back on web: %d", code)
+	}
+	if !strings.Contains(testLog.String(), "listener (console): takes over "+addr+" from web") || !strings.Contains(testLog.String(), "listener web: takes over "+addr+" from (console)") {
+		t.Error("the port was handed over both ways, never reopened")
 	}
 }

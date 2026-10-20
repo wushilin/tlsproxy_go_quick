@@ -20,8 +20,9 @@ import (
 const T = 10 * time.Second
 
 type proxyUnderTest struct {
-	addr string
-	srv  *Server
+	addr        string
+	srv         *Server
+	consolePath string // console.toml, "" for none
 }
 
 // startProxy starts the proxy with rules (appended after [global]) on a free port.
@@ -32,6 +33,23 @@ func startProxy(t *testing.T, global, rules string) *proxyUnderTest {
 
 func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 	t.Helper()
+	return startProxyConsole(t, text, path, "")
+}
+
+// startProxyConsole is startProxyText with the console of console.toml at
+// consolePath ("" for none).
+func startProxyConsole(t *testing.T, text, path, consolePath string) *proxyUnderTest {
+	t.Helper()
+	var con *ConsoleConfig
+	if consolePath != "" {
+		data, err := os.ReadFile(consolePath)
+		if err == nil {
+			con, err = ParseConsole(string(data))
+		}
+		if err != nil {
+			t.Fatalf("bad test console.toml: %v", err)
+		}
+	}
 	if !strings.Contains(text, "ca_root") { // the run's shared CAs (see testCA.localCA)
 		withRoot := strings.Replace(text, "[global]\n", "[global]\nca_root = "+testCARoot()+"\n", 1)
 		// The file must say what was parsed (reloads and the password
@@ -45,7 +63,7 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 		}
 		text = withRoot
 	}
-	cfg, err := ParseConfig(text)
+	cfg, err := LoadConfig(text, con)
 	if err != nil {
 		t.Fatalf("bad test config: %v\n%s", err, text)
 	}
@@ -57,6 +75,7 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 	if err != nil {
 		t.Fatalf("server: %v", err)
 	}
+	srv.consolePath = consolePath
 	go srv.Serve(l, path)
 	t.Cleanup(func() {
 		l.Close()
@@ -67,7 +86,7 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 		srv.listenersMu.Unlock()
 		srv.runtime.Load().serve.retire()
 	})
-	return &proxyUnderTest{addr: l.Addr().String(), srv: srv}
+	return &proxyUnderTest{addr: l.Addr().String(), srv: srv, consolePath: consolePath}
 }
 
 func listen(t *testing.T) (net.Listener, int) {

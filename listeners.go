@@ -11,15 +11,25 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // liveListener is one configured listener's state in this process.
 type liveListener struct {
-	name    string
+	// name is the listener its sockets serve. It changes when a listener
+	// with the same addresses takes them over (see syncListeners), so accept
+	// loops read it for every connection.
+	name    atomic.Pointer[string]
 	addrs   []string       // what it is bound to, as configured ("0.0.0.0:443")
 	lns     []net.Listener // open sockets; nil when closed
 	err     string         // why the last attempt to open failed
 	adopted bool           // sockets handed to Serve by the caller (tests): never reopened
+}
+
+func newLiveListener(name string, addrs []string) *liveListener {
+	l := &liveListener{addrs: addrs}
+	l.name.Store(&name)
+	return l
 }
 
 func (l *liveListener) open() bool { return len(l.lns) > 0 }
@@ -65,8 +75,13 @@ func (s *Server) syncListeners(cfg *Config) (failed []string) {
 	want := map[string]bool{}
 	for _, l := range cfg.PortListeners() {
 		want[l.Name] = true
+	}
+	for _, l := range cfg.PortListeners() {
 		live := s.listeners[l.Name]
 		addrs := l.Addrs()
+		if live == nil {
+			live = s.takeOverLocked(l.Name, addrs, want)
+		}
 		if live != nil && live.adopted {
 			continue
 		}
@@ -79,7 +94,7 @@ func (s *Server) syncListeners(cfg *Config) (failed []string) {
 				logf("listener %s: moving from %s to %s", l.Name, strings.Join(live.addrs, ", "), strings.Join(addrs, ", "))
 			}
 		}
-		live = &liveListener{name: l.Name, addrs: addrs}
+		live = newLiveListener(l.Name, addrs)
 		s.listeners[l.Name] = live
 		if s.stoppedListeners[l.Name] {
 			continue
@@ -101,6 +116,26 @@ func (s *Server) syncListeners(cfg *Config) (failed []string) {
 	return failed
 }
 
+// takeOverLocked hands a new listener the open sockets of one this
+// configuration no longer has, bound to exactly the same addresses: a
+// rename, or the console moving between its own listener and one of
+// config.toml's. Its connections never see the port close. Nil if there is
+// none.
+func (s *Server) takeOverLocked(name string, addrs []string, want map[string]bool) *liveListener {
+	for old, live := range s.listeners {
+		if want[old] || !live.open() || !slices.Equal(live.addrs, addrs) {
+			continue
+		}
+		delete(s.listeners, old)
+		delete(s.stoppedListeners, old)
+		live.name.Store(&name)
+		s.listeners[name] = live
+		logf("listener %s: takes over %s from %s, which is gone (the port stays open)", name, strings.Join(addrs, ", "), old)
+		return live
+	}
+	return nil
+}
+
 // openLocked binds live's addresses and starts accepting.
 func (s *Server) openLocked(live *liveListener, l *Listener) error {
 	lns, err := bindListener(l)
@@ -113,7 +148,7 @@ func (s *Server) openLocked(live *liveListener, l *Listener) error {
 		s.stats.GoroutinesStarted.Add(1)
 		go func() {
 			defer s.stats.GoroutinesFinished.Add(1)
-			s.acceptLoop(ln, l.Name)
+			s.acceptLoop(ln, live)
 		}()
 	}
 	if s.serving {

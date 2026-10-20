@@ -907,7 +907,7 @@ function paint() {
     rr.pattern.title = r.line ? `[[host]] at line ${r.line} of the config file` : "";
     setText(rr.target, removed ? "removed" : r.allow ? r.target : "deny");
     rr.target.classList.toggle("deny", !removed && !r.allow);
-    rr.target.title = r.routes ? r.routes.join("\n") : "";
+    rr.target.title = r.console ? "The web console, from console.toml: it can't be stopped or edited here" : r.routes ? r.routes.join("\n") : "";
     rr.card.classList.toggle("stopped", out);
 
     rr.status.hidden = !out;
@@ -1054,8 +1054,11 @@ function paintListener(lr, l, now, file) {
   lr.editBtn.disabled = busy || !editable;
   lr.editBtn.title = !editable ? "Editing is off: see the note above"
     : "Edit this listener in the config file";
-  lr.delBtn.hidden = !!l.redirect;
-  lr.addBtn.hidden = lr.editBtn.hidden = !!l.redirect;
+  // The console's listener can't be stopped; its own listener (line 0) isn't in the file at all.
+  const own = !!l.console && !l.line;
+  lr.toggleBtn.hidden = !!l.console;
+  lr.delBtn.hidden = !!l.redirect || own;
+  lr.addBtn.hidden = lr.editBtn.hidden = !!l.redirect || own;
   lr.delBtn.disabled = busy || !editable;
   lr.delBtn.title = editable ? "Delete this listener from the config file (only once no rule uses it)" : "Editing is off: see the note above";
   if (!editable && armedLDeletes.has(l.name)) disarmListenerDelete(l.name);
@@ -1195,9 +1198,10 @@ function paintRuleActions(rr, r, file) {
   const removed = r.kind === "removed" || r.kind === "redirect"; // nothing to stop, edit or delete
   const editable = !!(file && file.editable && r.line > 0);
   const busy = pendingRules.has(r.key);
-  rr.toggleBtn.hidden = removed;
-  rr.editBtn.hidden = removed;
-  rr.delBtn.hidden = removed;
+  // The console's own rule comes from console.toml: nothing here may stop or change it.
+  rr.toggleBtn.hidden = removed || !!r.console;
+  rr.editBtn.hidden = removed || !!r.console;
+  rr.delBtn.hidden = removed || !!r.console;
   rr.toggleBtn.disabled = busy || (!r.running && !r.stopped);
   if (!busy) setText(rr.toggleLabel, r.stopped ? "Start" : "Stop");
   rr.toggleBtn.className = r.stopped ? "act start" : "act";

@@ -3,11 +3,13 @@
 #
 #   docker run -d --name tlsproxy -p 443:443 -p 127.0.0.1:9443:9443 \
 #     -v /srv/tlsproxy/etc:/etc/tlsproxy -v /srv/tlsproxy/data:/var/lib/tlsproxy \
-#     docker.io/wushilin/tlsproxy_go_quick:latest
+#     docker.io/wushilin/tlsproxy_go_quick:latest \
+#     /etc/tlsproxy/config.toml --console /etc/tlsproxy/console.toml
 #
-# /etc/tlsproxy/config.toml is the configuration (it must be writable: the
-# proxy replaces a plain password with its hash, and the console saves
-# edits). /var/lib/tlsproxy is the working directory, so the default
+# /etc/tlsproxy/config.toml is the configuration and console.toml the web
+# console's (without --console there is none). The folder must be writable:
+# the proxy replaces a plain password with its hash, and the console saves
+# edits. /var/lib/tlsproxy is the working directory, so the default
 # cert_path (./certs) and ca_root (./ca) are kept there. Both mounts must be
 # writable by uid 65532.
 #

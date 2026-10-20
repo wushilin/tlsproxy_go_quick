@@ -348,8 +348,9 @@ func serveSettings(rule *Rule, r *rawRule) error {
 	return nil
 }
 
-// Serves reports whether the rule serves HTTP itself (it has service rules).
-func (r *Rule) Serves() bool { return len(r.Routes) > 0 }
+// Serves reports whether the rule serves HTTP itself: it has service rules,
+// or it is the console's.
+func (r *Rule) Serves() bool { return len(r.Routes) > 0 || r.Console }
 
 // RouteFor is the service rule for a request path, nil if none matches.
 func (r *Rule) RouteFor(path string) *ServiceRoute {

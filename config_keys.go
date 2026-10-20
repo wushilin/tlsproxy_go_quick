@@ -93,12 +93,14 @@ var configReference = []sectionDoc{
 		{"max_keep", "10", "Rotated generations kept: file.1 (newest) .. file.N."},
 		{"compress_after", "3", "Generations above this number are gzip-compressed."},
 	}},
-	{"[console]", "This web console. Hidden from this editor: change it in the file itself. listen and port need a restart.", []keyDoc{
-		{"listen", "127.0.0.1", "Bind address. The console is plain HTTP; keep it on loopback."},
-		{"port", "(required)", "Console port."},
+	{"[console]", "This web console, in console.toml (given with --console), not in this file: the console can't change it. It is read again on every reload.", []keyDoc{
+		{"bind", "127.0.0.1", "Addresses, separated by ;. With cert: the [[listener]] with exactly this bind and port serves the console (one of its own if none has)."},
+		{"port", "(required)", "Console port, e.g. 443 to share a listener."},
+		{"hostname", "(required with cert)", "The name the console is served under, as a rule of its listener that config.toml can't override."},
+		{"cert", "(plain HTTP)", "auto or local-ca / local-ca:ca002: serve the console over TLS. Without it, plain HTTP on bind:port (keep it on loopback); a change of bind or port then needs a restart."},
 		{"password", "", "Plain text; replaced by password_hash when the proxy starts."},
 		{"password_hash", "", "$argon2id$... (or pbkdf2-sha256$... from older versions); make one with tlsproxy --hash-password."},
-		{"secure_cookie", "false", "Mark the session cookie Secure; set true when the console is published through HTTPS."},
-		{"hostnames", "(none)", "Names the console may be addressed by, besides IP addresses and localhost."},
+		{"secure_cookie", "false", "Plain HTTP only: mark the session cookie Secure, when another proxy publishes the console over HTTPS."},
+		{"hostnames", "(none)", "Plain HTTP only: names the console may be addressed by, besides IP addresses and localhost."},
 	}},
 }

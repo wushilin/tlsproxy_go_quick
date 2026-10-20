@@ -77,7 +77,7 @@ func startRedirect(t *testing.T, extra string) (*Server, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go srv.acceptLoop(ln, RedirectListenerName)
+	go srv.acceptLoop(ln, newLiveListener(RedirectListenerName, nil))
 	return srv, ln.Addr().String()
 }
 

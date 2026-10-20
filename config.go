@@ -99,6 +99,9 @@ type Listener struct {
 	HandshakeTimeout, IdleTimeout, HalfCloseTimeout *time.Duration
 	MaxAggregatedSpeed, MaxSingleConnectionSpeed    float64 // bytes per second, each direction
 	IsRedirect                                      bool    // the http_to_https_redirect listener
+	// Console: the web console is served here (console.toml). A listener
+	// of its own (consoleListener) has Line 0 and is not in config.toml.
+	Console bool
 
 	// How Route evaluates its rules: literal names by lookup, everything else
 	// in order of specificity.
@@ -165,18 +168,6 @@ func (c *Config) PortListeners() []*Listener {
 	return out
 }
 
-// ConsoleConfig is the [console] section: a web console on its own port.
-// Plain HTTP by design: bind it to loopback and publish it through a
-// terminating rule of this proxy if it must be reachable from elsewhere.
-type ConsoleConfig struct {
-	SecureCookie bool // require HTTPS for session cookies when published through TLS termination
-	Listen       string
-	Port         int
-	Password     string   // plaintext, only until the proxy replaces it with PasswordHash
-	PasswordHash string   // pbkdf2-sha256$...
-	Hostnames    []string // extra names the console may be addressed by (Host header check)
-}
-
 // ruleKind is how specific a rule's pattern is. It decides which rule wins when
 // several match, whatever their order in the file. All matching ignores case.
 type ruleKind int
@@ -238,6 +229,9 @@ type Rule struct {
 	// Routes are the rule's service_rule keys, the longest prefix first: a
 	// rule with routes serves HTTP itself instead of connecting to a target.
 	Routes []*ServiceRoute
+	// Console is set on the rule console.toml adds: it serves the web
+	// console, is not in config.toml (Line 0), and cannot be stopped.
+	Console bool
 }
 
 // Key identifies a rule across reloads and edits: two rules with the same key
@@ -466,6 +460,9 @@ func (c *Config) prioritiseListener(l *Listener) error {
 	// a rule that an earlier, broader rule would have caught.
 	var later []string
 	for i, r := range rules {
+		if r.Console {
+			continue // not in the file, so in no file order
+		}
 		for _, prev := range rules[:i] {
 			name := literalName(r.Source)
 			if prev.Kind > r.Kind && (prev.Kind == kindCatchAll || r.Kind == kindLiteral && prev.Pattern.MatchString(name)) {
@@ -578,6 +575,7 @@ type rawRule struct {
 	line                                                                              int
 	pattern, action, targetHost, tport                                                *string
 	serviceRules                                                                      []rawServiceRule
+	console                                                                           bool // the console's own rule (applyConsole)
 }
 
 // buffer_size is clamped to this range.
@@ -586,7 +584,15 @@ const (
 	maxBufferSize = 128 << 10
 )
 
-func ParseConfig(text string) (*Config, error) {
+// ParseConfig reads config.toml alone, without a console.
+func ParseConfig(text string) (*Config, error) { return LoadConfig(text, nil) }
+
+// LoadConfig reads config.toml with the console of console.toml (nil for
+// none) merged in: on the listener with exactly its address and port, or on
+// a listener of its own (see applyConsole). The proxy loads every version of
+// the file this way, saved or only checked, so what passes a check is what
+// a reload runs.
+func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 	cfg := &Config{
 		sourceHash:         fileHash([]byte(text)),
 		HandshakeTimeout:   10 * time.Second,
@@ -647,10 +653,7 @@ func ParseConfig(text string) (*Config, error) {
 			}
 			section = strings.TrimSpace(line[1 : len(line)-1])
 			if section == "console" {
-				if cfg.Console == nil {
-					cfg.Console = &ConsoleConfig{Listen: "127.0.0.1"}
-				}
-				continue
+				return nil, fail("[console] has a file of its own now: move this section to console.toml (next to this file, or anywhere) and start the proxy with --console <that file>. The console can't change that file, so it can't lock itself out")
 			}
 			if section != "global" && section != "logging" {
 				return nil, fail("unknown section [%s]", section)
@@ -801,30 +804,6 @@ func ParseConfig(text string) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
-		case "console":
-			switch key {
-			case "listen":
-				cfg.Console.Listen = strings.Trim(value, "[]")
-			case "port":
-				if cfg.Console.Port, err = parsePort(value); err != nil {
-					return nil, fail("%v", err)
-				}
-			case "password":
-				cfg.Console.Password = value
-			case "password_hash":
-				if herr := validHash(value); herr != nil {
-					return nil, fail("password_hash: %v", herr)
-				}
-				cfg.Console.PasswordHash = value
-			case "secure_cookie":
-				if cfg.Console.SecureCookie, err = parseBool(value); err != nil {
-					return nil, fail("secure_cookie: %v", err)
-				}
-			case "hostnames":
-				cfg.Console.Hostnames = splitList(strings.ToLower(value))
-			default:
-				return nil, fail("unknown key %q in [console]", key)
-			}
 		case "logging":
 			switch key {
 			case "stdout":
@@ -919,90 +898,14 @@ func ParseConfig(text string) (*Config, error) {
 		}
 	}
 	for _, r := range raws {
-		fail := func(format string, a ...any) error {
-			return fmt.Errorf("[[host]] at line %d: %s", r.line, fmt.Sprintf(format, a...))
-		}
-		if r.pattern == nil {
-			return nil, fail("pattern is required")
-		}
-		rule := Rule{Line: r.line, Source: *r.pattern}
-		switch {
-		case r.listener != nil:
-			if cfg.Listener(*r.listener) == nil {
-				return nil, fail("listener = %s: there is no [[listener]] named %s (listeners: %s)", *r.listener, *r.listener, cfg.listenerNames())
-			}
-			rule.Listener = *r.listener
-		default:
-			return nil, fail("listener = <name> is required (listeners: %s)", cfg.listenerNames())
-		}
-		groups := 0
-		expr := ""
-		var err error
-		if rule.Kind, expr, rule.literalChars, err = classify(*r.pattern); err != nil {
-			return nil, fail("%v", err)
-		}
-		if rule.Kind == kindNone {
-			rule.NoSNI = true
-		} else {
-			// Whole-name, case-insensitive match.
-			rule.Pattern, err = regexp.Compile("(?i)^(?:" + expr + ")$")
-			if err != nil {
-				return nil, fail("bad pattern %q: %v", *r.pattern, err)
-			}
-			groups = rule.Pattern.NumSubexp()
-		}
-		action := "allow"
-		if r.action != nil {
-			action = strings.ToLower(*r.action)
-		}
-		switch action {
-		case "deny":
-		case "allow":
-			rule.Allow = true
-			if len(r.serviceRules) > 0 {
-				break // served here: serveSettings checks the rest
-			}
-			if r.targetHost == nil {
-				return nil, fail("target_host is required for allow")
-			}
-			rule.TargetHost = *r.targetHost
-			// The port always goes in target_port. A ':' is only legal in an
-			// IPv6 address; "host:8080" would otherwise be dialled as a name.
-			if strings.Contains(rule.TargetHost, ":") {
-				if _, err := netip.ParseAddr(rule.TargetHost); err != nil {
-					return nil, fail("target_host %q must not contain a port: use target_port (an IPv6 address is written without brackets)", rule.TargetHost)
-				}
-			}
-			if r.tport == nil {
-				return nil, fail("target_port is required for allow")
-			}
-			if rule.TargetPort, err = parsePort(*r.tport); err != nil {
-				return nil, fail("%v", err)
-			}
-			// Catch bad group references now rather than per connection.
-			probe := make([]int, 2*(groups+1))
-			if _, err := expand(rule.TargetHost, "", probe); err != nil {
-				return nil, fail("target_host: %v", err)
-			}
-		default:
-			return nil, fail("action must be allow or deny, got %q", action)
-		}
-		if err := serveSettings(&rule, &r); err != nil {
-			return nil, fail("%v", err)
-		}
-		if err := tlsSettings(cfg, &rule, r); err != nil {
-			return nil, fail("%v", err)
-		}
-		if rule.Serves() {
-			rule.UpstreamTLS, rule.UpstreamTLSVerify = false, false // nothing upstream
-		}
-		if err := proxySettings(&rule, r); err != nil {
-			return nil, fail("%v", err)
-		}
-		if err := speedSettings(&rule, r); err != nil {
-			return nil, fail("%v", err)
+		rule, err := buildRule(cfg, r)
+		if err != nil {
+			return nil, fmt.Errorf("[[host]] at line %d: %v", r.line, err)
 		}
 		cfg.Rules = append(cfg.Rules, rule)
+	}
+	if err := cfg.applyConsole(console); err != nil {
+		return nil, err
 	}
 	if err := cfg.prioritise(); err != nil {
 		return nil, err
@@ -1010,17 +913,6 @@ func ParseConfig(text string) (*Config, error) {
 	for i := range cfg.Rules {
 		if r := &cfg.Rules[i]; r.Allow && r.Kind == kindCatchAll && strings.Contains(strings.ReplaceAll(r.TargetHost, "$$", ""), "$") {
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("[[host]] at line %d: pattern = %s with target_host = %s connects to whatever name a client sends (port %d), internal names included. List the names or domains you mean to allow instead", r.Line, r.Source, r.TargetHost, r.TargetPort))
-		}
-	}
-	if c := cfg.Console; c != nil {
-		if c.Port == 0 {
-			return nil, fmt.Errorf("[console] port is required")
-		}
-		if c.Password == "" && c.PasswordHash == "" {
-			return nil, fmt.Errorf("[console] needs a password: set password = <text> (the proxy replaces it with a hash) or password_hash")
-		}
-		if ip := net.ParseIP(c.Listen); ip == nil || !ip.IsLoopback() {
-			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("[console] listens on %s over plain HTTP: the password crosses the network unencrypted. Prefer listen = 127.0.0.1 behind a terminating rule", c.Listen))
 		}
 	}
 	if err := cfg.resolveServe(auths); err != nil {
@@ -1060,6 +952,94 @@ func ParseConfig(text string) (*Config, error) {
 			"For example: dns_resolvers = 1.1.1.1; 8.8.8.8; 2606:4700:4700::1111; 2001:4860:4860::8888")
 	}
 	return cfg, nil
+}
+
+// buildRule turns one [[host]] section (or the console's rule, see
+// applyConsole) into a Rule. Errors say what is wrong, not where.
+func buildRule(cfg *Config, r rawRule) (Rule, error) {
+	fail := func(format string, a ...any) error { return fmt.Errorf(format, a...) }
+	if r.pattern == nil {
+		return Rule{}, fail("pattern is required")
+	}
+	rule := Rule{Line: r.line, Source: *r.pattern}
+	switch {
+	case r.listener != nil:
+		if cfg.Listener(*r.listener) == nil {
+			return Rule{}, fail("listener = %s: there is no [[listener]] named %s (listeners: %s)", *r.listener, *r.listener, cfg.listenerNames())
+		}
+		rule.Listener = *r.listener
+	default:
+		return Rule{}, fail("listener = <name> is required (listeners: %s)", cfg.listenerNames())
+	}
+	groups := 0
+	expr := ""
+	var err error
+	if rule.Kind, expr, rule.literalChars, err = classify(*r.pattern); err != nil {
+		return Rule{}, fail("%v", err)
+	}
+	if rule.Kind == kindNone {
+		rule.NoSNI = true
+	} else {
+		// Whole-name, case-insensitive match.
+		rule.Pattern, err = regexp.Compile("(?i)^(?:" + expr + ")$")
+		if err != nil {
+			return Rule{}, fail("bad pattern %q: %v", *r.pattern, err)
+		}
+		groups = rule.Pattern.NumSubexp()
+	}
+	action := "allow"
+	if r.action != nil {
+		action = strings.ToLower(*r.action)
+	}
+	switch action {
+	case "deny":
+	case "allow":
+		rule.Allow = true
+		if len(r.serviceRules) > 0 || r.console {
+			break // served here: serveSettings checks the rest
+		}
+		if r.targetHost == nil {
+			return Rule{}, fail("target_host is required for allow")
+		}
+		rule.TargetHost = *r.targetHost
+		// The port always goes in target_port. A ':' is only legal in an
+		// IPv6 address; "host:8080" would otherwise be dialled as a name.
+		if strings.Contains(rule.TargetHost, ":") {
+			if _, err := netip.ParseAddr(rule.TargetHost); err != nil {
+				return Rule{}, fail("target_host %q must not contain a port: use target_port (an IPv6 address is written without brackets)", rule.TargetHost)
+			}
+		}
+		if r.tport == nil {
+			return Rule{}, fail("target_port is required for allow")
+		}
+		if rule.TargetPort, err = parsePort(*r.tport); err != nil {
+			return Rule{}, fail("%v", err)
+		}
+		// Catch bad group references now rather than per connection.
+		probe := make([]int, 2*(groups+1))
+		if _, err := expand(rule.TargetHost, "", probe); err != nil {
+			return Rule{}, fail("target_host: %v", err)
+		}
+	default:
+		return Rule{}, fail("action must be allow or deny, got %q", action)
+	}
+	if err := serveSettings(&rule, &r); err != nil {
+		return Rule{}, fail("%v", err)
+	}
+	rule.Console = r.console
+	if err := tlsSettings(cfg, &rule, r); err != nil {
+		return Rule{}, fail("%v", err)
+	}
+	if rule.Serves() {
+		rule.UpstreamTLS, rule.UpstreamTLSVerify = false, false // nothing upstream
+	}
+	if err := proxySettings(&rule, r); err != nil {
+		return Rule{}, fail("%v", err)
+	}
+	if err := speedSettings(&rule, r); err != nil {
+		return Rule{}, fail("%v", err)
+	}
+	return rule, nil
 }
 
 // parseBinds reads a bind list: addresses separated by ; or ,.
@@ -1195,6 +1175,9 @@ func (c *Config) resolveListeners() error {
 		}
 		if strings.EqualFold(l.Name, RedirectListenerName) {
 			return fail("the name %s is reserved for http_to_https_redirect", RedirectListenerName)
+		}
+		if strings.EqualFold(l.Name, consoleListener) {
+			return fail("the name %s is reserved for the console's own listener", consoleListener)
 		}
 		if l.Port == 0 {
 			return fail("port is required")

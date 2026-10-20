@@ -1,7 +1,8 @@
 // tlsproxy: SNI-routing TLS proxy. It peeks at the ClientHello, picks a
 // backend from config.toml and relays the raw (still encrypted) stream. Per
-// rule it can terminate TLS instead, with certificates from ACME or a
-// directory. Standard library plus the vendored golang.org/x/crypto/acme.
+// rule it can terminate TLS instead, with certificates from ACME or its own
+// CA, and serve HTTP itself. Standard library plus the vendored
+// golang.org/x/crypto (acme, argon2).
 package main
 
 import (
@@ -24,7 +25,7 @@ func main() {
 			return
 		}
 		if a == "-h" || a == "--help" {
-			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--test <sni>...]\n       %s --hash-password    (reads a password from stdin, prints an argon2id password_hash for [console] or [[basic_auth]])\n       %s --version\n", os.Args[0], os.Args[0], os.Args[0])
+			fmt.Fprintf(os.Stderr, "usage: %s [config.toml] [--console console.toml] [--test <sni>...]\n       %s --hash-password    (reads a password from stdin, prints an argon2id password_hash for console.toml or [[basic_auth]])\n       %s --version\n\nWithout --console there is no web console.\n", os.Args[0], os.Args[0], os.Args[0])
 			return
 		}
 		if a == "--hash-password" {
@@ -43,9 +44,16 @@ func main() {
 			return
 		}
 	}
-	path := "config.toml"
-	if len(args) > 0 && args[0] != "--test" {
+	path, consolePath := "config.toml", ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "--") {
 		path, args = args[0], args[1:]
+	}
+	if len(args) > 0 && args[0] == "--console" {
+		if len(args) < 2 || args[1] == "" {
+			fmt.Fprintln(os.Stderr, "--console needs the path of console.toml; see --help")
+			os.Exit(2)
+		}
+		consolePath, args = args[1], args[2:]
 	}
 	var testSNIs []string
 	testMode := false
@@ -57,10 +65,21 @@ func main() {
 		testMode, testSNIs = true, args[1:]
 	}
 
+	var console *ConsoleConfig
+	if consolePath != "" {
+		text, err := os.ReadFile(consolePath)
+		if err == nil {
+			console, err = ParseConsole(string(text))
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading %s: %v\n", consolePath, err)
+			os.Exit(1)
+		}
+	}
 	text, err := os.ReadFile(path)
 	var cfg *Config
 	if err == nil {
-		cfg, err = ParseConfig(string(text))
+		cfg, err = LoadConfig(string(text), console)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading %s: %v\n", path, err)
@@ -84,6 +103,10 @@ func main() {
 				switch {
 				case d.Err != "":
 					fmt.Printf("%s -> ERROR %s\n", sni, d.Err)
+				case d.Allow && d.Rule.Console:
+					fmt.Printf("%s -> served here: the console (console.toml)\n", sni)
+				case d.Allow && d.Rule.Serves():
+					fmt.Printf("%s -> served here (rule line %d, %s: %s)\n", sni, d.RuleLine, d.Rule.Kind, d.Rule.Source)
 				case d.Allow:
 					fmt.Printf("%s -> %s (rule line %d, %s: %s)\n", sni, net.JoinHostPort(d.Host, strconv.Itoa(d.Port)), d.RuleLine, d.Rule.Kind, d.Rule.Source)
 				case d.RuleLine == 0:
@@ -96,7 +119,7 @@ func main() {
 		return
 	}
 
-	if err := Run(cfg, path); err != nil {
+	if err := Run(cfg, path, consolePath); err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}

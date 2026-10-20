@@ -10,6 +10,7 @@
 #> blocked.example.com    => DENY
 #> legacy.example.com     => 192.168.1.50:443
 #> apps.example.com       => SERVED
+#> console.example.com    => CONSOLE
 #> other.org              => DENY
 
 # One listener here; every rule names it (listener = https). For several,
@@ -64,13 +65,9 @@ max_size = 50M                           # rotate at this size (K / M / G, KiB /
 max_keep = 14                            # rotated generations kept
 compress_after = 2                       # generations above this number are gzip
 
-[console]
-listen = 127.0.0.1
-port = 9443
-password_hash = "pbkdf2-sha256$600000$rbT1NRdts8POqh5mv9xJ4w$2aWzIzv9nmj1Xh6pT3q5N0p3rGZr7m9sQ0Y8v1o2bXk"
-# password = plain text here instead; the proxy replaces it with password_hash on start
-secure_cookie = true              # browser sessions require HTTPS through the terminating rule
-hostnames = console.example.com, admin.example.com
+# The web console is in 12-everything.console.toml (--console): it joins the
+# https listener above, which has exactly its bind and port, as the rule for
+# console.example.com.
 
 # ---- rules: the most specific wins (see 13-rule-precedence); no match = deny --
 

@@ -108,20 +108,33 @@ acme_agree_tos = true           # required by the cert = auto rule for myweb bel
 # (with a log line), so older config files keep loading.
 
 # --- Web console (optional) ---------------------------------------------------
-# Dashboard, connections, certificates, log and a config editor on its own port,
-# over plain HTTP. Keep it on loopback and publish it through a terminating rule
-# of this proxy (see samples/11-web-console.toml). Remove the leading "# " to use:
+# Dashboard, connections, certificates, log and a config editor. Its settings
+# are not in this file but in their own, given at start-up:
 #
-# [console]
-# listen = 127.0.0.1            # default 127.0.0.1; any other address logs a warning (plain HTTP)
-# port = 9443                   # required
-# password = change-me          # plain text; the proxy replaces this line with password_hash on start
-# password_hash = "pbkdf2-sha256$..."   # or generate it yourself: tlsproxy --hash-password
-# secure_cookie = false         # set true when publishing the console through HTTPS
-# hostnames = console.example.com       # extra names the console answers to (DNS rebinding protection)
+#   tlsproxy config.toml --console console.toml
 #
-# listen and port need a restart; password, secure_cookie and hostnames follow hot reload. The
-# section is hidden from the console's editor and cannot be changed there.
+# The console can edit this file but never console.toml, so no change made from
+# it can change its password or take it off the network. A [console] section
+# here is an error. console.toml holds one section (see
+# samples/11-web-console.console.toml):
+#
+#   [console]
+#   bind = 0.0.0.0              # default 127.0.0.1; addresses separated by ;
+#   port = 443                  # required
+#   hostname = admin.wushilin.net   # with cert: the name it is served under (required)
+#   cert = auto                 # auto or local-ca[:caNNN]: served over TLS. Without it: plain HTTP
+#                               #   on bind:port, as before (keep it on loopback)
+#   password = change-me        # plain text; the proxy replaces this line with password_hash on start
+#   password_hash = "$argon2id$..."   # or generate it yourself: tlsproxy --hash-password
+#   hostnames = console.lan     # plain HTTP only: extra names it answers to (DNS rebinding protection)
+#   secure_cookie = false       # plain HTTP only: true when another proxy publishes it over HTTPS
+#
+# With cert, the console joins the [[listener]] that has exactly its bind and port,
+# as one more rule (for hostname) that this file can't override: a [[host]] for
+# that name there is an error, and a listener that only partly overlaps its
+# address too. With no such listener, it gets one of its own. The console can't
+# stop its rule or that listener; deleting the listener moves the console to one
+# of its own, keeping the port open. console.toml is read again on every reload.
 
 # --- More listeners -----------------------------------------------------------
 # Every port is a [[listener]] (at least one; bind and port are not [global]

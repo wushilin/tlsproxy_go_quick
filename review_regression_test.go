@@ -70,14 +70,17 @@ func TestConsoleSecureCookies(t *testing.T) {
 		{"direct TLS", false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie="+strconv.FormatBool(tc.configured)+"\n")
+			con, err := ParseConsole("[console]\nport=9443\npassword=x\nsecure_cookie=" + strconv.FormatBool(tc.configured) + "\n")
+			if err != nil {
+				t.Fatal(err)
+			}
 			hash, err := hashPassword("x")
 			if err != nil {
 				t.Fatal(err)
 			}
-			cfg.Console.PasswordHash = hash
+			con.PasswordHash = hash
 			c := &Console{sessions: map[string]*session{}}
-			c.update(cfg.Console)
+			c.update(con)
 			req := httptest.NewRequest("POST", "/api/login", strings.NewReader(`{"password":"x"}`))
 			if tc.directTLS {
 				req.TLS = &tls.ConnectionState{}
@@ -88,15 +91,25 @@ func TestConsoleSecureCookies(t *testing.T) {
 			if w.Code != 200 || len(cookies) != 1 || cookies[0].Secure != tc.want || !cookies[0].HttpOnly {
 				t.Fatalf("status=%d cookies=%v", w.Code, cookies)
 			}
-			cfg.Console.SecureCookie = !tc.configured
-			c.update(cfg.Console)
+			con.SecureCookie = !tc.configured
+			c.update(con)
 			if len(c.sessions) != 0 {
 				t.Fatal("cookie policy change did not revoke old sessions")
 			}
 		})
 	}
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie=invalid\n"); err == nil {
+	if _, err := ParseConsole("[console]\nport=9443\npassword=x\nsecure_cookie=invalid\n"); err == nil {
 		t.Fatal("invalid secure_cookie accepted")
+	}
+	// Served over TLS, cookies are HTTPS-only without saying so.
+	con, err := ParseConsole("[console]\nport=443\nhostname=admin.example.com\ncert=auto\npassword=x\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Console{sessions: map[string]*session{}}
+	c.update(con)
+	if !c.secureCookie || !c.hostnames["admin.example.com"] {
+		t.Fatalf("TLS console: secure=%v hostnames=%v", c.secureCookie, c.hostnames)
 	}
 }
 
@@ -132,19 +145,28 @@ func TestRelayCountsPartialWrites(t *testing.T) {
 }
 
 func TestPasswordRewriteRejectsStaleSnapshot(t *testing.T) {
-	oldText := "[[listener]]\nname=default\nport=443\n[console]\nport=9443\npassword=old-password\n"
+	oldText := "# mine\n[console]\nport=9443\npassword=old-password\n"
+	parse := func(text string) *ConsoleConfig {
+		t.Helper()
+		c, err := ParseConsole(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
 	for name, newText := range map[string]string{
-		"new password":    strings.ReplaceAll(oldText, "old-password", "new-password"),
-		"unrelated edit":  oldText + "# newer edit\n",
-		"console removed": "[[listener]]\nname=default\nport=443\n",
+		"new password":   strings.ReplaceAll(oldText, "old-password", "new-password"),
+		"unrelated edit": oldText + "# newer edit\n",
+		"hash set":       "[console]\nport=9443\npassword_hash=" + mustHash(t, "x") + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.toml")
-			cfg := mustParse(t, oldText)
+			path := filepath.Join(t.TempDir(), "console.toml")
+			con := parse(oldText)
 			if err := os.WriteFile(path, []byte(newText), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if (&Server{}).securePassword(path, cfg) {
+			srv := &Server{consolePath: path}
+			if srv.securePassword(con) {
 				t.Fatal("stale snapshot rewrote a newer file")
 			}
 			data, err := os.ReadFile(path)
@@ -155,18 +177,18 @@ func TestPasswordRewriteRejectsStaleSnapshot(t *testing.T) {
 				t.Fatal("newer file was overwritten")
 			}
 			// A fresh parse can still hash the current password normally.
-			fresh := mustParse(t, newText)
-			if fresh.Console != nil {
-				password := fresh.Console.Password
-				if !(&Server{}).securePassword(path, fresh) {
+			fresh := parse(newText)
+			if fresh.Password != "" {
+				password := fresh.Password
+				if !srv.securePassword(fresh) {
 					t.Fatal("current snapshot could not rewrite password")
 				}
 				data, err = os.ReadFile(path)
 				if err != nil {
 					t.Fatal(err)
 				}
-				saved := mustParse(t, string(data))
-				if !checkPassword(saved.Console.PasswordHash, password) || fresh.sourceHash != saved.sourceHash {
+				saved := parse(string(data))
+				if !checkPassword(saved.PasswordHash, password) || fresh.sourceHash != saved.sourceHash || !strings.HasPrefix(string(data), "# mine\n") {
 					t.Fatal("password or tracked snapshot differs from the saved file")
 				}
 			}

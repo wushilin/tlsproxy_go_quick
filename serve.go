@@ -194,11 +194,25 @@ type servedConn struct {
 	done     chan struct{}
 	once     sync.Once
 	mu       sync.Mutex
-	reason   string // why the proxy closed it; "" = the client or the web server did
-	ruleKey  string // the rule that routed it
-	listener string
+	reason   string        // why the proxy closed it; "" = the client or the web server did
+	pattern  string        // the rule that routed it: its Key without the listener
+	live     *liveListener // the sockets it came in on: their listener's name follows a takeover
+	listener string        // its listener when there is no live one (tests)
 	sni      string
 }
+
+// listenerName is the listener the connection belongs to now: the one
+// whose sockets accepted it, renamed if another took them over.
+func (sc *servedConn) listenerName() string {
+	if sc.live != nil {
+		return *sc.live.name.Load()
+	}
+	return sc.listener
+}
+
+// ruleKey is the Key of the rule the connection was routed to, on the
+// listener it belongs to now.
+func (sc *servedConn) ruleKey() string { return sc.listenerName() + "\x00" + sc.pattern }
 
 func (sc *servedConn) Read(b []byte) (int, error) {
 	n, err := sc.Conn.Read(b)
@@ -278,8 +292,12 @@ func (s *Server) serveHere(c *ConnState, client net.Conn, hello, helloBuf []byte
 			protos = append(protos, p)
 		}
 	}
+	_, pattern, _ := strings.Cut(rule.Key(), "\x00")
+	s.listenersMu.Lock()
+	live := s.listeners[cfg.listener.Name]
+	s.listenersMu.Unlock()
 	sc := &servedConn{Conn: &prefixConn{Conn: client, prefix: hello}, c: c, stats: s.stats, done: make(chan struct{}),
-		ruleKey: rule.Key(), listener: cfg.listener.Name, sni: info.SNI}
+		pattern: pattern, live: live, listener: cfg.listener.Name, sni: info.SNI}
 	l := cfg.listener
 	for dir := range sc.limits {
 		sc.limits[dir][0] = newLimiter(rule.MaxSingleConnectionSpeed, cfg.BufferSize)
@@ -333,12 +351,12 @@ func (s *Server) serveHere(c *ConnState, client net.Conn, hello, helloBuf []byte
 	s.served.Store(tc, sc)
 	defer s.served.Delete(tc)
 	c.setKill(sc.kill)
-	if s.stoppedRules()[sc.ruleKey] {
+	if s.stoppedRules()[sc.ruleKey()] {
 		sc.kill("rule stopped from the console; closed by proxy")
 	}
-	for !s.webFor(rt, sc.listener).push(s, tc) {
+	for !s.webFor(rt, sc.listenerName()).push(s, tc) {
 		rt = s.runtime.Load() // a reload retired that server an instant ago: the current one serves it
-		if s.webFor(rt, sc.listener) == nil {
+		if s.webFor(rt, sc.listenerName()) == nil {
 			sc.kill("its rule no longer serves after a reload; closed by proxy")
 			break
 		}
@@ -399,17 +417,25 @@ func requestName(host string) string {
 // now. It returns what to add to the log line.
 func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *servedConn) string {
 	rt := s.runtime.Load()
-	cfg := rt.byListener[sc.listener]
+	cfg := rt.byListener[sc.listenerName()]
 	var d Decision
 	if cfg != nil {
 		d = cfg.RouteExcept(requestName(r.Host), s.stoppedRules())
 	}
-	if d.Rule == nil || d.Rule.Key() != sc.ruleKey || !d.Rule.Serves() {
+	if d.Rule == nil || d.Rule.Key() != sc.ruleKey() || !d.Rule.Serves() {
 		w.Header().Set("Connection", "close")
 		http.Error(w, "misdirected request: this connection is not for "+r.Host, http.StatusMisdirectedRequest)
 		return " (Host is not this connection's rule)"
 	}
 	rule := d.Rule
+	if rule.Console {
+		if s.console == nil {
+			http.Error(w, "the console is not running", http.StatusServiceUnavailable)
+			return " (console not running)"
+		}
+		s.console.handler.ServeHTTP(w, r)
+		return " (console)"
+	}
 	route := rule.RouteFor(r.URL.Path)
 	// /docs for the prefix /docs/: send the client to the folder, as nginx
 	// does, unless a prefix at least as long as /docs takes it as it is.

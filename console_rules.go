@@ -66,7 +66,8 @@ type ruleView struct {
 	Kind         string            `json:"kind"`
 	Allow        bool              `json:"allow"`
 	Target       string            `json:"target"`
-	Routes       []string          `json:"routes,omitempty"` // service rules: "/prefix → where"
+	Routes       []string          `json:"routes,omitempty"`  // service rules: "/prefix → where"
+	Console      bool              `json:"console,omitempty"` // the console's own rule (console.toml): not in the file, can't be stopped
 	Terminates   bool              `json:"terminates"`
 	Cert         string            `json:"cert"`
 	Proxy        bool              `json:"proxy"`
@@ -89,6 +90,7 @@ type listenerView struct {
 	Line             int               `json:"line"`
 	Removed          bool              `json:"removed,omitempty"`  // gone from the file; its connections remain
 	Redirect         bool              `json:"redirect,omitempty"` // the http_to_https_redirect listener: Start/Stop only
+	Console          bool              `json:"console,omitempty"`  // the console is served here: can't be stopped (line 0: its own listener)
 	Bind             string            `json:"bind"`
 	Port             int               `json:"port"`
 	Addrs            []string          `json:"addrs"` // actually open
@@ -192,7 +194,7 @@ func (c *Console) configFile() *parsedFile {
 	if st != nil {
 		pf.mtime, pf.size = st.ModTime(), st.Size()
 	}
-	if pf.cfg, err = ParseConfig(string(data)); err != nil {
+	if pf.cfg, err = c.srv.loadConfig(string(data)); err != nil {
 		pf.view.Error = "the config file does not load (" + err.Error() + "); the console shows the running configuration and cannot edit it until the file is fixed"
 	} else {
 		pf.view.Editable = true
@@ -308,7 +310,7 @@ func (c *Console) state() consoleState {
 	}
 	for i := range shown.Listeners {
 		l := &shown.Listeners[i]
-		lv := listenerView{Name: l.Name, Line: l.Line, Bind: l.Bind, Port: l.Port,
+		lv := listenerView{Name: l.Name, Line: l.Line, Bind: l.Bind, Port: l.Port, Console: l.Console,
 			Values: values(l.Line), MaxConnections: l.MaxConnections,
 			HandshakeTimeout: secondsOrNil(l.HandshakeTimeout), IdleTimeout: secondsOrNil(l.IdleTimeout), HalfCloseTimeout: secondsOrNil(l.HalfCloseTimeout),
 			AggSpeed: l.MaxAggregatedSpeed, ConnSpeed: l.MaxSingleConnectionSpeed}
@@ -331,6 +333,8 @@ func (c *Console) state() consoleState {
 			AggSpeed: r.MaxAggregatedSpeed, ConnSpeed: r.MaxSingleConnectionSpeed,
 			Stopped: stopped[r.Key()], Running: running[r.Key()], Values: ruleValues(r.Line)}
 		switch {
+		case r.Console:
+			v.Target, v.Console = "the console", true
 		case r.Serves():
 			v.Target = "served here"
 			for _, route := range r.Routes {
@@ -527,6 +531,10 @@ func (c *Console) ruleStopStart(stop bool) http.HandlerFunc {
 			fail(w, 404, "no such rule in the running configuration")
 			return
 		}
+		if rule != nil && rule.Console && stop {
+			fail(w, 409, "this is the console's own rule (console.toml): stopping it would cut off the console")
+			return
+		}
 		c.srv.setRuleStopped(req.Key, stop)
 		name := req.Key
 		if rule != nil {
@@ -583,7 +591,7 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	configFileMu.Lock()
-	onDisk, _, _, ver, err := c.readConfig()
+	onDisk, ver, err := c.readConfig()
 	configFileMu.Unlock()
 	if err != nil {
 		fail(w, 500, "%v", err)
@@ -608,7 +616,7 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp["block"] = strings.Join(lines[b.start:b.end], "\n")
-	cfg, err := ParseConfig(full)
+	cfg, err := c.srv.loadConfig(full)
 	if err == nil {
 		err = c.srv.certs.Check(cfg)
 	}
@@ -652,7 +660,7 @@ func (c *Console) ruleEdit(w http.ResponseWriter, r *http.Request, del bool) {
 	}
 	configFileMu.Lock()
 	defer configFileMu.Unlock()
-	onDisk, _, _, ver, err := c.readConfig()
+	onDisk, ver, err := c.readConfig()
 	if err != nil {
 		fail(w, 500, "%v", err)
 		return
@@ -666,7 +674,7 @@ func (c *Console) ruleEdit(w http.ResponseWriter, r *http.Request, del bool) {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	cfg, err := ParseConfig(full)
+	cfg, err := c.srv.loadConfig(full)
 	if err == nil {
 		err = c.srv.certs.Check(cfg)
 	}
@@ -696,19 +704,19 @@ type listenerEditRequest struct {
 // listenerChange applies a listener edit to the file as it is now. The
 // caller holds configFileMu if it goes on to write.
 func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []byte, full string, at int, notes []string, cfg *Config, ver fileVersion, err error) {
-	if onDisk, _, _, ver, err = c.readConfig(); err != nil {
+	if onDisk, ver, err = c.readConfig(); err != nil {
 		return
 	}
 	if del {
 		// Say which rules hold it, rather than the parser's complaint about them.
-		if cur, perr := ParseConfig(string(onDisk)); perr == nil {
+		if cur, perr := c.srv.loadConfig(string(onDisk)); perr == nil {
 			for _, l := range cur.Listeners {
 				if l.Line != req.Line {
 					continue
 				}
 				var held []string
 				for _, r := range cur.Rules {
-					if r.Listener == l.Name {
+					if r.Listener == l.Name && !r.Console { // the console moves to a listener of its own
 						held = append(held, fmt.Sprintf("%s (line %d)", r.Source, r.Line))
 					}
 				}
@@ -722,7 +730,7 @@ func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []by
 	if full, at, notes, err = editListeners(string(onDisk), req.Line, req.Values, del); err != nil {
 		return
 	}
-	if cfg, err = ParseConfig(full); err == nil {
+	if cfg, err = c.srv.loadConfig(full); err == nil {
 		err = c.srv.certs.Check(cfg)
 	}
 	return
@@ -794,6 +802,10 @@ func (c *Console) listenerStopStart(stop bool) http.HandlerFunc {
 			fail(w, 400, "bad request")
 			return
 		}
+		if l := c.srv.runtime.Load().cfg.Listener(req.Name); stop && l != nil && l.Console {
+			fail(w, 409, "the console is served on listener %s (console.toml): stopping it would cut off the console", req.Name)
+			return
+		}
 		err := c.srv.setListenerStopped(req.Name, stop)
 		c.poke()
 		if err != nil {
@@ -807,15 +819,6 @@ func (c *Console) listenerStopStart(stop bool) http.HandlerFunc {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}
-}
-
-// consoleMoved reports a [console] listen or port change: listeners follow a
-// reload, the console itself needs a restart.
-func consoleMoved(next, running *ConsoleConfig) bool {
-	if next == nil || running == nil {
-		return next != running
-	}
-	return next.Listen != running.Listen || next.Port != running.Port
 }
 
 // commit writes full over onDisk (kept as a timestamped backup), reloads at
@@ -860,7 +863,6 @@ func (c *Console) commit(w http.ResponseWriter, r *http.Request, onDisk []byte, 
 		problems = []string{"saved, but applying it is taking long; watch the listener cards"}
 	}
 	c.poke()
-	running := c.srv.runtime.Load().cfg
 	writeJSON(w, 200, map[string]any{"ok": true, "hash": now.Hash, "mtime": now.Mtime, "backup": filepath.Base(backup),
-		"warnings": cfg.Warnings, "problems": problems, "restartNeeded": consoleMoved(cfg.Console, running.Console)})
+		"warnings": cfg.Warnings, "problems": problems})
 }

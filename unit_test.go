@@ -228,6 +228,8 @@ func route(t *testing.T, c *Config, sni string) string {
 	switch {
 	case d.Err != "":
 		return "ERROR"
+	case d.Allow && d.Rule != nil && d.Rule.Console:
+		return "CONSOLE"
 	case d.Allow && d.Rule != nil && d.Rule.Serves():
 		return "SERVED"
 	case d.Allow:
@@ -385,7 +387,17 @@ func TestSamplesRouteAsDocumented(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := ParseConfig(string(text))
+		if strings.HasSuffix(path, ".console.toml") {
+			continue // read with the config file it belongs to
+		}
+		// A sample's console.toml sits next to it: x.toml and x.console.toml.
+		var con *ConsoleConfig
+		if conText, err := os.ReadFile(strings.TrimSuffix(path, ".toml") + ".console.toml"); err == nil {
+			if con, err = ParseConsole(string(conText)); err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+		}
+		cfg, err := LoadConfig(string(text), con)
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
@@ -600,7 +612,7 @@ func TestFormats(t *testing.T) {
 // parserSource is the code that reads config.toml's keys.
 func parserSource() ([]byte, error) {
 	var out []byte
-	for _, f := range []string{"config.go", "serve_config.go"} {
+	for _, f := range []string{"config.go", "serve_config.go", "console_config.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return nil, err
@@ -615,6 +627,7 @@ func parserSource() ([]byte, error) {
 var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, // sections
 	"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true, "auto": true, "none": true, "v1": true, "v2": true, // values
 	"proxy_protocol_from": true, // renamed: a load error that names proxy_trust_source
+	"listen":              true, // console.toml: renamed bind, a load error that says so
 	// options inside a service_rule or [[basic_auth]] user value, documented under those keys
 	"basic_auth": true, "type": true, "prefix": true, "target": true, "strip_prefix": true, "force_host": true, "tls_verify": true,
 	"base_dir": true, "username": true, "password_plain": true}
@@ -642,6 +655,13 @@ func TestEveryOptionIsDocumented(t *testing.T) {
 		text, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if doc == "samples/12-everything.toml" { // and its console.toml
+			console, err := os.ReadFile("samples/12-everything.console.toml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			text = append(text, console...)
 		}
 		for k := range keys {
 			if !regexp.MustCompile(`(^|[^a-z_])` + k + `([^a-z_]|$)`).Match(text) {
@@ -841,11 +861,15 @@ func TestConfigReference(t *testing.T) {
 	// Every documented key, tried alone in its section: the parser must not
 	// call it unknown (as it does a made-up key, checked first).
 	for _, sec := range configReference {
-		if _, err := ParseConfig(sec.Section + "\nno_such_key = x\n"); err == nil || !strings.Contains(err.Error(), "unknown key") {
+		parse := func(text string) error { _, err := ParseConfig(text); return err }
+		if sec.Section == "[console]" { // console.toml
+			parse = func(text string) error { _, err := ParseConsole(text); return err }
+		}
+		if err := parse(sec.Section + "\nno_such_key = x\n"); err == nil || !strings.Contains(err.Error(), "unknown key") {
 			t.Fatalf("%s: a made-up key gives %v; this test can't tell known keys from unknown", sec.Section, err)
 		}
 		for _, k := range sec.Keys {
-			if _, err := ParseConfig(sec.Section + "\n" + k.Key + " = x\n"); err != nil && strings.Contains(err.Error(), "unknown key") {
+			if err := parse(sec.Section + "\n" + k.Key + " = x\n"); err != nil && strings.Contains(err.Error(), "unknown key") {
 				t.Errorf("%s %s is documented but the parser does not know it: %v", sec.Section, k.Key, err)
 			}
 		}
