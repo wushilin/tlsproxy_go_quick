@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -126,7 +127,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		item(g, "half_close_timeout", secs(cfg.HalfCloseTimeout, "unlimited")),
 		item(g, "max_connections", strconv.Itoa(cfg.MaxConnections)),
 		item(g, "max_handshakes_per_ip", map[bool]string{true: "unlimited", false: strconv.Itoa(cfg.MaxHandshakesPerIP)}[cfg.MaxHandshakesPerIP == 0]),
-		item(g, "proxy_protocol_from", prefixes(cfg.ProxyProtocolFrom)),
+		item(g, "proxy_trust_source", prefixes(cfg.ProxyTrustSource)),
 		item(g, "buffer_size", fmt.Sprintf("%d (%s)", cfg.BufferSize, humanBytes(int64(cfg.BufferSize)))),
 		item(g, "splice", strconv.FormatBool(cfg.Splice)),
 		item(g, "buffer_pool_max_idle", strconv.Itoa(cfg.BufferPoolMaxIdle)),
@@ -151,9 +152,9 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		}
 		n.Line = toEditor(l.Line)
 		n.Items = append(n.Items, treeItem{Key: "bind", Value: l.Bind}, treeItem{Key: "port", Value: strconv.Itoa(l.Port)})
-		ppf := cfg.ProxyProtocolFrom
-		if l.ProxyProtocolFrom != nil {
-			ppf = *l.ProxyProtocolFrom
+		ppf := cfg.ProxyTrustSource
+		if l.ProxyTrustSource != nil {
+			ppf = *l.ProxyTrustSource
 		}
 		dur := func(p *time.Duration, g time.Duration, zero string) (string, bool) {
 			if p != nil {
@@ -170,7 +171,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			maxConns = strconv.Itoa(l.MaxConnections)
 		}
 		n.Items = append(n.Items,
-			inherit("proxy_protocol_from", prefixes(ppf), prefixes(ppf), l.ProxyProtocolFrom != nil),
+			inherit("proxy_trust_source", prefixes(ppf), prefixes(ppf), l.ProxyTrustSource != nil),
 			treeItem{Key: "max_connections", Value: maxConns, From: map[bool]string{true: "", false: "default"}[l.MaxConnections > 0]},
 			inherit("handshake_timeout", hs, hs, hsSet),
 			inherit("idle_timeout", idle, idle, idleSet),
@@ -190,6 +191,36 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 	}
 
 	out := []treeNode{global, listeners}
+
+	if len(cfg.Services) > 0 {
+		svcs := treeNode{Title: "Local services", Note: fmt.Sprintf("%d", len(cfg.Services))}
+		blocks := sectionBlocks(lines, "[[local_services]]")
+		for i := range cfg.Services {
+			l := &cfg.Services[i]
+			set := at(blocks, l.Line)
+			n := treeNode{Title: l.Name, Note: l.Type + " · " + strings.Join(l.Addrs(), ", "), Tag: l.Type, Line: toEditor(l.Line)}
+			n.Items = []treeItem{
+				item(set, "bind", l.Bind),
+				item(set, "port", strconv.Itoa(l.Port)),
+				item(set, "proxy_version", l.ProxyVersion),
+				item(set, "proxy_trust_source", prefixes(l.ProxyTrustSource)),
+			}
+			if l.Type == serviceHTTP {
+				n.Items = append(n.Items, item(set, "doc_root", l.DocRoot))
+			} else {
+				n.Items = append(n.Items, item(set, "forwarded_proto", l.ForwardedProto))
+			}
+			for _, r := range l.PassRules {
+				pr := treeNode{Title: r.Prefix, Line: toEditor(r.Line), Note: "proxy_pass_rules"}
+				pr.Items = []treeItem{{Key: "target", Value: net.JoinHostPort(r.TargetHost, strconv.Itoa(r.TargetPort))},
+					{Key: "strip_prefix", Value: strconv.FormatBool(r.StripPrefix)},
+					{Key: "host sent", Value: map[bool]string{true: "the client's", false: r.ForceHost}[r.ForceHost == ""]}}
+				n.Children = append(n.Children, pr)
+			}
+			svcs.Children = append(svcs.Children, n)
+		}
+		out = append(out, svcs)
+	}
 
 	if auto := cfg.AutoDomains(); len(auto) > 0 || cfg.AcmeAgreeTOS {
 		certs := treeNode{Title: "Automatic certificates", Note: fmt.Sprintf("%d name(s)", len(auto))}

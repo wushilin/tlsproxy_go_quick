@@ -135,7 +135,7 @@ func TestProxyProtocolOutboundHeaders(t *testing.T) {
 
 func TestProxyProtocolHeadersAreNotForwarded(t *testing.T) {
 	port := echoBackend(t, "up:")
-	p := startProxy(t, "proxy_protocol_from = 127.0.0.1", allowAll(port)) // the test client plays the load balancer
+	p := startProxy(t, "proxy_trust_source = 127.0.0.1", allowAll(port)) // the test client plays the load balancer
 	v4 := []byte{203, 0, 113, 9, 127, 0, 0, 1, 0x9c, 0x40, 0x01, 0xbb}
 	for i := range 3 {
 		payload := clientHello("proxy.example") // a fresh one per connection, as a real client's
@@ -204,7 +204,7 @@ func TestProxyProtocolOnPassThroughRules(t *testing.T) {
 	}
 }
 
-// Only peers listed in proxy_protocol_from may state another source address.
+// Only peers listed in proxy_trust_source may state another source address.
 func TestProxyProtocolIsOnlyAcceptedFromTrustedPeers(t *testing.T) {
 	hello := clientHello("trust.example")
 	forged := append([]byte("PROXY TCP4 203.0.113.9 198.51.100.7 40000 443\r\n"), hello...)
@@ -242,7 +242,7 @@ func TestProxyProtocolIsOnlyAcceptedFromTrustedPeers(t *testing.T) {
 	// Listed (a network): the stated source AND destination are what the
 	// backend is told, not this hop's addresses.
 	port, seen = headerBackend(t, len(hello))
-	p = startProxy(t, "proxy_protocol_from = 10.9.9.9; 127.0.0.0/8", rule(port))
+	p = startProxy(t, "proxy_trust_source = 10.9.9.9; 127.0.0.0/8", rule(port))
 	c = dial(t, p)
 	c.Write(forged)
 	if got := <-seen; got.src != "203.0.113.9:40000" || got.dst != "198.51.100.7:443" || !bytes.Equal(got.payload, hello) {
@@ -252,17 +252,17 @@ func TestProxyProtocolIsOnlyAcceptedFromTrustedPeers(t *testing.T) {
 }
 
 func TestProxyProtocolConfig(t *testing.T) {
-	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nproxy_protocol_from = 192.0.2.10, 10.0.0.0/8; 2001:db8::/32\n"+
+	c := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nproxy_trust_source = 192.0.2.10, 10.0.0.0/8; 2001:db8::/32\n"+
 		"[[host]]\nlistener=default\npattern=a.example\ntarget_host=a.lan\ntarget_port=443\nproxy=yes\n[[host]]\nlistener=default\npattern=b.example\ntarget_host=b.lan\ntarget_port=443\n")
 	if !c.Rules[0].Proxy || c.Rules[0].ProxyVersion != 2 || c.Rules[1].Proxy {
 		t.Fatalf("%+v", c.Rules)
 	}
 	for addr, want := range map[string]bool{"192.0.2.10": true, "192.0.2.11": false, "10.200.1.1": true, "2001:db8:5::1": true, "2001:db9::1": false, "::ffff:10.1.1.1": true} {
-		if got := c.trustsProxyProtocolFrom(&net.TCPAddr{IP: net.ParseIP(addr)}); got != want {
+		if got := c.trustsProxySource(&net.TCPAddr{IP: net.ParseIP(addr)}); got != want {
 			t.Errorf("%s: trusted=%v", addr, got)
 		}
 	}
-	if mustParse(t, "[[listener]]\nname=default\nport=1\n").trustsProxyProtocolFrom(&net.TCPAddr{IP: net.ParseIP("127.0.0.1")}) {
+	if mustParse(t, "[[listener]]\nname=default\nport=1\n").trustsProxySource(&net.TCPAddr{IP: net.ParseIP("127.0.0.1")}) {
 		t.Fatal("nobody is trusted by default")
 	}
 	for name, text := range map[string]string{
@@ -275,7 +275,7 @@ func TestProxyProtocolConfig(t *testing.T) {
 			t.Errorf("%s: should be rejected", name)
 		}
 	}
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[global]\nproxy_protocol_from = lb.example.com\n"); err == nil {
+	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[global]\nproxy_trust_source = lb.example.com\n"); err == nil {
 		t.Error("a host name is not a trusted source")
 	}
 }

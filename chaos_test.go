@@ -473,7 +473,7 @@ func TestChaosCombinations(t *testing.T) {
 			fmt.Fprintf(&rules, "[[host]]\nlistener = first\npattern = *.refuse.chaos.test\ncert = %s\ncert_domains = ok.refuse.chaos.test\nupstream_tls = false\ntarget_host = 127.0.0.1\ntarget_port = %d\n", chaosLocalCA, down)
 			fmt.Fprintf(&rules, "[[host]]\nlistener = first\npattern = down.chaos.test\ntarget_host = 127.0.0.1\ntarget_port = %d\n", down)
 			fmt.Fprintf(&rules, "[[host]]\nlistener = first\npattern = verify.chaos.test\ncert = %s\ntarget_host = 127.0.0.1\ntarget_port = %d\n", chaosLocalCA, verifyFails)
-			text := fmt.Sprintf("[global]\nstats_interval = 0\nmax_handshakes_per_ip = 0\nsplice = %v\nproxy_protocol_from = 127.0.0.1\n"+
+			text := fmt.Sprintf("[global]\nstats_interval = 0\nmax_handshakes_per_ip = 0\nsplice = %v\nproxy_trust_source = 127.0.0.1\n"+
 				"[[listener]]\nname = first\nport = 1\n[[listener]]\nname = second\nbind = 127.0.0.1\nport = %d\n%s", splice, second, rules.String())
 			p := startProxyText(t, text, "")
 			secondAddr := fmt.Sprintf("127.0.0.1:%d", second)
@@ -634,7 +634,7 @@ func TestChaosAutoCertificates(t *testing.T) {
 	for _, c := range cases {
 		rules.WriteString(c.rule())
 	}
-	text := fmt.Sprintf("[global]\nstats_interval = 0\nmax_handshakes_per_ip = 0\nproxy_protocol_from = 127.0.0.1\n%s\n"+
+	text := fmt.Sprintf("[global]\nstats_interval = 0\nmax_handshakes_per_ip = 0\nproxy_trust_source = 127.0.0.1\n%s\n"+
 		"[[listener]]\nname = first\nport = 1\n[[listener]]\nname = second\nbind = 127.0.0.1\nport = %d\n%s",
 		pb.global(t.TempDir()), freePort(t), rules.String())
 	p := startProxyText(t, text, "")

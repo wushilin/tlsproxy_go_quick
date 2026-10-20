@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.5.0 (unreleased)
+
+Breaking:
+- `proxy_protocol_from` is renamed `proxy_trust_source`, in `[global]` and
+  `[[listener]]` (and the new `[[local_services]]`). The old name is a load
+  error that shows the line to write.
+
+New:
+- `[[local_services]]`: HTTP services the proxy runs itself, each on its own
+  port (`bind` default 127.0.0.1): `type = http_server` serves `doc_root`
+  (no listings, no hidden files except `/.well-known/`, no symlinks out of
+  it; files go out with sendfile(2) where the OS has it); `type = reverse_proxy` passes requests on by `[[proxy_pass_rules]]`
+  (`server`, `prefix` (longest wins, none = 404), `target_host`,
+  `target_port`, `strip_prefix`, `force_host`). `proxy_version = auto |
+  none | v1 | v2` reads the client's address from a PROXY header sent by a
+  peer in `proxy_trust_source` (default 127.0.0.0/8 and ::1). Upstream gets
+  `X-Forwarded-For` / `X-Real-IP`, `X-Forwarded-Proto` (`forwarded_proto`,
+  default https) and `X-Forwarded-Host`; the client's own are replaced.
+  They follow hot reload, and the console lists them (read only).
+- `cert = local-ca` serves clients without SNI (`pattern = NONE`, or `ANY`):
+  a certificate for the IP address they connected to, or with IP addresses
+  in `cert_domains`, one certificate for all of them (a `NONE` rule may add
+  host names). An IP address sent as SNI is routed as no SNI and refused
+  unless `cert_domains` lists it (it used to be a bad ClientHello).
+  `cert = auto` on `NONE` stays an error, now pointing at `local-ca`.
+- Error messages no longer mention the removed `cert = <directory>`.
+
 ## v1.4.1
 
 Breaking:

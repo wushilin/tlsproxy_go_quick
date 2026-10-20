@@ -18,7 +18,7 @@ var (
 	hostKeys = []string{"listener", "pattern", "action", "target_host", "target_port",
 		"max_aggregated_speed", "max_single_connection_speed", "proxy", "proxy_version",
 		"cert", "cert_domains", "cert_validate_script", "cert_validate_args", "upstream_tls", "upstream_tls_verify", "upstream_sni"}
-	listenerKeys = []string{"name", "bind", "port", "proxy_protocol_from", "max_connections",
+	listenerKeys = []string{"name", "bind", "port", "proxy_trust_source", "max_connections",
 		"handshake_timeout", "idle_timeout", "half_close_timeout", "max_aggregated_speed", "max_single_connection_speed"}
 )
 

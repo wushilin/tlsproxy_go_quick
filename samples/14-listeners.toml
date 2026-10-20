@@ -20,7 +20,7 @@ name = lab
 bind = 10.11.12.212
 port = 9092
 # Optional overrides of [global] for this listener:
-proxy_protocol_from = 10.11.12.1   # who may send a PROXY header to this port
+proxy_trust_source = 10.11.12.1   # who may send a PROXY header to this port
 max_connections = 200              # on top of [global] max_connections
 handshake_timeout = 5              # seconds
 idle_timeout = 3600                # seconds

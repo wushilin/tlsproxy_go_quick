@@ -109,7 +109,7 @@ func (c *Console) caList(w http.ResponseWriter, r *http.Request) {
 		v.Fingerprint = strings.ToUpper(hex.EncodeToString(sum[:]))
 		entries, _ := os.ReadDir(dir)
 		for _, e := range entries {
-			if e.IsDir() && validDomain(e.Name()) {
+			if _, ok := localCAName(e.Name()); e.IsDir() && ok {
 				v.Issued++
 			}
 		}

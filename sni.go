@@ -27,7 +27,12 @@ var errNeedMore = errors.New("need more data")
 
 // helloInfo is what the proxy needs from a ClientHello.
 type helloInfo struct {
-	SNI    string   // lowercased; "" if absent
+	SNI string // lowercased; "" if absent
+	// SNIIP is an IP address the client sent as its server name, which RFC
+	// 6066 does not allow. SNI stays "" then: the connection routes as one
+	// without SNI, so target_host = ${host} can never be pointed at an
+	// address by the client. Only a local CA looks at it (see cert_domains).
+	SNIIP  netip.Addr
 	ALPN   []string // offered application protocols, e.g. "h2", "acme-tls/1"
 	Digest uint64   // hash of the ClientHello message (see remember_nonce)
 }
@@ -187,16 +192,16 @@ func parseExtensions(body []byte) (helloInfo, error) {
 				if len(name) == 0 || len(name) > 253 {
 					return info, fmt.Errorf("invalid SNI host name %q", name)
 				}
+				// RFC 6066: literal IP addresses are not permitted, yet some
+				// clients send one. It is kept aside, never as the SNI.
+				if ip, err := netip.ParseAddr(string(name)); err == nil && ip.Zone() == "" {
+					info.SNIIP = ip.Unmap()
+					break
+				}
 				for _, b := range name {
 					if !isHostChar(b) {
 						return info, fmt.Errorf("invalid SNI host name %q", name)
 					}
-				}
-				// RFC 6066: literal IP addresses are not permitted. Refusing them
-				// also keeps target_host = ${host} rules from being pointed at
-				// arbitrary addresses by the client.
-				if _, err := netip.ParseAddr(string(name)); err == nil {
-					return info, fmt.Errorf("invalid SNI host name %q: an IP address is not a host name", name)
 				}
 				info.SNI = strings.ToLower(string(name))
 				break

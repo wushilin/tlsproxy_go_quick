@@ -15,6 +15,10 @@ package main
 //	                                   renewed before it expires (checked every 6
 //	                                   hours; a handshake that finds it due renews
 //	                                   it too)
+//	<ca_root>/ca001/ip_<addresses>/    the same, for a client without a host name:
+//	                                   ip_10.0.0.5, ip_fd00--1 (":" can't be in a
+//	                                   file name on Windows), or several addresses
+//	                                   and names in one certificate joined by "+"
 //	<ca_root>/ca001/_archive/<name>-<UTC time>
 //	                                   certificates found on disk that this CA did
 //	                                   not issue (or that are broken): moved aside,
@@ -24,7 +28,7 @@ package main
 // pasted in); a rule naming one that doesn't exist is a config error. A self-signed CA's
 // certificate is renewed before it expires, with the same key and subject, so
 // what it issued stays valid. A host name has no "_", so neither the CA files
-// nor _archive can clash with a certificate's folder.
+// nor _archive nor ip_ can clash with a host name's folder.
 //
 // A handshake finds its certificate in a lock-free table: no lock, no file
 // search. Issuing one is local and takes well under a millisecond, so the
@@ -43,9 +47,12 @@ import (
 	"fmt"
 	"hash/maphash"
 	"math/big"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -462,7 +469,7 @@ func withChain(c *tls.Certificate, ca *caState) *tls.Certificate {
 // name and it is not due for renewal. Anything else in the folder is moved to
 // the archive, so it is never used.
 func (l *localCA) fromDisk(name string, ca *caState) *tls.Certificate {
-	dir := filepath.Join(l.dir, name)
+	dir := filepath.Join(l.dir, localCAFolder(name))
 	if _, err := os.Stat(dir); err != nil {
 		return nil // nothing there: issue one
 	}
@@ -473,8 +480,8 @@ func (l *localCA) fromDisk(name string, ca *caState) *tls.Certificate {
 		why = err.Error()
 	case c.Leaf.CheckSignatureFrom(ca.cert) != nil:
 		why = "not issued by this CA"
-	case len(c.Leaf.DNSNames) != 1 || c.Leaf.DNSNames[0] != name:
-		why = fmt.Sprintf("it is for %v, not %s", c.Leaf.DNSNames, name)
+	case leafKey(c.Leaf) != name:
+		why = fmt.Sprintf("it is for %s, not %s", leafKey(c.Leaf), name)
 	case !time.Now().Before(l.leafRenewDue(c.Leaf)):
 		return nil // ours, but due: issue a new one (it overwrites this)
 	default:
@@ -486,7 +493,7 @@ func (l *localCA) fromDisk(name string, ca *caState) *tls.Certificate {
 
 // archive moves name's folder aside, with the time in its name.
 func (l *localCA) archive(name, why string) {
-	if to, err := moveToArchive(l.dir, name); err == nil {
+	if to, err := moveToArchive(l.dir, localCAFolder(name)); err == nil {
 		errorf("cert: CA %s: %s: the certificate on disk is not used (%s); moved to %s, deleted after 14 days; a new one is issued", l.id, name, why, to)
 		return
 	}
@@ -520,7 +527,7 @@ func (l *localCA) remove(name string) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	to, err := moveToArchive(l.dir, name)
+	to, err := moveToArchive(l.dir, localCAFolder(name))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -539,8 +546,8 @@ func (l *localCA) renewAll(issues func(name string) bool) {
 		return
 	}
 	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() || !validDomain(name) || !issues(name) {
+		name, ok := localCAName(e.Name())
+		if !e.IsDir() || !ok || !issues(name) {
 			continue
 		}
 		if _, err := l.certificate(name); err != nil {
@@ -608,10 +615,12 @@ func (l *localCA) issue(name string, ca *caState) (*tls.Certificate, error) {
 	for _, u := range conf.ExtKeyUsage {
 		ext = append(ext, extKeyUsages[u])
 	}
+	ips, hosts := sanSplit(name)
 	tmpl := &x509.Certificate{
 		SerialNumber:       randomSerial(),
 		Subject:            subject,
-		DNSNames:           []string{name},
+		DNSNames:           hosts,
+		IPAddresses:        ips,
 		SignatureAlgorithm: signatureAlgorithm(ca.key, conf.HashAlgorithm),
 		NotBefore:          now.Add(-time.Hour),
 		NotAfter:           now.Add(time.Duration(conf.ValidityDays) * 24 * time.Hour),
@@ -631,7 +640,7 @@ func (l *localCA) issue(name string, ca *caState) (*tls.Certificate, error) {
 }
 
 func (l *localCA) save(name string, c *tls.Certificate) error {
-	dir := filepath.Join(l.dir, name)
+	dir := filepath.Join(l.dir, localCAFolder(name))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -649,17 +658,115 @@ func (l *localCA) save(name string, c *tls.Certificate) error {
 	return writeFileAtomic0600(filepath.Join(dir, "cert.pem"), chain)
 }
 
+// issuedLeaf is a certificate a local CA holds, by the name it is kept under.
+type issuedLeaf struct {
+	name string
+	cert *tls.Certificate
+}
+
 // leaves lists the certificates issued (or loaded) in this process.
-func (l *localCA) leaves() []*tls.Certificate {
-	var out []*tls.Certificate
+func (l *localCA) leaves() []issuedLeaf {
+	var out []issuedLeaf
 	for i := range l.slot {
 		if e := l.slot[i].Load(); e != nil {
 			if c := e.current(); c != nil {
-				out = append(out, c)
+				out = append(out, issuedLeaf{e.name, c})
 			}
 		}
 	}
 	return out
+}
+
+// isHostName is a valid host name that is not an IP address: 10.0.0.5 has
+// only letters, digits and dots, but a certificate carries it as an address.
+func isHostName(d string) bool {
+	_, err := netip.ParseAddr(d)
+	return err != nil && validDomain(d)
+}
+
+// sanKey is the name a certificate for these IP addresses and host names
+// is kept under: one host name alone is itself; otherwise the addresses,
+// then the names, each sorted, joined by ",": "10.0.0.5", "10.0.0.5,fd00::1",
+// "10.0.0.5,box.lan".
+func sanKey(ips []netip.Addr, hosts []string) string {
+	if len(ips) == 0 && len(hosts) == 1 {
+		return hosts[0]
+	}
+	ips, hosts = slices.Clone(ips), slices.Clone(hosts)
+	for i, ip := range ips {
+		ips[i] = ip.Unmap()
+	}
+	slices.SortFunc(ips, netip.Addr.Compare)
+	slices.Sort(hosts)
+	var parts []string
+	for _, ip := range slices.Compact(ips) {
+		parts = append(parts, ip.String())
+	}
+	return strings.Join(append(parts, slices.Compact(hosts)...), ",")
+}
+
+// sanSplit is the IP addresses and host names of a sanKey.
+func sanSplit(key string) (ips []net.IP, hosts []string) {
+	for _, part := range strings.Split(key, ",") {
+		if ip, err := netip.ParseAddr(part); err == nil {
+			ips = append(ips, net.IP(ip.AsSlice()))
+		} else {
+			hosts = append(hosts, part)
+		}
+	}
+	return ips, hosts
+}
+
+// leafKey is the sanKey of what a certificate covers.
+func leafKey(c *x509.Certificate) string {
+	var ips []netip.Addr
+	for _, ip := range c.IPAddresses {
+		if a, ok := netip.AddrFromSlice(ip); ok {
+			ips = append(ips, a.Unmap())
+		}
+	}
+	return sanKey(ips, c.DNSNames)
+}
+
+// localCAFolder is the folder a certificate's name is kept in: a host name
+// is itself, anything with an address is ip_ and the name with "," as "+"
+// and ":" as "-" (fd00::1 is ip_fd00--1).
+func localCAFolder(key string) string {
+	if isHostName(key) {
+		return key
+	}
+	return "ip_" + strings.NewReplacer(",", "+", ":", "-").Replace(key)
+}
+
+// localCAName reads a folder name back (see localCAFolder): false for a
+// folder that is not a certificate's (_archive, or anything else).
+func localCAName(folder string) (string, bool) {
+	if isHostName(folder) {
+		return folder, true
+	}
+	rest, ok := strings.CutPrefix(folder, "ip_")
+	if !ok || rest == "" {
+		return "", false
+	}
+	var ips []netip.Addr
+	var hosts []string
+	for _, part := range strings.Split(rest, "+") {
+		if !strings.Contains(part, ".") { // an IPv6 address: its canonical form has no dot
+			part = strings.ReplaceAll(part, "-", ":")
+		}
+		if ip, err := netip.ParseAddr(part); err == nil && ip.Zone() == "" {
+			ips = append(ips, ip.Unmap())
+		} else if isHostName(part) {
+			hosts = append(hosts, part)
+		} else {
+			return "", false
+		}
+	}
+	key := sanKey(ips, hosts)
+	if len(ips) == 0 || localCAFolder(key) != folder {
+		return "", false // not the way this proxy names one
+	}
+	return key, true
 }
 
 // parseSigner reads a private key in PEM: PKCS#8, EC or PKCS#1 (RSA).

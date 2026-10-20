@@ -595,15 +595,33 @@ func TestFormats(t *testing.T) {
 	}
 }
 
+// parserSource is the code that reads config.toml's keys.
+func parserSource() ([]byte, error) {
+	var out []byte
+	for _, f := range []string{"config.go", "services_config.go"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b...)
+	}
+	return out, nil
+}
+
+// parserNotOptions are the strings in the parser's case clauses that are
+// sections, values or retired keys, not options.
+var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, "local_services": true, "proxy_pass_rules": true, // sections
+	"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true, "auto": true, "none": true, "v1": true, "v2": true, // values
+	"proxy_protocol_from": true} // renamed: a load error that names proxy_trust_source
+
 // Every option the parser accepts must appear in the complete-reference sample,
 // in the commented config.toml and in the README, so documentation can't drift.
 func TestEveryOptionIsDocumented(t *testing.T) {
-	src, err := os.ReadFile("config.go")
+	src, err := parserSource()
 	if err != nil {
 		t.Fatal(err)
 	}
-	notOptions := map[string]bool{"global": true, "logging": true, "console": true, "host": true, // sections
-		"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true} // values
+	notOptions := parserNotOptions
 	keys := map[string]bool{}
 	for _, m := range regexp.MustCompile(`case ("[a-z_0-9]+"(?:, "[a-z_0-9]+")*):`).FindAllStringSubmatch(string(src), -1) {
 		for _, k := range strings.Split(m[1], ", ") {
@@ -828,9 +846,8 @@ func TestConfigReference(t *testing.T) {
 		}
 	}
 	// And the other way: every key the parser accepts is documented somewhere.
-	src, _ := os.ReadFile("config.go")
-	notOptions := map[string]bool{"global": true, "logging": true, "console": true, "host": true,
-		"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true}
+	src, _ := parserSource()
+	notOptions := parserNotOptions
 	for _, m := range regexp.MustCompile(`case ("[a-z_0-9]+"(?:, "[a-z_0-9]+")*):`).FindAllStringSubmatch(string(src), -1) {
 		for _, k := range strings.Split(m[1], ", ") {
 			k = strings.Trim(k, `"`)

@@ -107,6 +107,10 @@ type Server struct {
 	stoppedListeners map[string]bool // stopped from the console, in memory only
 	serving          bool            // start-up is over: log each listener that opens
 
+	// The [[local_services]] ports, by name (see services.go).
+	servicesMu sync.Mutex
+	services   map[string]*liveService
+
 	dialer *targetDialer // resolves targets (cached) and connects
 
 	// Connections per source address that have not sent their ClientHello yet.
@@ -199,7 +203,7 @@ func (s *Server) sessionTicketKeys() [][32]byte {
 	}
 }
 
-// NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
+// NewServer fails if a CA a rule names cannot be opened.
 func NewServer(cfg *Config) (*Server, error) {
 	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache()}
 	if err := s.certs.Apply(cfg); err != nil {
@@ -317,6 +321,7 @@ func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error 
 	}
 	s.serving = true
 	s.listenersMu.Unlock()
+	s.syncServices(rt.cfg) // a service that cannot open is logged; the proxy carries on
 	notOpen := ""
 	if closed != nil {
 		notOpen = " (not open: " + strings.Join(closed, ", ") + ")"
@@ -498,6 +503,7 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 	s.stats.prepare(cfg) // before it goes live: connections only read these counters
 	s.runtime.Store(rt)
 	problems := s.syncListeners(cfg) // after the store: a new listener's connections need its config
+	problems = append(problems, s.syncServices(cfg)...)
 	extra := ""
 	if rt.pool != old.pool {
 		extra = ", buffer pool replaced (old buffers freed)"
@@ -510,6 +516,16 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 func isTimeout(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// addrOf is a TCP address's IP, the zero Addr for anything else.
+func addrOf(a net.Addr) netip.Addr {
+	if tcp, ok := a.(*net.TCPAddr); ok {
+		if ip, ok := netip.AddrFromSlice(tcp.IP); ok {
+			return ip.Unmap()
+		}
+	}
+	return netip.Addr{}
 }
 
 // readHello reads until the ClientHello is complete. It returns the SNI/ALPN
@@ -618,14 +634,14 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	}()
 
 	// A PROXY protocol header is only looked for when the peer is listed in
-	// proxy_protocol_from: whoever may send one chooses the address that is
+	// proxy_trust_source: whoever may send one chooses the address that is
 	// logged, counted by max_handshakes_per_ip and passed on to the target, so
 	// it must not be any client that happens to connect. For everybody else
 	// the stream is TLS from its first byte (a header would simply be a bad
 	// ClientHello). Header detection shares the ClientHello deadline.
 	sock.SetReadDeadline(start.Add(cfg.HandshakeTimeout))
 	client, err := &proxyConn{Conn: sock}, error(nil)
-	if cfg.trustsProxyProtocolFrom(sock.RemoteAddr()) {
+	if cfg.trustsProxySource(sock.RemoteAddr()) {
 		client, err = detectProxyProtocol(sock)
 	}
 	if err != nil {
@@ -680,6 +696,9 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	sniDisp := sni
 	if sni == "" {
 		sniDisp = "<none>"
+		if info.SNIIP.IsValid() {
+			sniDisp = "<ip " + info.SNIIP.String() + ">" // routed as no SNI
+		}
 	}
 	if cfg.RememberNonce && s.nonces.seen(info.Digest, time.Now()) {
 		rt.pool.Put(helloBuf)
@@ -781,14 +800,16 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 
 	// A local CA only issues for the names its rule allows: refuse the others
 	// before connecting anywhere.
-	if caID := d.Rule.LocalCA(); caID != "" && !d.Rule.LocalCAIssues(sni) {
-		rt.pool.Put(helloBuf)
-		s.stats.Failed.Add(1)
-		reason := fmt.Sprintf("CA %s does not issue for %s: it matches none of cert_domains (%s)", caID, sniDisp, strings.Join(d.Rule.CertDomains, ", "))
-		c.setEnd(flowFailed, reason)
-		logf("[#%d] closed src=%s sni=%s: %s", id, src, sniDisp, reason)
-		client.Write(alertAccessDenied)
-		return
+	if caID := d.Rule.LocalCA(); caID != "" {
+		if _, err := d.Rule.LocalCAName(sni, info.SNIIP, addrOf(client.LocalAddr())); err != nil {
+			rt.pool.Put(helloBuf)
+			s.stats.Failed.Add(1)
+			reason := fmt.Sprintf("CA %s: %v", caID, err)
+			c.setEnd(flowFailed, reason)
+			logf("[#%d] closed src=%s sni=%s: %s", id, src, sniDisp, reason)
+			client.Write(alertAccessDenied)
+			return
+		}
 	}
 
 	t0 := time.Now()
@@ -1058,7 +1079,7 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 	var served *tls.Certificate
 	clientConfig := &tls.Config{
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			c, err := s.certs.CertificateFor(rule, info.SNI)
+			c, err := s.certs.CertificateForClient(rule, info, addrOf(client.LocalAddr()))
 			served = c
 			return c, err
 		},

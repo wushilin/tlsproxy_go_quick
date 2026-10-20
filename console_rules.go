@@ -84,30 +84,30 @@ type ruleView struct {
 }
 
 type listenerView struct {
-	Name              string            `json:"name"`
-	Line              int               `json:"line"`
-	Removed           bool              `json:"removed,omitempty"`  // gone from the file; its connections remain
-	Redirect          bool              `json:"redirect,omitempty"` // the http_to_https_redirect listener: Start/Stop only
-	Bind              string            `json:"bind"`
-	Port              int               `json:"port"`
-	Addrs             []string          `json:"addrs"` // actually open
-	Running           bool              `json:"running"`
-	Stopped           bool              `json:"stopped"`
-	Error             string            `json:"error,omitempty"`
-	Values            map[string]string `json:"values"`
-	ProxyProtocolFrom string            `json:"proxyProtocolFrom"`
-	MaxConnections    int               `json:"maxConnections"`
-	HandshakeTimeout  *int              `json:"handshakeTimeout"` // seconds; null = [global]
-	IdleTimeout       *int              `json:"idleTimeout"`
-	HalfCloseTimeout  *int              `json:"halfCloseTimeout"`
-	AggSpeed          float64           `json:"aggSpeed"`
-	ConnSpeed         float64           `json:"connSpeed"`
-	Active            int64             `json:"active"`
-	Accepted          int64             `json:"accepted"`
-	Rejected          int64             `json:"rejected"`
-	BytesUp           int64             `json:"bytesUp"`
-	BytesDown         int64             `json:"bytesDown"`
-	Rules             []ruleView        `json:"rules"`
+	Name             string            `json:"name"`
+	Line             int               `json:"line"`
+	Removed          bool              `json:"removed,omitempty"`  // gone from the file; its connections remain
+	Redirect         bool              `json:"redirect,omitempty"` // the http_to_https_redirect listener: Start/Stop only
+	Bind             string            `json:"bind"`
+	Port             int               `json:"port"`
+	Addrs            []string          `json:"addrs"` // actually open
+	Running          bool              `json:"running"`
+	Stopped          bool              `json:"stopped"`
+	Error            string            `json:"error,omitempty"`
+	Values           map[string]string `json:"values"`
+	ProxyTrustSource string            `json:"proxyTrustSource"`
+	MaxConnections   int               `json:"maxConnections"`
+	HandshakeTimeout *int              `json:"handshakeTimeout"` // seconds; null = [global]
+	IdleTimeout      *int              `json:"idleTimeout"`
+	HalfCloseTimeout *int              `json:"halfCloseTimeout"`
+	AggSpeed         float64           `json:"aggSpeed"`
+	ConnSpeed        float64           `json:"connSpeed"`
+	Active           int64             `json:"active"`
+	Accepted         int64             `json:"accepted"`
+	Rejected         int64             `json:"rejected"`
+	BytesUp          int64             `json:"bytesUp"`
+	BytesDown        int64             `json:"bytesDown"`
+	Rules            []ruleView        `json:"rules"`
 }
 
 type statusView struct {
@@ -129,6 +129,21 @@ type consoleState struct {
 	Status    statusView     `json:"status"`
 	File      fileView       `json:"file"`
 	Listeners []listenerView `json:"listeners"`
+	Services  []serviceView  `json:"services"`
+}
+
+// serviceView is a [[local_services]] section as the console shows it
+// (read only), with its port's state.
+type serviceView struct {
+	Name         string   `json:"name"`
+	Line         int      `json:"line"`
+	Type         string   `json:"type"`
+	Addrs        []string `json:"addrs"`
+	Open         bool     `json:"open"`
+	Error        string   `json:"error,omitempty"`
+	ProxyVersion string   `json:"proxyVersion"`
+	DocRoot      string   `json:"docRoot,omitempty"`
+	PassRules    []string `json:"passRules,omitempty"` // "/prefix → host:port"
 }
 
 // parsedFile is the config file as last read, re-read only when it changes.
@@ -305,12 +320,12 @@ func (c *Console) state() consoleState {
 			Values: values(l.Line), MaxConnections: l.MaxConnections,
 			HandshakeTimeout: secondsOrNil(l.HandshakeTimeout), IdleTimeout: secondsOrNil(l.IdleTimeout), HalfCloseTimeout: secondsOrNil(l.HalfCloseTimeout),
 			AggSpeed: l.MaxAggregatedSpeed, ConnSpeed: l.MaxSingleConnectionSpeed}
-		if l.ProxyProtocolFrom != nil {
+		if l.ProxyTrustSource != nil {
 			var p []string
-			for _, x := range *l.ProxyProtocolFrom {
+			for _, x := range *l.ProxyTrustSource {
 				p = append(p, x.String())
 			}
-			lv.ProxyProtocolFrom = strings.Join(p, ", ")
+			lv.ProxyTrustSource = strings.Join(p, ", ")
 		}
 		addListener(lv)
 	}
@@ -360,7 +375,7 @@ func (c *Console) state() consoleState {
 	}
 	host, _ := os.Hostname()
 	return consoleState{
-		Host: host, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners,
+		Host: host, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, Services: c.serviceViews(shown),
 		Status: statusView{Active: st.Active.Load(), Accepted: st.Accepted.Load(),
 			Completed: st.Completed.Load(), Denied: st.Denied.Load(), Failed: st.Failed.Load(), Rejected: st.Rejected.Load(),
 			MaxConnections: rt.cfg.MaxConnections, BytesUp: st.BytesUp.Load(), BytesDown: st.BytesDown.Load()},
@@ -850,4 +865,29 @@ func (c *Console) commit(w http.ResponseWriter, r *http.Request, onDisk []byte, 
 	running := c.srv.runtime.Load().cfg
 	writeJSON(w, 200, map[string]any{"ok": true, "hash": now.Hash, "mtime": now.Mtime, "backup": filepath.Base(backup),
 		"warnings": cfg.Warnings, "problems": problems, "restartNeeded": consoleMoved(cfg.Console, running.Console)})
+}
+
+// serviceViews lists cfg's local services with their ports' state.
+func (c *Console) serviceViews(cfg *Config) []serviceView {
+	out := []serviceView{}
+	for i := range cfg.Services {
+		l := &cfg.Services[i]
+		v := serviceView{Name: l.Name, Line: l.Line, Type: l.Type, ProxyVersion: l.ProxyVersion, DocRoot: l.DocRoot}
+		v.Addrs, v.Open, v.Error = c.srv.serviceStatus(l.Name)
+		if v.Addrs == nil {
+			v.Addrs = l.Addrs()
+		}
+		for _, r := range l.PassRules {
+			pr := r.Prefix + " → " + net.JoinHostPort(r.TargetHost, strconv.Itoa(r.TargetPort))
+			if r.StripPrefix {
+				pr += " (prefix stripped)"
+			}
+			if r.ForceHost != "" {
+				pr += " Host: " + r.ForceHost
+			}
+			v.PassRules = append(v.PassRules, pr)
+		}
+		out = append(out, v)
+	}
+	return out
 }

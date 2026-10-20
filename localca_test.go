@@ -14,8 +14,10 @@ import (
 	"math/big"
 	mrand "math/rand"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -256,10 +258,106 @@ func TestLocalCAConfig(t *testing.T) {
 		"cert=local-ca:ca1":                           "three digits",
 		"cert=local-ca:ca001\ncert_validate_script=x": "only applies to cert = auto",
 		"cert=local-ca\ncert_domains=a.y.test":        "does not match",
-		"cert=local-ca\ncert_domains=**.x.test":       "not a host name or a glob",
-		"cert=local-ca\ncert_domains=ANY":             "not a host name or a glob",
+		"cert=local-ca\ncert_domains=**.x.test":       "not a host name, a glob",
+		"cert=local-ca\ncert_domains=ANY":             "not a host name, a glob",
+		"cert=local-ca\ncert_domains=10.0.0.5":        "only applies to pattern = NONE or ANY",
 	} {
 		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=*.x.test\n" + text + "\ntarget_host=h\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", text, err, want)
+		}
+	}
+}
+
+// Clients without a host name: a NONE or ANY rule issues for the address
+// they connected to, or for cert_domains' addresses (and a NONE rule's names)
+// in one certificate. An IP address sent as SNI must be listed.
+func TestLocalCAIPCertificates(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	makeCA(t, root, "ca001")
+	parse := func(rule string) (*Config, *CertManager) {
+		cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\n"+rule+"\ntarget_host=h\ntarget_port=443\n")
+		m := NewCertManager()
+		if err := m.Apply(cfg); err != nil {
+			t.Fatal(err)
+		}
+		return cfg, m
+	}
+	dialed := netip.MustParseAddr("192.0.2.10")
+	ipsOf := func(c *tls.Certificate) (out []string) {
+		for _, ip := range c.Leaf.IPAddresses {
+			out = append(out, ip.String())
+		}
+		return append(out, c.Leaf.DNSNames...)
+	}
+
+	// No cert_domains: the address the client connected to.
+	cfg, m := parse("pattern=NONE\ncert=local-ca")
+	c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, dialed)
+	if err != nil || !slices.Equal(ipsOf(c), []string{"192.0.2.10"}) || c.Leaf.Subject.CommonName != "192.0.2.10" {
+		t.Fatalf("dialed address: %v %v", c, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ca001", "ip_192.0.2.10", "cert.pem")); err != nil {
+		t.Fatal(err)
+	}
+	v6 := netip.MustParseAddr("fd00::1")
+	if c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, v6); err != nil || !slices.Equal(ipsOf(c), []string{"fd00::1"}) {
+		t.Fatalf("IPv6: %v %v", c, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ca001", "ip_fd00--1", "cert.pem")); err != nil {
+		t.Fatal("an IPv6 folder has no colon:", err)
+	}
+	if _, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{SNIIP: dialed}, dialed); err == nil || !strings.Contains(err.Error(), "does not list") {
+		t.Fatalf("an IP as SNI must be listed, even the dialed one: %v", err)
+	}
+
+	// Listed addresses and names: one certificate, whichever was dialed.
+	cfg, m = parse("pattern=NONE\ncert=local-ca\ncert_domains=203.0.113.5, 198.51.100.7; box.lan")
+	for _, d := range []string{"10.0.0.1", "203.0.113.5"} {
+		c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, netip.MustParseAddr(d))
+		if err != nil || !slices.Equal(ipsOf(c), []string{"198.51.100.7", "203.0.113.5", "box.lan"}) {
+			t.Fatalf("dialed %s: %v %v", d, ipsOf(c), err)
+		}
+	}
+	if _, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{SNIIP: netip.MustParseAddr("203.0.113.5")}, dialed); err != nil {
+		t.Fatalf("a listed IP as SNI: %v", err)
+	}
+	if _, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{SNIIP: netip.MustParseAddr("203.0.113.6")}, dialed); err == nil {
+		t.Fatal("an unlisted IP as SNI is refused")
+	}
+	if !localCAIssues(cfg, "ca001", "198.51.100.7,203.0.113.5,box.lan") || localCAIssues(cfg, "ca001", "198.51.100.7") {
+		t.Fatal("renewal keeps exactly the listed set")
+	}
+	key, ok := localCAName("ip_198.51.100.7+203.0.113.5+box.lan")
+	if !ok || key != "198.51.100.7,203.0.113.5,box.lan" {
+		t.Fatalf("folder name read back: %q %v", key, ok)
+	}
+	for _, bad := range []string{"ip_", "ip_box.lan", "ip_203.0.113.5+198.51.100.7", "_archive", "ip_zz"} {
+		if _, ok := localCAName(bad); ok {
+			t.Errorf("%s is not a certificate folder", bad)
+		}
+	}
+
+	// ANY: host names as before; no SNI gets the listed addresses only.
+	cfg, m = parse("pattern=ANY\ncert=local-ca\ncert_domains=*.x.test, 10.0.0.5")
+	if c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, dialed); err != nil || !slices.Equal(ipsOf(c), []string{"10.0.0.5"}) {
+		t.Fatalf("ANY without SNI: %v %v", c, err)
+	}
+	if _, err := m.CertificateFor(&cfg.Rules[0], "a.x.test"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = parse("pattern=ANY\ncert=local-ca\ncert_domains=10.0.0.5")
+	if cfg.Rules[0].LocalCAIssues("a.x.test") {
+		t.Fatal("cert_domains with addresses alone issues for no host name")
+	}
+
+	for text, want := range map[string]string{
+		"pattern=NONE\ncert=local-ca\ncert_domains=*.x.test":          "plain host names (no *)",
+		"pattern=NONE\ncert=local-ca\ncert_domains=fe80::1%eth0":      "has no zone",
+		"pattern=NONE\ncert=local-ca\ncert_domains=10.0.0.1,10.0.0.1": "twice",
+		"pattern=NONE\ncert=auto":                                     "use cert = local-ca",
+	} {
+		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[global]\nacme_agree_tos=true\n[[host]]\nlistener=default\n" + text + "\ntarget_host=h\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", text, err, want)
 		}
 	}

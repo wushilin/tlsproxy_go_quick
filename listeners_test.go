@@ -21,7 +21,7 @@ func TestListenerConfig(t *testing.T) {
 	// Two listeners: the same pattern on each is fine, each routes its own.
 	two := "[global]\nidle_timeout=100\n" +
 		"[[listener]]\nname=public\nport=443\n" +
-		"[[listener]]\nname=lab\nbind=10.0.0.1; ::1\nport=9092\nidle_timeout=5\nmax_connections=3\nproxy_protocol_from=10.0.0.0/8\nmax_aggregated_speed=1Gbit\n" +
+		"[[listener]]\nname=lab\nbind=10.0.0.1; ::1\nport=9092\nidle_timeout=5\nmax_connections=3\nproxy_trust_source=10.0.0.0/8\nmax_aggregated_speed=1Gbit\n" +
 		"[[host]]\nlistener=public\npattern=ANY\ntarget_host=pub\ntarget_port=443\n" +
 		"[[host]]\nlistener=lab\npattern=ANY\ntarget_host=lab\ntarget_port=443\n"
 	c = mustParse(t, two)
@@ -30,7 +30,7 @@ func TestListenerConfig(t *testing.T) {
 		t.Fatalf("%+v", lab)
 	}
 	eff := c.ForListener(lab)
-	if eff.IdleTimeout != 5*time.Second || c.ForListener(c.Listener("public")).IdleTimeout != 100*time.Second || len(eff.ProxyProtocolFrom) != 1 {
+	if eff.IdleTimeout != 5*time.Second || c.ForListener(c.Listener("public")).IdleTimeout != 100*time.Second || len(eff.ProxyTrustSource) != 1 {
 		t.Fatal("overrides")
 	}
 	if d := eff.Route("x.test"); d.Host != "lab" {

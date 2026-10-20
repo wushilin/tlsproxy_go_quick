@@ -14,6 +14,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -42,10 +43,10 @@ type Config struct {
 	HalfCloseTimeout   time.Duration // after one side closes, the other gets this long; 0 = unlimited
 	MaxConnections     int
 	MaxHandshakesPerIP int // connections per source still sending their ClientHello; 0 = unlimited
-	// ProxyProtocolFrom lists who may put a PROXY protocol header in front of a
+	// ProxyTrustSource lists who may put a PROXY protocol header in front of a
 	// connection (a load balancer ahead of this proxy). Empty: nobody, headers
 	// are never looked for.
-	ProxyProtocolFrom []netip.Prefix
+	ProxyTrustSource  []netip.Prefix
 	BufferSize        int
 	BufferPoolMaxIdle int
 	AllowCacheSize    int
@@ -69,9 +70,11 @@ type Config struct {
 	AcmeCAFile          string   // extra root CA for the ACME server's HTTPS (private CAs, Pebble)
 	Warnings            []string // non-fatal findings, logged at startup / reload
 
-	Console   *ConsoleConfig // the [console] section; nil = no web console
-	Rules     []Rule         // in file order
-	Listeners []Listener     // in file order; at least one
+	Console   *ConsoleConfig  // the [console] section; nil = no web console
+	Rules     []Rule          // in file order
+	Listeners []Listener      // in file order; at least one
+	Services  []LocalService  // [[local_services]], in file order
+	PassRules []ProxyPassRule // [[proxy_pass_rules]], in file order
 	// Redirect is the port 80 listener of http_to_https_redirect = true, nil
 	// when off. It has no rules and is not in Listeners: it answers every
 	// plain HTTP request with a redirect to https:// (see redirect.go).
@@ -92,7 +95,7 @@ type Listener struct {
 	Binds []string
 	Port  int
 
-	ProxyProtocolFrom                               *[]netip.Prefix
+	ProxyTrustSource                                *[]netip.Prefix
 	MaxConnections                                  int // on top of [global] max_connections
 	HandshakeTimeout, IdleTimeout, HalfCloseTimeout *time.Duration
 	MaxAggregatedSpeed, MaxSingleConnectionSpeed    float64 // bytes per second, each direction
@@ -120,8 +123,8 @@ func (c *Config) ForListener(l *Listener) *Config {
 	eff := *c
 	eff.listener = l
 	eff.Bind, eff.Binds, eff.Port = l.Bind, l.Binds, l.Port
-	if l.ProxyProtocolFrom != nil {
-		eff.ProxyProtocolFrom = *l.ProxyProtocolFrom
+	if l.ProxyTrustSource != nil {
+		eff.ProxyTrustSource = *l.ProxyTrustSource
 	}
 	for _, o := range []struct{ dst, v *time.Duration }{{&eff.HandshakeTimeout, l.HandshakeTimeout}, {&eff.IdleTimeout, l.IdleTimeout}, {&eff.HalfCloseTimeout, l.HalfCloseTimeout}} {
 		if o.v != nil {
@@ -204,11 +207,18 @@ type Rule struct {
 	TargetHost string
 	TargetPort int
 
-	// TLS termination: set when the rule has cert = auto | <dir>. Without it
-	// the rule passes TLS through untouched.
-	Cert        string           // "", "auto", or a directory holding cert.pem + key.pem (+ ca.pem)
-	CertDomains []string         // auto: names to issue for; local-ca: the glob patterns that may get one
-	certNames   []*regexp.Regexp // local-ca: CertDomains compiled, anchored
+	// TLS termination: set when the rule has cert = auto | local-ca[:caNNN].
+	// Without it the rule passes TLS through untouched.
+	Cert        string           // "", "auto" or "local-ca:caNNN"
+	CertDomains []string         // auto: names to issue for; local-ca: the names, globs and IPs that may get one
+	certNames   []*regexp.Regexp // local-ca: CertDomains' names and globs compiled, anchored
+	// local-ca, for clients without a host name (NONE, ANY): certIPs are the
+	// IP addresses in cert_domains, all in the one certificate those clients
+	// get (none listed: the address the client connected to). certHosts are a
+	// NONE rule's host names, added to that certificate.
+	certIPs   []netip.Addr
+	certHosts []string
+	certKey   string // certIPs and certHosts as the one certificate's name (sanKey), worked out at load
 	// CertValidateScript decides about names that match the pattern but are
 	// not in CertDomains: run as `<script> <name>` only when a certificate has
 	// to be issued or renewed; exit status 0 accepts the name.
@@ -523,16 +533,16 @@ func listenNetwork(addr string) string {
 	return "tcp"
 }
 
-// trustsProxyProtocolFrom reports whether a peer may assert another source
+// trustsProxySource reports whether a peer may assert another source
 // address with a PROXY protocol header.
-func (c *Config) trustsProxyProtocolFrom(peer net.Addr) bool {
+func (c *Config) trustsProxySource(peer net.Addr) bool {
 	tcp, ok := peer.(*net.TCPAddr)
-	if !ok || len(c.ProxyProtocolFrom) == 0 {
+	if !ok || len(c.ProxyTrustSource) == 0 {
 		return false
 	}
 	ip, _ := netip.AddrFromSlice(tcp.IP)
 	ip = ip.Unmap()
-	for _, prefix := range c.ProxyProtocolFrom {
+	for _, prefix := range c.ProxyTrustSource {
 		if prefix.Contains(ip) {
 			return true
 		}
@@ -616,6 +626,10 @@ func ParseConfig(text string) (*Config, error) {
 				raws = append(raws, rawRule{line: lineno})
 			case "listener":
 				cfg.Listeners = append(cfg.Listeners, Listener{Line: lineno, Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}})
+			case "local_services":
+				cfg.Services = append(cfg.Services, LocalService{Line: lineno, Bind: "127.0.0.1", Binds: []string{"127.0.0.1"}})
+			case "proxy_pass_rules":
+				cfg.PassRules = append(cfg.PassRules, ProxyPassRule{Line: lineno})
 			default:
 				return nil, fail("unknown section [[%s]]", section)
 			}
@@ -697,7 +711,9 @@ func ParseConfig(text string) (*Config, error) {
 			case "max_handshakes_per_ip":
 				err = count(&cfg.MaxHandshakesPerIP)
 			case "proxy_protocol_from":
-				if cfg.ProxyProtocolFrom, err = parsePrefixes(value); err != nil {
+				return nil, fail("%s", renamedProxyTrust(value))
+			case "proxy_trust_source":
+				if cfg.ProxyTrustSource, err = parsePrefixes(value); err != nil {
 					return nil, fail("%v", err)
 				}
 			case "allow_cache_size":
@@ -825,6 +841,14 @@ func ParseConfig(text string) (*Config, error) {
 			}
 		case "listener":
 			if err := listenerOption(&cfg.Listeners[len(cfg.Listeners)-1], key, value); err != nil {
+				return nil, fail("%v", err)
+			}
+		case "local_services":
+			if err := serviceOption(&cfg.Services[len(cfg.Services)-1], key, value); err != nil {
+				return nil, fail("%v", err)
+			}
+		case "proxy_pass_rules":
+			if err := passRuleOption(&cfg.PassRules[len(cfg.PassRules)-1], key, value); err != nil {
 				return nil, fail("%v", err)
 			}
 		case "host":
@@ -979,6 +1003,9 @@ func ParseConfig(text string) (*Config, error) {
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("[console] listens on %s over plain HTTP: the password crosses the network unencrypted. Prefer listen = 127.0.0.1 behind a terminating rule", c.Listen))
 		}
 	}
+	if err := cfg.resolveServices(); err != nil {
+		return nil, err
+	}
 	if auto := cfg.AutoDomains(); len(auto) > 0 {
 		on443 := false
 		for _, l := range cfg.Listeners {
@@ -1042,7 +1069,13 @@ func resolverAddress(v string) bool {
 	return err == nil
 }
 
-// parsePrefixes reads proxy_protocol_from: addresses or networks.
+// renamedProxyTrust is the load error for proxy_protocol_from, renamed in
+// v1.5.0 so that listeners and local services share one name.
+func renamedProxyTrust(value string) string {
+	return fmt.Sprintf("proxy_protocol_from is now called proxy_trust_source; write proxy_trust_source = %s", value)
+}
+
+// parsePrefixes reads proxy_trust_source: addresses or networks.
 func parsePrefixes(value string) ([]netip.Prefix, error) {
 	out := []netip.Prefix{}
 	for _, item := range splitList(value) {
@@ -1051,7 +1084,7 @@ func parsePrefixes(value string) ([]netip.Prefix, error) {
 			prefix, perr = netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()), nil
 		}
 		if perr != nil {
-			return nil, fmt.Errorf("proxy_protocol_from: %q is not an IP address or a network (10.0.0.0/8)", item)
+			return nil, fmt.Errorf("proxy_trust_source: %q is not an IP address or a network (10.0.0.0/8)", item)
 		}
 		out = append(out, prefix.Masked())
 	}
@@ -1087,9 +1120,11 @@ func listenerOption(l *Listener, key, value string) error {
 	case "port":
 		l.Port, err = parsePort(value)
 	case "proxy_protocol_from":
+		return errors.New(renamedProxyTrust(value))
+	case "proxy_trust_source":
 		var p []netip.Prefix
 		if p, err = parsePrefixes(value); err == nil {
-			l.ProxyProtocolFrom = &p
+			l.ProxyTrustSource = &p
 		}
 	case "max_connections":
 		var n uint64
@@ -1340,7 +1375,7 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 		return fmt.Errorf("cert = auto needs acme_agree_tos = true in [global] (you accept the CA's terms of service)")
 	}
 	if rule.NoSNI {
-		return fmt.Errorf("cert = auto needs a host name; a pattern = NONE rule can only use cert = <directory>")
+		return fmt.Errorf("cert = auto needs a host name, and a pattern = NONE client sends none: use cert = local-ca, which issues for IP addresses")
 	}
 	if r.certDomains != nil {
 		rule.CertDomains = splitList(strings.ToLower(*r.certDomains))
@@ -1507,43 +1542,72 @@ func localCARef(cert string) (id string, ok bool) {
 
 // localCASettings checks a cert = local-ca rule. cert_domains, if given,
 // limits which names get a certificate; otherwise any name the rule routes
-// does.
+// does. Its IP addresses (NONE and ANY rules only) are what a client without
+// a host name gets a certificate for; a NONE rule's host names join them.
 func localCASettings(rule *Rule, id string, r *rawRule) error {
 	if !caIDPattern.MatchString(id) {
 		return fmt.Errorf("cert = local-ca:%s: a CA is named ca001, ca002, ... (three digits)", id)
 	}
 	rule.Cert = "local-ca:" + id
-	if rule.NoSNI {
-		return fmt.Errorf("cert = local-ca needs a host name to issue for; a pattern = NONE rule can only use cert = <directory>")
-	}
 	if r.certScript != nil || r.certArgs != nil {
 		return fmt.Errorf("cert_validate_script only applies to cert = auto; with local-ca, cert_domains limits the names")
 	}
-	if r.certDomains != nil {
-		// Host names or globs, the way patterns are written: *.dev.abc.com
-		// (a * never crosses a dot), several separated by , or ;.
-		rule.CertDomains = splitList(strings.ToLower(*r.certDomains))
-		if len(rule.CertDomains) == 0 {
-			return fmt.Errorf("cert_domains is empty: leave it out to issue for every name the rule matches")
-		}
-		for _, d := range rule.CertDomains {
-			kind, expr, _, err := classify(d)
-			if err != nil || (kind != kindLiteral && kind != kindWildcard) {
-				return fmt.Errorf("cert_domains: %q is not a host name or a glob like *.dev.example.com", d)
+	if r.certDomains == nil {
+		return nil
+	}
+	// Host names or globs, the way patterns are written: *.dev.abc.com
+	// (a * never crosses a dot), and IP addresses, separated by , or ;.
+	rule.CertDomains = splitList(strings.ToLower(*r.certDomains))
+	if len(rule.CertDomains) == 0 {
+		return fmt.Errorf("cert_domains is empty: leave it out to issue for every name the rule matches")
+	}
+	noHost := rule.NoSNI || rule.Kind == kindCatchAll
+	for _, d := range rule.CertDomains {
+		if ip, err := netip.ParseAddr(strings.Trim(d, "[]")); err == nil {
+			switch {
+			case ip.Zone() != "":
+				return fmt.Errorf("cert_domains: %q: an IP address in a certificate has no zone", d)
+			case !noHost:
+				return fmt.Errorf("cert_domains: %s is an IP address: it only applies to pattern = NONE or ANY, which serve clients that send no host name", d)
+			case slices.Contains(rule.certIPs, ip.Unmap()):
+				return fmt.Errorf("cert_domains lists %s twice", d)
 			}
-			if kind == kindLiteral && !rule.Pattern.MatchString(d) {
-				return fmt.Errorf("cert_domains: %q does not match this rule's pattern %q", d, rule.Source)
-			}
-			rule.certNames = append(rule.certNames, regexp.MustCompile("^(?:"+expr+")$"))
+			rule.certIPs = append(rule.certIPs, ip.Unmap())
+			continue
 		}
+		if rule.NoSNI {
+			// The one certificate these clients get carries the names too.
+			if !isHostName(d) {
+				return fmt.Errorf("cert_domains: %q: a pattern = NONE rule takes IP addresses and plain host names (no *), all in the one certificate it serves", d)
+			}
+			if !slices.Contains(rule.certHosts, d) {
+				rule.certHosts = append(rule.certHosts, d)
+			}
+			continue
+		}
+		kind, expr, _, err := classify(d)
+		if err != nil || (kind != kindLiteral && kind != kindWildcard) {
+			return fmt.Errorf("cert_domains: %q is not a host name, a glob like *.dev.example.com or an IP address", d)
+		}
+		if kind == kindLiteral && !rule.Pattern.MatchString(d) {
+			return fmt.Errorf("cert_domains: %q does not match this rule's pattern %q", d, rule.Source)
+		}
+		rule.certNames = append(rule.certNames, regexp.MustCompile("^(?:"+expr+")$"))
+	}
+	if len(rule.certIPs) > 0 {
+		rule.certKey = sanKey(rule.certIPs, rule.certHosts)
+	}
+	if key := sanKey(rule.certIPs, rule.certHosts); len(localCAFolder(key)) > 200 {
+		return fmt.Errorf("cert_domains: too many names for one certificate (its folder name would be %d characters, at most 200)", len(localCAFolder(key)))
 	}
 	return nil
 }
 
-// LocalCAIssues reports whether a cert = local-ca rule issues for name: any
-// name the rule routes, or only those cert_domains matches when it is set.
+// LocalCAIssues reports whether a cert = local-ca rule issues for a host
+// name: any name the rule routes, or only those cert_domains matches when it
+// is set (a list of IP addresses alone issues for no host name).
 func (r *Rule) LocalCAIssues(name string) bool {
-	if len(r.certNames) == 0 {
+	if len(r.CertDomains) == 0 {
 		return true
 	}
 	for _, re := range r.certNames {
@@ -1552,6 +1616,34 @@ func (r *Rule) LocalCAIssues(name string) bool {
 		}
 	}
 	return false
+}
+
+// LocalCAName is the certificate a cert = local-ca rule serves a client:
+// the host name it sent, or for a client without one (NONE, ANY), the
+// rule's IP addresses (and a NONE rule's host names) in one certificate,
+// else the address the client connected to (dialed). An IP address the
+// client sent as its server name (sniIP) must be in cert_domains. The
+// error is why the client is refused.
+func (r *Rule) LocalCAName(sni string, sniIP, dialed netip.Addr) (string, error) {
+	if sni != "" {
+		if !isHostName(sni) {
+			return "", fmt.Errorf("%q is not a host name to issue for", sni)
+		}
+		if !r.LocalCAIssues(sni) {
+			return "", fmt.Errorf("it does not issue for %s: it matches none of cert_domains (%s)", sni, strings.Join(r.CertDomains, ", "))
+		}
+		return sni, nil
+	}
+	if sniIP.IsValid() && !slices.Contains(r.certIPs, sniIP) {
+		return "", fmt.Errorf("the client asked for %s (an IP address as its server name), which cert_domains does not list", sniIP)
+	}
+	if r.certKey != "" {
+		return r.certKey, nil
+	}
+	if !dialed.IsValid() {
+		return "", fmt.Errorf("the client sent no host name, and the address it connected to is unknown")
+	}
+	return sanKey([]netip.Addr{dialed.WithZone("").Unmap()}, r.certHosts), nil
 }
 
 // LocalCA is the CA id of a cert = local-ca rule, "" for any other rule.

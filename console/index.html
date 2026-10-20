@@ -83,6 +83,19 @@
       </div>
 
       <div id="listeners" class="listeners"></div>
+
+      <div class="panel" id="services-panel" hidden>
+        <div class="panel-head">
+          <h2>Local services</h2>
+          <span class="sub">[[local_services]] and their [[proxy_pass_rules]]; edit them in the Config file tab</span>
+        </div>
+        <div class="scroll">
+          <table class="grid">
+            <thead><tr><th>Name</th><th>Type</th><th>Listening on</th><th>PROXY</th><th>Serves</th></tr></thead>
+            <tbody id="services"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- ================= Flow log ================= -->
@@ -381,7 +394,7 @@
     <div class="step" data-step="1" hidden>
       <p class="field-help">Each one is optional: leave it empty to use the value from <code>[global]</code>.</p>
       <div class="fields">
-        <label class="field wide"><span>Accept PROXY headers from <em>proxy_protocol_from</em></span><input id="l-ppf" spellcheck="false" placeholder="global; e.g. 10.0.0.0/8, 192.168.1.5"></label>
+        <label class="field wide"><span>Accept PROXY headers from <em>proxy_trust_source</em></span><input id="l-ppf" spellcheck="false" placeholder="global; e.g. 10.0.0.0/8, 192.168.1.5"></label>
         <label class="field"><span>Max connections</span><input id="l-maxconn" inputmode="numeric" placeholder="global"></label>
         <label class="field"><span>Handshake timeout <em>seconds</em></span><input id="l-hs" inputmode="numeric" placeholder="global"></label>
         <label class="field"><span>Idle timeout <em>seconds</em></span><input id="l-idle" inputmode="numeric" placeholder="global"></label>

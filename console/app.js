@@ -150,6 +150,34 @@ function meter(key) {
   return m;
 }
 
+// ---------- local services (read only) ----------
+
+function drawServices(services) {
+  $("services-panel").hidden = services.length === 0;
+  const key = JSON.stringify(services);
+  if (ui.servicesKey === key) return; // unchanged: keep the DOM (and any selection) as it is
+  ui.servicesKey = key;
+  const body = $("services");
+  body.replaceChildren();
+  for (const v of services) {
+    const tr = el("tr");
+    const name = el("td", "mono", v.name);
+    if (v.line) name.title = `line ${v.line}`;
+    tr.append(name, el("td", "", v.type));
+    const where = el("td", "mono");
+    where.append(el("span", "", v.addrs.join(", ") + " "));
+    if (v.error) where.append(el("span", "chip bad", v.error));
+    else where.append(el("span", v.open ? "chip ok" : "chip warn", v.open ? "open" : "closed"));
+    tr.append(where, el("td", "mono", v.proxyVersion));
+    const serves = el("td", "mono");
+    if (v.type === "http_server") serves.textContent = v.docRoot;
+    else if (!v.passRules || v.passRules.length === 0) serves.append(el("span", "chip warn", "no proxy_pass_rules: every request gets 404"));
+    else for (const r of v.passRules) serves.append(el("div", "", r));
+    tr.append(serves);
+    body.append(tr);
+  }
+}
+
 // ---------- DOM helpers ----------
 
 function el(tag, cls, text) {
@@ -709,6 +737,7 @@ function applyState(s) {
   meter("st").add(s.now, s.status.bytesUp);
   meter("sr").add(s.now, s.status.bytesDown);
 
+  drawServices(s.services || []);
   const container = $("listeners");
   const seenL = new Set();
   const seenR = new Set();
@@ -1010,9 +1039,9 @@ function paintListener(lr, l, now, file) {
   lr.redirectChip.hidden = !l.redirect;
   setText(lr.redirectChip, "HTTP → HTTPS redirect");
   lr.redirectChip.title = "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in [global]; it has no rules and cannot be edited here.";
-  lr.ppf.hidden = !l.proxyProtocolFrom;
-  setText(lr.ppf, `PROXY from ${l.proxyProtocolFrom || ""}`);
-  lr.ppf.title = "Accepts a PROXY protocol header from these addresses (proxy_protocol_from)";
+  lr.ppf.hidden = !l.proxyTrustSource;
+  setText(lr.ppf, `PROXY from ${l.proxyTrustSource || ""}`);
+  lr.ppf.title = "Accepts a PROXY protocol header from these addresses (proxy_trust_source)";
   lr.maxConns.hidden = !l.maxConnections;
   setText(lr.maxConns, `≤ ${l.maxConnections} conns`);
   lr.maxConns.className = l.maxConnections && l.active >= l.maxConnections ? "chip bad" : "chip limit";
@@ -1789,7 +1818,7 @@ $("editor-form").addEventListener("submit", (ev) => {
 
 const led = { l: null, base: null, step: 0, seq: 0, timer: 0, result: null, pending: false, conflict: false, saving: false };
 const L_FIELDS = {
-  name: "l-name", bind: "l-bind", port: "l-port", proxy_protocol_from: "l-ppf", max_connections: "l-maxconn",
+  name: "l-name", bind: "l-bind", port: "l-port", proxy_trust_source: "l-ppf", max_connections: "l-maxconn",
   handshake_timeout: "l-hs", idle_timeout: "l-idle", half_close_timeout: "l-half",
   max_aggregated_speed: "l-agg", max_single_connection_speed: "l-conn",
 };

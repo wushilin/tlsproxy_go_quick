@@ -233,7 +233,8 @@ action = deny
   send no SNI, for example to send them to a default target; its `target_host`
   must be a literal. Without such a rule only `ANY` takes them; a wildcard
   never matches a missing SNI. Hosts literally named `none` or `any` are
-  matched with `^none$` / `^any$`.
+  matched with `^none$` / `^any$`. A client that sends an IP address as SNI
+  (RFC 6066 forbids it) is treated as one without SNI.
 - Values need no quotes: everything after the `=` up to the end of the line (or
   a ` #` comment) is the value, so `pattern = *.example.com` works as it is. `"double-quoted"` (with `\"`, `\\`,
   `\t`, `\n`; any other backslash is kept, so `"\."` works) and
@@ -250,7 +251,7 @@ with its default, and a test keeps that file in step with the code:
 | `idle_timeout`         | 600     | close after N seconds with no traffic in either direction (0 = never); also reaps half-open connections |
 | `half_close_timeout`   | 30      | after one side closes, the other side gets N seconds to finish (0 = unlimited) |
 | `max_connections`      | 1024    | further connections are rejected; goroutines ≤ 2 × this              |
-| `proxy_protocol_from`  | (none)  | who may put a PROXY protocol header in front of a connection: IP addresses or networks (`10.0.0.0/8`), `;`-separated. See [The client's address](#the-clients-address-proxy-protocol) |
+| `proxy_trust_source`  | (none)  | who may put a PROXY protocol header in front of a connection: IP addresses or networks (`10.0.0.0/8`), `;`-separated. See [The client's address](#the-clients-address-proxy-protocol) |
 | `max_handshakes_per_ip` | 64     | connections from one source (an IPv4 address, or an IPv6 /64) that have not sent their ClientHello yet. Further ones are closed at once, so one address cannot hold every slot with silent sockets for `handshake_timeout` each. Established connections don't count. 0 = unlimited |
 | `buffer_size`          | 65536   | the most bytes moved per read/write or splice step, in each direction. Clamped to 4 KiB..128 KiB (4096..131072), with a warning in the log. A spliced connection uses it as its kernel pipe size and holds no buffer; any other (terminated TLS, non-Linux, or splice unavailable) holds two pooled buffers of this size |
 | `buffer_pool_max_idle` | 2 × max_connections | capacity of the pool's channel                           |
@@ -271,11 +272,16 @@ option is missing from it, from `config.toml` or from this README):
 
 | section | options |
 |---|---|
-| `[global]` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_protocol_from` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
-| `[[listener]]` | `name` `bind` `port` · `proxy_protocol_from` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
+| `[global]` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `[[listener]]` | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `[[host]]` | `listener` · `pattern` `action` `target_host` `target_port` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` `proxy_version` · `max_aggregated_speed` `max_single_connection_speed` |
+| `[[local_services]]` | `name` `type` `bind` `port` · `doc_root` · `proxy_version` `proxy_trust_source` · `forwarded_proto` |
+| `[[proxy_pass_rules]]` | `server` `prefix` `target_host` `target_port` `strip_prefix` `force_host` |
 | `[logging]` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | `[console]` | `listen` `port` `password` `password_hash` `hostnames` `secure_cookie` |
+
+`proxy_trust_source` was called `proxy_protocol_from` before v1.5.0; the old
+name is a load error that shows the line to write instead.
 
 Samples, each with its expected routing checked by `go test`:
 
@@ -332,7 +338,7 @@ target_port = 9092
 | `name` | (required) | up to 64 letters, digits, spaces and `-` `_` `@` `#` `~` `(` `)` `[` `]` `<` `>` `"` `'`, no space at either end; unique, ignoring case. What `listener =` in a rule refers to. Quote it as a TOML string when it has spaces or quotes: `name = "Kafka (EU)"`, `listener = "Kafka (EU)"` (the console does this for you) |
 | `bind` | 0.0.0.0 | listen address: `0.0.0.0` all IPv4, `::` all IPv6 and IPv4, or specific addresses, several separated by `;` |
 | `port` | (required) | |
-| `proxy_protocol_from` `handshake_timeout` `idle_timeout` `half_close_timeout` | `[global]` | the same settings, for this listener only |
+| `proxy_trust_source` `handshake_timeout` `idle_timeout` `half_close_timeout` | `[global]` | the same settings, for this listener only |
 | `max_connections` | (none) | a cap for this listener, on top of the global `max_connections` |
 | `max_aggregated_speed` `max_single_connection_speed` | unlimited | as for a rule (see [Speed limits](#speed-limits)), for every connection on this listener; they apply on top of each rule's own |
 
@@ -375,7 +381,7 @@ to the same host, path and query on `https://` (no port, so 443):
   read and dropped first, so the client gets the response instead of a reset.
 - Headers are capped at 8 KiB (`431`). The first request must arrive within
   `handshake_timeout`, later ones within `idle_timeout`. `max_connections`,
-  `max_handshakes_per_ip` and `proxy_protocol_from` apply as on the other
+  `max_handshakes_per_ip` and `proxy_trust_source` apply as on the other
   listeners.
 - The name `http-to-https-redirect` is reserved: no `[[listener]]` and no
   rule may use it. A listener of your own on port 80 at an address the
@@ -441,6 +447,78 @@ ClientHello it passes through, and refuses one that arrives again:
 - The console's `listen` follows the same rules, and its Host check accepts
   IPv6 literals.
 
+## Local services
+
+Small HTTP services the proxy runs itself, each on its own port: static
+files (`http_server`), or a reverse proxy by path prefix (`reverse_proxy`).
+They speak plain HTTP; a terminating rule in front gives them TLS. They
+follow hot reload like the listeners: a new service opens its port, a moved
+one reopens, a removed one closes (open connections finish), and a changed
+`doc_root` or set of `[[proxy_pass_rules]]` applies without reopening.
+
+```toml
+[[host]]
+listener = https
+pattern = apps.example.com
+cert = auto
+upstream_tls = false
+proxy = true                  # pass the client's address on
+target_host = 127.0.0.1
+target_port = 1081
+
+[[local_services]]
+name = web1
+type = http_server
+port = 1080                   # bind defaults to 127.0.0.1
+doc_root = /opt/www/domain1
+
+[[local_services]]
+name = api
+type = reverse_proxy
+port = 1081
+proxy_version = auto          # the default
+
+[[proxy_pass_rules]]
+server = api
+prefix = /asdf/
+target_host = 127.0.0.1
+target_port = 8888
+strip_prefix = false          # true: /asdf/x is sent as /x
+force_host = localhost002     # default: the client's Host
+```
+
+- **Ports** may not clash with a listener, the redirect listener, `[console]`
+  or another service (a wildcard address overlaps everything on its port).
+- **The client's address** comes from a PROXY header (`proxy_version`):
+  `auto`, the default, uses a v1 or v2 header when a trusted peer sends one;
+  `none` never looks for one; `v1` or `v2` require it and drop connections
+  without it. Only peers in `proxy_trust_source` may send one, by default
+  this machine (`127.0.0.0/8; ::1`), which is where this proxy's own rules
+  connect from. Link-local addresses (`fe80::/10`) are other machines on the
+  network and are not in the default. From anyone else the header is not
+  read: with `auto` it reaches the HTTP parser and gets a `400`. Startup
+  warns about a rule whose `proxy` setting does not suit the service it
+  connects to.
+- **`http_server`** answers `GET` and `HEAD` from `doc_root`: `index.html`
+  for a folder, never a listing (a folder without one is `404`), nothing
+  hidden (a path part starting with `.`) except `/.well-known/`, and nothing
+  through a symlink that leads out of `doc_root` (`os.Root`).
+- **`reverse_proxy`** picks the longest `prefix` that matches the path; with
+  none, the client gets `404`. For a prefix ending in `/`, the bare folder
+  (`/asdf`) is redirected (`301`) to `/asdf/`, as nginx does. Upstreams are
+  plain HTTP, connected with `connect_timeout`; one that can't be reached
+  gives `502`. WebSocket upgrades and streamed responses pass through.
+- **Forwarding headers are set, never trusted.** Upstream gets
+  `X-Forwarded-For` and `X-Real-IP` (the client's address, as above),
+  `X-Forwarded-Proto` (`forwarded_proto`, default `https`) and
+  `X-Forwarded-Host`. Whatever the client sent in those, or in `Forwarded`,
+  is replaced: behind a terminating rule, the client's own headers arrive
+  from a trusted peer byte for byte, so keeping them would let any client
+  choose the address your backend sees.
+- `max_connections`, `handshake_timeout` (for the request headers) and
+  `idle_timeout` from `[global]` apply to each service. Every request is
+  logged with the client's address, status, size and time.
+
 ## The client's address (PROXY protocol)
 
 A backend behind the proxy sees every connection coming from the proxy. The
@@ -480,7 +558,7 @@ proxy = true
   bytes: the v2 signature (`\r\n\r\n\0\r\nQUIT\n`) and `PROXY ` cannot begin a
   TLS or HTTP stream. It should only do so for connections from this proxy.
 - **Incoming headers** (a load balancer in front of this proxy) are accepted
-  only from the peers in `proxy_protocol_from`, v1 or v2, detected
+  only from the peers in `proxy_trust_source`, v1 or v2, detected
   automatically; a listed peer may also connect without one. The stated source
   then becomes the address that is logged, counted by `max_handshakes_per_ip`
   and passed on to targets, and the stated destination is passed on as well.
@@ -569,7 +647,7 @@ target_port = 443
 
 | per rule | default | meaning |
 |---|---|---|
-| `cert` | (none) | `auto`: issue and renew via ACME. `local-ca` or `local-ca:ca002`: your own CA issues a certificate per name (see [Your own CA](#your-own-ca-cert--local-ca)); the CA must exist (made on the CAs page). None: pass through. A certificate directory is no longer supported: import the CA that issued it instead |
+| `cert` | (none) | `auto`: issue and renew via ACME. `local-ca` or `local-ca:ca002`: your own CA issues a certificate per name, or per IP address for clients without SNI (see [Your own CA](#your-own-ca-cert--local-ca)); the CA must exist (made on the CAs page). None: pass through |
 | `cert_domains` | from a literal pattern | exact names to issue, separated by `,` or `;`. Required when `pattern` has a `*` or is `ANY`, unless a `cert_validate_script` decides (start-up error otherwise). Each must match the pattern. No wildcards: TLS-ALPN-01 can't issue them |
 | `cert_validate_script` | (none) | decides about names that match the pattern but are not in `cert_domains`; see below. Must exist and be executable at start-up and on reload |
 | `cert_validate_args` | `["${host}"]` | the script's arguments, a TOML array of strings. Each is fixed text with `${1}`, `${2}`, ... and `${host}` filled in as in `target_host`, e.g. `["--customer", "aaa-${1}", "${host}"]`. One argument stays one argument, spaces and all |
@@ -614,12 +692,48 @@ upstream_tls = false
 <ca_root>/ca002/ca_key.pem              its private key
 <ca_root>/ca002/config.toml             its settings (below)
 <ca_root>/ca002/git.lab.internal/       one folder per name it issued: cert.pem, key.pem
+<ca_root>/ca002/ip_203.0.113.5/         the same for clients without a host name (below)
 <ca_root>/ca002/_archive/<name>-<time>  certificates it did not issue, moved aside
 ```
 
+- **Clients without SNI** (they connect by IP address: `https://203.0.113.5/`)
+  get a certificate too, with `pattern = NONE` (or `ANY`). Only `local-ca`
+  can do this; `cert = auto` on a `NONE` rule is a load error, since ACME
+  issues for host names.
+
+  ```toml
+  [[host]]
+  listener = https
+  pattern = NONE
+  cert = local-ca
+  cert_domains = 203.0.113.5, 198.51.100.7, gw.lab.internal   # optional
+  upstream_tls = false
+  target_host = 127.0.0.1
+  target_port = 1081
+  ```
+
+  - Without `cert_domains`: one certificate for the address the client
+    connected to (the destination in a PROXY header, if one came in). With
+    two addresses on the box, a client gets the one it used.
+  - With IP addresses in `cert_domains`: **one** certificate holding all of
+    them, plus a `NONE` rule's host names, whichever address the client
+    used. That is what works behind NAT, where the box only sees its private
+    address and can't tell which public one the client typed. Every client
+    sees the whole list in the certificate.
+  - IP addresses in `cert_domains` are only for `NONE` and `ANY` rules. On
+    an `ANY` rule they cover clients without SNI; its host names and globs
+    keep limiting the names that do send one (a list of addresses alone
+    issues for no host name).
+  - RFC 6066 forbids an IP address as SNI, but some clients send one. It is
+    routed as no SNI (so `target_host = ${host}` can't be pointed at an
+    address), and refused unless `cert_domains` lists it.
+  - An IPv6 address's folder has `-` for `:` (`ip_2001-db8--5`), which
+    Windows can't have in a file name; several addresses and names are
+    joined by `+`.
+
 - **Certificates are issued on demand**: the first time a client asks for a
   name, in well under a millisecond, so even that client gets the real one.
-  One name per certificate, 90 days by default. They are kept in the CA's
+  One name per certificate (for clients without SNI, see below), 90 days by default. They are kept in the CA's
   folder and used again after a restart.
 - **Renewal runs in the background**, at start and every 6 hours: each CA's
   own certificate when due, and every certificate in its folder that is due
