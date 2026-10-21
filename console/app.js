@@ -1549,9 +1549,14 @@ function serveRow(e) {
   return row;
 }
 
-// readServe is the entries as the config file has them: only what is set.
+// byPrefix orders serve entries as a request tries them: the longest prefix
+// first, / last (equal lengths keep their order).
+const byPrefix = (list) => list.slice().sort((a, b) => String(b.prefix || "").length - String(a.prefix || "").length);
+
+// readServe is the entries as the config file has them, in the order they
+// are tried: only what is set.
 function readServe() {
-  return [...document.querySelectorAll("#f-serve-rows .serve-row")].map((row) => {
+  return byPrefix([...document.querySelectorAll("#f-serve-rows .serve-row")].map((row) => {
     const q = (c) => row.querySelector(c).value.trim();
     const e = { type: q(".s-type"), prefix: q(".s-prefix") };
     if (e.type === "static_content") {
@@ -1567,7 +1572,7 @@ function readServe() {
     if (q(".s-auth")) e.basic_auth = q(".s-auth");
     for (const k of Object.keys(e)) if (e[k] === "") delete e[k];
     return e;
-  });
+  }));
 }
 
 // sameServe reads an entry from the file the way readServe writes one, so an
@@ -1626,7 +1631,8 @@ function boolSelect(raw) {
 function prefill(values) {
   const v = values || {};
   $("f-pattern").value = v.domain || "";
-  const serve = Array.isArray(v.serve) ? v.serve : [];
+  // In the order a request tries them: the longest prefix first, / last.
+  const serve = byPrefix(Array.isArray(v.serve) ? v.serve : []);
   setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : serve.length ? "serve" : "allow");
   $("f-serve-rows").replaceChildren(...serve.map(serveRow));
   if (ed.rule) ed.rule.values = { ...ed.rule.values, serve: serve.map(sameServe) };

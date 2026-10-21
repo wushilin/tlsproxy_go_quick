@@ -55,6 +55,10 @@ New:
   filterable, light or dark; hidden files left out), else `403`. A
   `base_dir` that is missing at load is tried again on request, so making
   it later needs no reload.
+- The console lists each listener's rules in the order they are tried
+  (`$no_sni`, exact names, wildcards from the most specific, `$anything_else`
+  last), and a rule's serve entries as a request tries them: the longest
+  prefix first, `/` last; the editor saves them in that order.
 - The console's rule editor has *Serve it here*, one card per serve entry:
   the prefix and target (or folder), the Host header on a row of its own,
   *strip the prefix* and *verify the target's certificate* as checkboxes,

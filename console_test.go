@@ -790,3 +790,32 @@ func TestConsoleImplicitDeny(t *testing.T) {
 		t.Fatalf("an explicit $anything_else has the implicit one's key, so its counts carry on: %v", err)
 	}
 }
+
+// The console lists a listener's rules in the order they are tried, not
+// file order.
+func TestRulesInEvaluationOrder(t *testing.T) {
+	t.Parallel()
+	c, err := LoadConfig(`listeners:
+  - {name: lan, port: 1}
+routes:
+  - listener: lan
+    rules:
+      - {domain: $anything_else, action: deny}
+      - {domain: "*.example.com", action: deny}
+      - {domain: "*.api.example.com", action: deny}
+      - {domain: www.example.com, action: deny}
+      - {domain: $no_sni, action: deny}
+      - {domain: a.test, action: deny}
+`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range evaluationOrder(c.Rules) {
+		got = append(got, r.Source)
+	}
+	want := []string{"$no_sni", "www.example.com", "a.test", "*.api.example.com", "*.example.com", "$anything_else"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}

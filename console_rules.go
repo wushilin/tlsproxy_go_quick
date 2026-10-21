@@ -317,8 +317,7 @@ func (c *Console) state() consoleState {
 	if l := shown.Redirect; l != nil {
 		addListener(listenerView{Name: l.Name, Redirect: true, Bind: l.Bind, Port: l.Port, Values: map[string]any{}})
 	}
-	for i := range shown.Rules {
-		r := &shown.Rules[i]
+	for _, r := range evaluationOrder(shown.Rules) {
 		v := ruleView{Listener: r.Listener, Line: r.Line, Key: r.Key(), Pattern: r.Source, Kind: r.Kind.String(), Allow: r.Allow,
 			Terminates: r.Terminates(), Cert: r.Cert, Proxy: r.Proxy, ProxyVersion: r.ProxyVersion,
 			AggSpeed: r.MaxAggregatedSpeed, ConnSpeed: r.MaxSingleConnectionSpeed,
@@ -387,6 +386,24 @@ func (c *Console) state() consoleState {
 			Completed: st.Completed.Load(), Denied: st.Denied.Load(), Failed: st.Failed.Load(), Rejected: st.Rejected.Load(),
 			MaxConnections: rt.cfg.MaxConnections, BytesUp: st.BytesUp.Load(), BytesDown: st.BytesDown.Load()},
 	}
+}
+
+// evaluationOrder is the rules in the order they are tried, as Route does:
+// $no_sni, exact names, then wildcards (more literal characters first),
+// $anything_else last; file order among equals.
+func evaluationOrder(rules []Rule) []*Rule {
+	out := make([]*Rule, len(rules))
+	for i := range rules {
+		out[i] = &rules[i]
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return a.Kind == kindWildcard && a.literalChars > b.literalChars
+	})
+	return out
 }
 
 // poke asks for a frame now: an action from the console shows without
