@@ -68,6 +68,14 @@ const (
 
 // Overridable in tests.
 var (
+	// localRenewTimeout bounds one renewal pass of the local CAs: what is
+	// not done by then waits for the next pass, localRenewInterval after
+	// this one started, so two passes never overlap.
+	localRenewTimeout = 5 * time.Hour
+	// beforeLocalRenew, when set, runs before each issued certificate the
+	// pass looks at (tests slow the pass down with it).
+	beforeLocalRenew func(ca, name string)
+
 	validateScriptTimeout = 20 * time.Second // then the script is killed
 	validateRejectTTL     = 10 * time.Minute // a refused name is not asked about again for this long
 )
@@ -105,7 +113,8 @@ type CertManager struct {
 	proposals    *ring[string]             // names a handshake asks to put to the script; the worker takes them
 	localCAs     syncMap[string, *localCA] // by dir (<cert_root>/caNNN); handshakes read it without a lock
 	localLog     rateLimitedLog
-	localRenewed time.Time // when the local CAs were last gone through
+	localRenewed time.Time   // when the local CAs' last pass started
+	localPass    atomic.Bool // a pass is running
 	cfg          *Config
 	auto         map[string]*tls.Certificate // by domain
 	challenges   map[string]*tls.Certificate // pending TLS-ALPN-01 answers, by domain
@@ -339,23 +348,48 @@ func (m *CertManager) reloadLocalCAConfigs() {
 // localRenewInterval: each CA's own certificate when due, every certificate
 // it issued that is due (and a rule still issues for), and archives over 14
 // days old (each CA's, cert_root's own of deleted CAs, and acme's of
-// removed automatic certificates).
-func (m *CertManager) renewLocalCAs() {
+// removed automatic certificates). It stops when ctx is done (the worker
+// gives it localRenewTimeout); the rest waits for the next pass.
+func (m *CertManager) renewLocalCAs(ctx context.Context) {
+	start := time.Now()
 	cfg := m.current().cfg
 	if cfg != nil {
 		pruneArchiveDir(filepath.Join(cfg.CARoot, localArchiveName))
 		pruneArchiveDir(filepath.Join(cfg.CertPath, localArchiveName))
 	}
 	m.localCAs.Range(func(_ string, l *localCA) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		if err := l.renewCA(); err != nil {
 			errorf("cert: CA %s: %v", l.id, err)
 		}
 		if cfg != nil {
-			l.renewAll(func(name string) bool { return localCAIssues(cfg, l.id, name) })
+			l.renewAll(ctx, func(name string) bool { return localCAIssues(cfg, l.id, name) })
 		}
 		l.pruneArchive()
 		return true
 	})
+	if ctx.Err() != nil {
+		errorf("cert: the local CAs' renewal pass stopped after %s, its time limit: what it did not get to is renewed by the next pass (in %s), or when a client asks for it",
+			humanDuration(time.Since(start)), humanDuration(localRenewInterval-time.Since(start)))
+	}
+}
+
+// startLocalPass runs a renewal pass of the local CAs in the background,
+// bounded by localRenewTimeout, unless one is still running. Only the
+// worker calls it.
+func (m *CertManager) startLocalPass() {
+	if time.Since(m.localRenewed) < localRenewInterval || !m.localPass.CompareAndSwap(false, true) {
+		return
+	}
+	m.localRenewed = time.Now() // only the worker reads or writes it
+	go func() {
+		defer m.localPass.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), localRenewTimeout)
+		defer cancel()
+		m.renewLocalCAs(ctx)
+	}()
 }
 
 // checkScripts makes sure every cert_validate_script is there and executable.
@@ -870,10 +904,7 @@ func (m *CertManager) worker() {
 	for {
 		m.takeProposals()
 		m.reloadLocalCAConfigs()
-		if time.Since(m.localRenewed) >= localRenewInterval {
-			m.localRenewed = time.Now() // only this goroutine reads or writes it
-			m.renewLocalCAs()
-		}
+		m.startLocalPass() // in the background: ACME work below is not held up
 		m.mu.RLock()
 		cfg := m.cfg
 		m.mu.RUnlock()

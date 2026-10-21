@@ -34,6 +34,21 @@ Breaking:
 - New password hashes (`tlsproxy --hash-password`) are argon2id. Existing
   `pbkdf2-sha256$...` hashes keep working.
 
+Renewal:
+- The local CAs' renewal pass (at start, then every 6 hours) runs on its own,
+  so automatic certificates aren't held up while it works, and has 5 hours:
+  what it doesn't get to by then waits for the next pass or a client's
+  handshake, so two passes never overlap.
+- A pass that finds a CA unchanged keeps it as it is, so what the CA issued
+  is not checked against it again at its next handshake.
+- Tests for renewal: a local CA 14 days from expiry is renewed (one with
+  years left is not); an issued certificate 14 days from expiry part way
+  through a run is renewed by the pass or the next handshake and served at
+  once (one with 45 of 90 days left is not); the pass stops at its time
+  limit and the next one finishes the job; an ACME certificate from Pebble
+  14 days from expiry is renewed by the worker and served (a fresh one is
+  not).
+
 New:
 - Serving HTTP here: a rule with `serve` entries answers HTTP itself, inside
   the TLS connection it terminates, with no target and no second hop.
