@@ -325,7 +325,12 @@
       {
         "key": "base_dir",
         "default": "(required for static_content)",
-        "meaning": "The folder the prefix stands for: /assets/a.css is base_dir/a.css. No listings, no hidden files but .well-known, no symlinks out."
+        "meaning": "The folder the prefix stands for: /assets/a.css is base_dir/a.css. A folder is served by its index.html, else index.htm, else a listing (directory_listing) or 403. No hidden files but .well-known, no symlinks out."
+      },
+      {
+        "key": "directory_listing",
+        "default": "false",
+        "meaning": "static_content: true lists a folder that has no index.html or index.htm (hidden files left out); false answers 403."
       },
       {
         "key": "basic_auth",

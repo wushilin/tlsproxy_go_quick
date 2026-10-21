@@ -253,8 +253,9 @@ logging:
 #     replaced.
 #   {type: static_content, prefix: /assets/, base_dir: /opt/www/assets}
 #     The prefix (ending in /) stands for base_dir: /assets/a.css is base_dir/a.css.
-#     GET and HEAD; index.html for a folder, never a listing; no hidden files except
-#     .well-known; no symlinks out of base_dir.
+#     GET and HEAD. A folder is served by its index.html, else its index.htm, else
+#     a listing if directory_listing: true (default false), else 403. No hidden
+#     files except .well-known (never listed); no symlinks out of base_dir.
 #   basic_auth: team on either: ask for a user of the basic_auth item named team.
 # Clients get HTTP/2 if they ask. A request whose Host another rule serves gets 421.
 # A reload applies to the next request, even on a connection already open.

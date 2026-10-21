@@ -86,18 +86,16 @@ func (w *webServer) push(s *Server, c net.Conn) bool {
 // server, per static route its folder, per proxy route its reverse proxy.
 type serveState struct {
 	web        map[string]*webServer
-	roots      map[*ServiceRoute]*os.Root
-	rootErrs   map[*ServiceRoute]error
-	files      map[*ServiceRoute]http.Handler
+	dirs       map[*ServiceRoute]*staticDir
 	proxies    map[*ServiceRoute]*httputil.ReverseProxy
 	transports []*http.Transport
 }
 
 // newServeState opens what cfg's serving rules need. A base_dir that cannot
-// be opened is logged; its route answers 503 until a reload fixes it.
+// be opened is logged; its route answers 503 until it can (see staticDir).
 func (s *Server) newServeState(cfg *Config) *serveState {
-	st := &serveState{web: map[string]*webServer{}, roots: map[*ServiceRoute]*os.Root{}, rootErrs: map[*ServiceRoute]error{},
-		files: map[*ServiceRoute]http.Handler{}, proxies: map[*ServiceRoute]*httputil.ReverseProxy{}}
+	st := &serveState{web: map[string]*webServer{}, dirs: map[*ServiceRoute]*staticDir{},
+		proxies: map[*ServiceRoute]*httputil.ReverseProxy{}}
 	transports := map[bool]*http.Transport{} // by tls_verify
 	transport := func(verify bool) *http.Transport {
 		if t := transports[verify]; t != nil {
@@ -141,14 +139,11 @@ func (s *Server) newServeState(cfg *Config) *serveState {
 		for _, route := range r.Routes {
 			switch route.Type {
 			case routeStatic:
-				root, err := os.OpenRoot(route.BaseDir)
-				if err != nil {
-					st.rootErrs[route] = err
-					errorf("rule at line %d: %s: base_dir: %v; its requests are answered 503 until it is fixed and the configuration reloaded", r.Line, route.Key, err)
-					continue
+				d := &staticDir{path: route.BaseDir}
+				if _, err := d.handler(); err != nil {
+					errorf("rule at line %d: %s: base_dir: %v; its requests are answered 503 until it exists", r.Line, route.Key, err)
 				}
-				st.roots[route] = root
-				st.files[route] = http.FileServer(rootDir{root})
+				st.dirs[route] = d
 			case routeProxy:
 				st.proxies[route] = reverseProxy(r, route, transport(route.TLSVerify))
 			}
@@ -168,8 +163,8 @@ func (st *serveState) retire() {
 		w.Close()
 	}
 	time.AfterFunc(time.Minute, func() {
-		for _, root := range st.roots {
-			root.Close()
+		for _, d := range st.dirs {
+			d.close()
 		}
 		for _, t := range st.transports {
 			t.CloseIdleConnections()
@@ -467,12 +462,12 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 	}
 	switch route.Type {
 	case routeStatic:
-		files := rt.serve.files[route]
-		if files == nil {
+		dir := rt.serve.dirs[route]
+		if _, err := dir.handler(); err != nil {
 			http.Error(w, "base_dir is not available", http.StatusServiceUnavailable)
-			return note + fmt.Sprintf(" (base_dir: %v)", rt.serve.rootErrs[route])
+			return note + fmt.Sprintf(" (base_dir: %v)", err)
 		}
-		serveFile(w, r, route, files)
+		note += serveFile(w, r, route, dir)
 	case routeProxy:
 		rt.serve.proxies[route].ServeHTTP(w, r)
 		note += " -> " + route.Target.Scheme + "://" + route.TargetAddr()
@@ -480,31 +475,95 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 	return note
 }
 
+// staticDir is a route's base_dir, opened once. One that could not be
+// opened (not made yet, say) is tried again by a request, at most once a
+// second, so making the folder is enough: no reload needed.
+type staticDir struct {
+	path  string
+	mu    sync.Mutex
+	root  *os.Root
+	files http.Handler
+	err   error
+	tried time.Time
+}
+
+func (d *staticDir) handler() (http.Handler, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.files == nil && time.Since(d.tried) >= time.Second {
+		d.tried = time.Now()
+		if d.root, d.err = os.OpenRoot(d.path); d.err == nil {
+			d.files = http.FileServer(rootDir{d.root})
+		}
+	}
+	return d.files, d.err
+}
+
+func (d *staticDir) close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.root != nil {
+		d.root.Close()
+	}
+}
+
 // serveFile answers from a route's base_dir, the prefix standing for it:
-// GET and HEAD only, no directory listings, no hidden files (a path part
-// starting with "."), except .well-known at its top.
-func serveFile(w http.ResponseWriter, r *http.Request, route *ServiceRoute, files http.Handler) {
+// GET and HEAD only, no hidden files (a path part starting with "."),
+// except .well-known at its top. A folder is served by its index.html, else
+// its index.htm, else a listing if the route allows one, else 403.
+func serveFile(w http.ResponseWriter, r *http.Request, route *ServiceRoute, dir *staticDir) string {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+		return ""
 	}
 	rest := "/" + strings.TrimPrefix(r.URL.Path, route.Prefix)
 	for i, part := range strings.Split(path.Clean(rest), "/") {
 		if strings.HasPrefix(part, ".") && !(i == 1 && part == ".well-known") {
 			http.NotFound(w, r)
-			return
+			return ""
 		}
 	}
-	// The file server sees the path below the prefix, and redirects (a folder
-	// without its /, index.html to its folder) relative to it, so the
-	// redirects still point under the prefix.
+	name := strings.TrimPrefix(path.Clean(rest), "/")
+	if name == "" {
+		name = "."
+	}
+	if info, err := dir.root.Stat(name); err == nil && info.IsDir() {
+		if !strings.HasSuffix(r.URL.Path, "/") {
+			http.Redirect(w, r, (&url.URL{Path: r.URL.Path + "/", RawQuery: r.URL.RawQuery}).String(), http.StatusMovedPermanently)
+			return " (to the folder)"
+		}
+		for _, index := range []string{"index.html", "index.htm"} {
+			f, err := dir.root.Open(path.Join(name, index))
+			if err != nil {
+				continue
+			}
+			defer f.Close()
+			if fi, err := f.Stat(); err == nil && fi.Mode().IsRegular() {
+				http.ServeContent(w, r, index, fi.ModTime(), f)
+				return " (" + index + ")"
+			}
+		}
+		if !route.Listing {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return " (a folder without index.html; directory_listing is off)"
+		}
+		if err := serveListing(w, r, dir.root, name); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return fmt.Sprintf(" (listing: %v)", err)
+		}
+		return " (listing)"
+	}
+	// The file server sees the path below the prefix, and redirects
+	// (index.html to its folder) relative to it, so the redirects still
+	// point under the prefix.
 	r2 := new(http.Request)
 	*r2 = *r
 	r2.URL = new(url.URL)
 	*r2.URL = *r.URL
 	r2.URL.Path, r2.URL.RawPath = rest, ""
-	files.ServeHTTP(w, r2)
+	dir.files.ServeHTTP(w, r2)
+	return ""
 }
 
 // statusWriter remembers the status of a response, for the log line.
@@ -561,11 +620,10 @@ func (d rootDir) Open(name string) (http.File, error) {
 		}
 		return nil, err
 	}
+	// Folders are serveFile's: the file server never lists one.
 	if info, err := f.Stat(); err == nil && info.IsDir() {
-		if _, err := d.root.Stat(path.Join(name, "index.html")); err != nil {
-			f.Close()
-			return nil, fs.ErrNotExist
-		}
+		f.Close()
+		return nil, fs.ErrNotExist
 	}
 	return f, nil
 }

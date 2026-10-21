@@ -89,7 +89,8 @@ var configReference = []sectionDoc{
 		{"strip_prefix", "false", "reverse_proxy: /api/x is sent as /x."},
 		{"force_host", "the client's Host", "reverse_proxy: the Host header sent on."},
 		{"tls_verify", "true", "reverse_proxy to https://: check the target's certificate."},
-		{"base_dir", "(required for static_content)", "The folder the prefix stands for: /assets/a.css is base_dir/a.css. No listings, no hidden files but .well-known, no symlinks out."},
+		{"base_dir", "(required for static_content)", "The folder the prefix stands for: /assets/a.css is base_dir/a.css. A folder is served by its index.html, else index.htm, else a listing (directory_listing) or 403. No hidden files but .well-known, no symlinks out."},
+		{"directory_listing", "false", "static_content: true lists a folder that has no index.html or index.htm (hidden files left out); false answers 403."},
 		{"basic_auth", "(none)", "The name of a basic_auth item whose users may use it."},
 	}},
 	{"basic_auth", "A list of user groups that serve entries can ask for (basic_auth: <name>). A password a browser sends is checked once and remembered for 5 minutes.", []keyDoc{

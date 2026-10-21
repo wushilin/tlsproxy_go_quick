@@ -1462,7 +1462,7 @@ function argsList(s) {
 
 // ---- serve entries: one row each ----
 
-const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "strip_prefix", "force_host", "tls_verify", "basic_auth"];
+const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth"];
 
 function serveRow(e) {
   const row = el("div", "serve-row");

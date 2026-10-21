@@ -161,6 +161,7 @@ routes:
           - {type: reverse_proxy, prefix: /asdf/, target: "http://127.0.0.1:8888", strip_prefix: true, force_host: localhost002}
           - {type: reverse_proxy, prefix: /secure/, target: "https://10.0.0.9:8443", tls_verify: false, basic_auth: team}
           - {type: static_content, prefix: /static/, base_dir: /usr/local/www/static, basic_auth: team}
+          - {type: static_content, prefix: /files/, base_dir: /srv/files, directory_listing: true}   # a folder without index.html / index.htm is listed (default: 403)
 
       - domain: $anything_else
         action: deny

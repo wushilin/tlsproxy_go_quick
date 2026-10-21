@@ -537,10 +537,13 @@ basic_auth:
     `tls_verify: false` skips checking an `https://` target's certificate.
   - `type: static_content`: `base_dir: /folder`. The prefix stands for the
     folder, so `/assets/a.css` is `base_dir/a.css` (as nginx's `alias`); it
-    ends in `/`. `GET` and `HEAD` only, `index.html` for a folder, never a
-    listing, nothing hidden (a path part starting with `.`) except
+    ends in `/`. `GET` and `HEAD` only. A folder is served by its
+    `index.html`, else its `index.htm`, else a listing if
+    `directory_listing: true` (sortable and filterable, hidden files left
+    out), else `403`. Nothing hidden (a path part starting with `.`) except
     `.well-known` at its top, nothing through a symlink that leads out
-    (`os.Root`). A `base_dir` that can't be opened answers `503`.
+    (`os.Root`). A `base_dir` that can't be opened answers `503` and is tried
+    again (at most once a second), so creating it later needs no reload.
   - `basic_auth: <name>` on either type asks for a user of the `basic_auth`
     item with that name; the `Authorization` header is not passed on.
 - **Matching.** The longest `prefix` that matches the path serves the

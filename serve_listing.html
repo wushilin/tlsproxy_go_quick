@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{.Title}} · {{.Host}}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%232456c9' d='M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2h7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #eef1f4; --surface: #ffffff; --surface-2: #f6f8fa; --hover: #f1f5fb;
+  --line: #dde2e8; --line-strong: #c6cdd6;
+  --fg: #111823; --fg-2: #4a5566; --fg-3: #7b8696;
+  --accent: #2456c9; --accent-soft: rgba(36, 86, 201, .10);
+  --k-image: #b4459a; --k-video: #c8302a; --k-audio: #a8690b; --k-archive: #7a5af0;
+  --k-code: #0b8378; --k-doc: #2456c9; --k-text: #4a5566; --k-other: #7b8696;
+  --shadow: 0 1px 2px rgba(17, 24, 35, .06), 0 8px 24px rgba(17, 24, 35, .05);
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0f14; --surface: #121821; --surface-2: #0f141b; --hover: #18202b;
+    --line: #222c38; --line-strong: #314050;
+    --fg: #e7edf4; --fg-2: #a3afbd; --fg-3: #6f7c8c;
+    --accent: #79a2ff; --accent-soft: rgba(121, 162, 255, .13);
+    --k-image: #e07fcd; --k-video: #ff6d63; --k-audio: #e3ac52; --k-archive: #a993ff;
+    --k-code: #3ccab7; --k-doc: #79a2ff; --k-text: #a3afbd; --k-other: #6f7c8c;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font-ui); -webkit-font-smoothing: antialiased; }
+a { color: inherit; text-decoration: none; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 40px 16px 56px; }
+
+header { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px 24px; margin-bottom: 18px; }
+.where { flex: 1 1 420px; min-width: 0; }
+.eyebrow { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-3); margin-bottom: 8px; }
+.eyebrow svg { width: 14px; height: 14px; color: var(--accent); }
+.crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; font: 600 22px/1.25 var(--font-ui); letter-spacing: -.01em; word-break: break-all; }
+.crumbs a { color: var(--fg-2); border-radius: 6px; padding: 0 3px; margin: 0 -3px; }
+.crumbs a:hover { color: var(--accent); background: var(--accent-soft); }
+.crumbs a:last-child { color: var(--fg); }
+.crumbs .sep { color: var(--line-strong); padding: 0 4px; font-weight: 400; }
+.stats { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--fg-2); font-size: 12px; }
+.chip b { color: var(--fg); font-weight: 650; font-variant-numeric: tabular-nums; }
+
+.search { position: relative; flex: 0 1 280px; min-width: 200px; }
+.search svg { position: absolute; left: 11px; top: 50%; width: 15px; height: 15px; transform: translateY(-50%); color: var(--fg-3); pointer-events: none; }
+.search input { width: 100%; height: 38px; padding: 0 12px 0 34px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); font: inherit; outline: none; box-shadow: var(--shadow); }
+.search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.search kbd { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font: 11px var(--font-mono); color: var(--fg-3); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; background: var(--surface-2); }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); border-bottom: 1px solid var(--line); padding: 0; text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-3); }
+thead button { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 6px; width: 100%; height: 38px; padding: 0 16px; cursor: pointer; }
+thead th.num button { justify-content: flex-end; }
+thead button:hover, thead button:focus-visible { color: var(--fg); }
+thead button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+thead .arrow { opacity: 0; transition: opacity .15s, transform .15s; }
+thead [aria-sort] .arrow { opacity: 1; color: var(--accent); }
+thead [aria-sort="descending"] .arrow { transform: rotate(180deg); }
+col.c-size { width: 112px; } col.c-time { width: 168px; }
+
+tbody tr { border-bottom: 1px solid var(--line); transition: background .12s; }
+tbody tr:last-child { border-bottom: 0; }
+tbody tr:hover { background: var(--hover); }
+td { padding: 0 16px; height: 48px; vertical-align: middle; }
+td.num { text-align: right; font: 12.5px var(--font-mono); color: var(--fg-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.time { text-align: right; color: var(--fg-2); font-size: 12.5px; white-space: nowrap; }
+.name { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.name a { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; padding: 6px 0; }
+.name a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 520; }
+tr.dir .label { font-weight: 620; }
+.name a:hover .label { color: var(--accent); }
+
+.ico { flex: none; width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; }
+.ico svg { width: 18px; height: 18px; }
+.ico.folder { background: var(--accent-soft); color: var(--accent); }
+.ico.file { position: relative; color: var(--k, var(--k-other)); background: color-mix(in srgb, var(--k, var(--k-other)) 12%, transparent); }
+.ico.file span { font: 700 8.5px/1 var(--font-mono); letter-spacing: .02em; text-transform: uppercase; }
+.ico.up { background: var(--surface-2); color: var(--fg-3); border: 1px dashed var(--line-strong); }
+[data-kind=image] { --k: var(--k-image); } [data-kind=video] { --k: var(--k-video); } [data-kind=audio] { --k: var(--k-audio); }
+[data-kind=archive] { --k: var(--k-archive); } [data-kind=code] { --k: var(--k-code); } [data-kind=doc] { --k: var(--k-doc); }
+[data-kind=text] { --k: var(--k-text); }
+
+.empty { padding: 56px 16px; text-align: center; color: var(--fg-3); }
+.empty svg { width: 40px; height: 40px; color: var(--line-strong); margin-bottom: 10px; }
+.empty b { display: block; color: var(--fg-2); font-size: 15px; margin-bottom: 4px; }
+.more { padding: 12px 16px; border-top: 1px solid var(--line); background: var(--surface-2); color: var(--fg-2); font-size: 12.5px; }
+footer { margin-top: 18px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--fg-3); font-size: 12px; }
+footer .mono { font-family: var(--font-mono); }
+
+@media (max-width: 640px) {
+  .wrap { padding-top: 24px; }
+  .crumbs { font-size: 18px; }
+  .search { flex: 1 1 100%; }
+  .search kbd { display: none; }
+  col.c-time, th.time, td.time { display: none; }
+  col.c-size { width: 84px; }
+  td, thead button { padding: 0 12px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="where">
+      <div class="eyebrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2h7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>Index of</div>
+      <nav class="crumbs" aria-label="Path">{{range $i, $c := .Crumbs}}{{if $i}}<span class="sep">/</span>{{end}}<a href="{{$c.Href}}">{{$c.Name}}</a>{{end}}</nav>
+      <div class="stats">
+        <span class="chip"><b>{{.Folders}}</b> folder{{if ne .Folders 1}}s{{end}}</span>
+        <span class="chip"><b>{{.Files}}</b> file{{if ne .Files 1}}s{{end}}</span>
+        {{if .Files}}<span class="chip"><b>{{.Total}}</b> in all</span>{{end}}
+      </div>
+    </div>
+    {{if .Entries}}<label class="search">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <input id="q" type="search" placeholder="Filter this folder" aria-label="Filter this folder" autocomplete="off" spellcheck="false">
+      <kbd>/</kbd>
+    </label>{{end}}
+  </header>
+
+  <main class="card">
+    {{if or .Entries .Parent}}
+    <table>
+      <colgroup><col><col class="c-size"><col class="c-time"></colgroup>
+      <thead><tr>
+        <th data-key="name" aria-sort="ascending"><button type="button">Name <span class="arrow">↑</span></button></th>
+        <th class="num" data-key="size"><button type="button">Size <span class="arrow">↑</span></button></th>
+        <th class="num time" data-key="time"><button type="button">Modified <span class="arrow">↑</span></button></th>
+      </tr></thead>
+      <tbody id="rows">
+        {{if .Parent}}<tr class="up" data-fixed>
+          <td colspan="3"><div class="name"><a href="../"><span class="ico up"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></span><span class="label">Parent folder</span></a></div></td>
+        </tr>{{end}}
+        {{range .Entries}}<tr class="{{if .Dir}}dir{{else}}file{{end}}" data-name="{{.Name}}" data-size="{{if .Dir}}-1{{else}}{{.Size}}{{end}}" data-time="{{.Modified.Unix}}">
+          <td><div class="name"><a href="{{.Href}}" title="{{.Name}}">{{if .Dir}}<span class="ico folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2h7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg></span>{{else}}<span class="ico file" data-kind="{{.Kind}}">{{if .Ext}}<span>{{.Ext}}</span>{{else}}<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5"/></svg>{{end}}</span>{{end}}<span class="label">{{.Name}}{{if .Dir}}/{{end}}</span></a></div></td>
+          <td class="num">{{if .Dir}}—{{else}}{{.SizeText}}{{end}}</td>
+          <td class="time"><time datetime="{{.Modified.Format "2006-01-02T15:04:05Z07:00"}}">{{.Modified.Format "2006-01-02 15:04"}} UTC</time></td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+    {{end}}
+    {{if not .Entries}}<div class="empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.5" d="M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2h7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg><b>This folder is empty</b>Nothing to list here.</div>{{end}}
+    <div class="empty" id="none" hidden><b>No match</b>Nothing in this folder matches “<span id="nq"></span>”.</div>
+    {{if .Hidden}}<div class="more">{{.Hidden}} more not shown: a listing shows the first 5000.</div>{{end}}
+  </main>
+
+  <footer><span class="mono">{{.Host}}{{.Title}}</span><span>Served by tlsproxy</span></footer>
+</div>
+<script>
+(() => {
+  const body = document.getElementById("rows");
+  if (!body) return;
+  const rows = [...body.querySelectorAll("tr:not([data-fixed])")];
+  const heads = [...document.querySelectorAll("thead th")];
+  const q = document.getElementById("q");
+  const none = document.getElementById("none");
+
+  // Modified: in the reader's own time, and how long ago.
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const fmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const ago = (s) => {
+    for (const [u, n] of [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]])
+      if (Math.abs(s) >= n) return rtf.format(-Math.round(s / n), u);
+    return rtf.format(0, "second");
+  };
+  for (const t of document.querySelectorAll("td.time time")) {
+    const d = new Date(t.getAttribute("datetime"));
+    t.textContent = ago((Date.now() - d) / 1000);
+    t.title = fmt.format(d);
+  }
+
+  // Sorting: folders stay first; a click on a heading sorts by it, again to reverse.
+  let key = "name", dir = 1;
+  const val = (r) => key === "name" ? r.dataset.name.toLowerCase() : Number(r.dataset[key]);
+  const cmp = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  const sortRows = () => {
+    rows.sort((a, b) => {
+      const da = a.classList.contains("dir"), db = b.classList.contains("dir");
+      if (da !== db) return da ? -1 : 1;
+      const x = val(a), y = val(b);
+      const c = key === "name" ? cmp.compare(x, y) : x - y || cmp.compare(a.dataset.name, b.dataset.name);
+      return c * dir;
+    });
+    body.append(...rows);
+    for (const h of heads) {
+      if (h.dataset.key === key) h.setAttribute("aria-sort", dir > 0 ? "ascending" : "descending");
+      else h.removeAttribute("aria-sort");
+    }
+  };
+  for (const h of heads) h.querySelector("button").addEventListener("click", () => {
+    if (key === h.dataset.key) dir = -dir; else { key = h.dataset.key; dir = key === "name" ? 1 : -1; }
+    sortRows();
+  });
+
+  // Filtering, as you type; / focuses the box, Escape clears it.
+  if (q) {
+    const apply = () => {
+      const s = q.value.trim().toLowerCase();
+      let shown = 0;
+      for (const r of rows) {
+        const on = !s || r.dataset.name.toLowerCase().includes(s);
+        r.hidden = !on;
+        if (on) shown++;
+      }
+      none.hidden = shown > 0 || !s;
+      document.getElementById("nq").textContent = q.value.trim();
+    };
+    q.addEventListener("input", apply);
+    q.addEventListener("keydown", (e) => { if (e.key === "Escape") { q.value = ""; apply(); q.blur(); } });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "/" && document.activeElement !== q && !e.metaKey && !e.ctrlKey) { e.preventDefault(); q.focus(); }
+    });
+  }
+})();
+</script>
+</body>
+</html>

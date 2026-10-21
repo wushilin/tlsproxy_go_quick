@@ -45,6 +45,7 @@ type ServiceRoute struct {
 	ForceHost   string // reverse_proxy: the Host sent on; "" = the client's
 	TLSVerify   bool   // reverse_proxy to https://: verify the target's certificate
 	BaseDir     string // static_content: the folder the prefix stands for
+	Listing     bool   // static_content: a folder without index.html or index.htm is listed (else 403)
 	BasicAuth   string // the basic_auth that guards it; "" = none
 	auth        *BasicAuth
 }
@@ -128,13 +129,17 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 				return nil, fmt.Errorf("base_dir must not be empty")
 			}
 			s.BaseDir = v
+		case "directory_listing":
+			if s.Listing, err = parseBool(v); err != nil {
+				return nil, fmt.Errorf("directory_listing: %v", err)
+			}
 		case "basic_auth":
 			if v == "" {
 				return nil, fmt.Errorf("basic_auth must name a basic_auth item")
 			}
 			s.BasicAuth = v
 		default:
-			return nil, fmt.Errorf("unknown key %q in a serve entry (type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, basic_auth)", k)
+			return nil, fmt.Errorf("unknown key %q in a serve entry (type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, directory_listing, basic_auth)", k)
 		}
 	}
 	only := func(opt, typ string) error {
@@ -162,8 +167,10 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 			return nil, err
 		}
 	}
-	if err := only("base_dir", routeStatic); err != nil {
-		return nil, err
+	for _, opt := range []string{"base_dir", "directory_listing"} {
+		if err := only(opt, routeStatic); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }

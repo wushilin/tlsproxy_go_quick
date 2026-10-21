@@ -26,7 +26,7 @@ var (
 		"upstream_tls", "upstream_tls_verify", "upstream_sni", "proxy", "max_aggregated_speed", "max_single_connection_speed", "serve"}
 	listenerKeys = []string{"name", "bind", "port", "proxy_trust_source", "max_connections",
 		"handshake_timeout", "idle_timeout", "half_close_timeout", "max_aggregated_speed", "max_single_connection_speed"}
-	serveKeys = []string{"type", "prefix", "target", "base_dir", "strip_prefix", "force_host", "tls_verify", "basic_auth"}
+	serveKeys = []string{"type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth"}
 )
 
 // yamlDoc is a config.yaml being edited.

@@ -50,6 +50,11 @@ New:
 - `basic_auth`: users (`username` with `password_hash` (argon2id or
   pbkdf2-sha256) or `password_plain`) that a serve entry asks for with
   `basic_auth: <name>`. A matched password is remembered for 5 minutes.
+- `static_content` serves a folder's `index.html`, else its `index.htm`,
+  else, with `directory_listing: true`, a listing page (sortable,
+  filterable, light or dark; hidden files left out), else `403`. A
+  `base_dir` that is missing at load is tried again on request, so making
+  it later needs no reload.
 - The console's rule editor has *Serve it here*, one card per serve entry:
   the prefix and target (or folder), the Host header on a row of its own,
   *strip the prefix* and *verify the target's certificate* as checkboxes,

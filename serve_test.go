@@ -255,10 +255,10 @@ user2=username=jill;password_plain=open sesame
 		check("/files/", "200 home")
 		check("/files/a.txt", "200 A")
 		check("/files/sub/", "200 sub")
-		check("/files/sub", "301 sub/")
+		check("/files/sub", "301 /files/sub/")
 		check("/files/.well-known/security.txt", "200 sec")
 		check("/files/.env", "404")
-		check("/files/empty/", "404")
+		check("/files/empty/", "403") // no index, no directory_listing
 		check("/files/escape", "404")
 		check("/files/nope", "404")
 		check("/missing/a", "503")
@@ -313,6 +313,81 @@ func TestServeRulesReloadOnOpenConnection(t *testing.T) {
 	}
 	if n := p.srv.stats.Accepted.Load(); n != 1 {
 		t.Errorf("both requests on one connection: %d connections terminated", n)
+	}
+}
+
+// A base_dir made after the configuration was loaded is served without a
+// reload: a request tries to open it again.
+func TestServeBaseDirMadeLater(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	dir := filepath.Join(t.TempDir(), "site")
+	text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nca_root=" + testCARoot() + "\n" +
+		"[[host]]\nlistener=default\npattern=www.test\ncert=" + ca.localCA(t) + "\nservice_rule1 = type=static_content; prefix=/; base_dir=" + dir + "\n"
+	p := startProxyText(t, text, "")
+	c := serveClient(p, ca, false)
+	if resp, _ := httpsGet(t, c, "https://www.test/index.html"); resp.StatusCode != 503 {
+		t.Fatalf("no folder yet: %d", resp.StatusCode)
+	}
+	os.Mkdir(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("hello"), 0o644)
+	time.Sleep(1100 * time.Millisecond) // tried again at most once a second
+	if resp, body := httpsGet(t, c, "https://www.test/"); resp.StatusCode != 200 || body != "hello" {
+		t.Fatalf("folder made: %d %q", resp.StatusCode, body)
+	}
+}
+
+// A folder: its index.html, else its index.htm, else a listing where
+// directory_listing allows one, else 403.
+func TestServeFolders(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"html/index.html": "from html", "html/index.htm": "not this", "htm/index.htm": "from htm",
+		"list/a b.txt": "x", "list/<i>.png": "y", "list/.secret": "z", "list/sub/f": "", "none/f": "",
+	} {
+		os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0o755)
+		os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
+	}
+	text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nca_root=" + testCARoot() + "\n" +
+		"[[host]]\nlistener=default\npattern=www.test\ncert=" + ca.localCA(t) +
+		"\nservice_rule1 = type=static_content; prefix=/; base_dir=" + dir +
+		"\nservice_rule2 = type=static_content; prefix=/list/; base_dir=" + filepath.Join(dir, "list") + "; directory_listing=true\n"
+	p := startProxyText(t, text, "")
+	c := serveClient(p, ca, false)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for url, want := range map[string]string{
+		"https://www.test/html/": "200 from html",
+		"https://www.test/htm/":  "200 from htm",
+		"https://www.test/none/": "403",
+		"https://www.test/":      "403", // the top too
+		"https://www.test/htm":   "301",
+		"https://www.test/list/": "200 listing",
+	} {
+		resp, body := httpsGet(t, c, url)
+		got := fmt.Sprint(resp.StatusCode)
+		if strings.HasPrefix(want, "200 from") {
+			got += " " + body
+		} else if want == "200 listing" && strings.Contains(body, "Index of") {
+			got += " listing"
+		}
+		if got != want {
+			t.Errorf("%s: %s, want %s", url, got, want)
+		}
+		if want == "200 listing" {
+			for _, in := range []string{`href="a%20b.txt"`, "&lt;i&gt;.png", `href="sub/"`, `data-kind="image"`} {
+				if !strings.Contains(body, in) {
+					t.Errorf("listing lacks %s", in)
+				}
+			}
+			if strings.Contains(body, "secret") || strings.Contains(body, "<i>") {
+				t.Error("listing shows a hidden file or an unescaped name")
+			}
+			if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'none'") {
+				t.Error("listing without its CSP")
+			}
+		}
 	}
 }
 
