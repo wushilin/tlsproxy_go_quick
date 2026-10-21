@@ -479,3 +479,43 @@ func TestConsoleBasicAuthPage(t *testing.T) {
 		t.Fatalf("the rule editor's groups: %v", st["authGroups"])
 	}
 }
+
+// Static files take byte ranges (one, several, If-Range, out of range), and
+// conditional requests, over HTTP/1.1 and HTTP/2; index.html too.
+func TestServeRanges(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("0123456789"), 0o644)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<p>home</p>"), 0o644)
+	text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nca_root=" + testCARoot() + "\n" +
+		"[[host]]\nlistener=default\npattern=www.test\ncert=" + ca.localCA(t) + "\nservice_rule1 = type=static_content; prefix=/; base_dir=" + dir + "\n"
+	p := startProxyText(t, text, "")
+	for _, h2 := range []bool{false, true} {
+		c := serveClient(p, ca, h2)
+		resp, body := httpsGet(t, c, "https://www.test/f.txt", "Range", "bytes=2-4")
+		if resp.StatusCode != 206 || body != "234" || resp.Header.Get("Content-Range") != "bytes 2-4/10" || resp.ProtoMajor != map[bool]int{false: 1, true: 2}[h2] {
+			t.Errorf("h2=%v one range: %d %s %q %q", h2, resp.StatusCode, resp.Proto, body, resp.Header.Get("Content-Range"))
+		}
+		if resp, body := httpsGet(t, c, "https://www.test/f.txt", "Range", "bytes=-3"); resp.StatusCode != 206 || body != "789" {
+			t.Errorf("h2=%v suffix range: %d %q", h2, resp.StatusCode, body)
+		}
+		if resp, body := httpsGet(t, c, "https://www.test/f.txt", "Range", "bytes=0-1,8-9"); resp.StatusCode != 206 ||
+			!strings.HasPrefix(resp.Header.Get("Content-Type"), "multipart/byteranges") || !strings.Contains(body, "01") || !strings.Contains(body, "89") {
+			t.Errorf("h2=%v two ranges: %d %s", h2, resp.StatusCode, resp.Header.Get("Content-Type"))
+		}
+		if resp, _ := httpsGet(t, c, "https://www.test/f.txt", "Range", "bytes=20-30"); resp.StatusCode != 416 {
+			t.Errorf("h2=%v out of range: %d", h2, resp.StatusCode)
+		}
+		last := resp.Header.Get("Last-Modified")
+		if resp, _ := httpsGet(t, c, "https://www.test/f.txt", "If-Modified-Since", last); resp.StatusCode != 304 {
+			t.Errorf("h2=%v If-Modified-Since: %d", h2, resp.StatusCode)
+		}
+		if resp, body := httpsGet(t, c, "https://www.test/f.txt", "Range", "bytes=0-0", "If-Range", "Mon, 01 Jan 2001 00:00:00 GMT"); resp.StatusCode != 200 || body != "0123456789" {
+			t.Errorf("h2=%v stale If-Range sends it all: %d %q", h2, resp.StatusCode, body)
+		}
+		if resp, body := httpsGet(t, c, "https://www.test/", "Range", "bytes=3-6"); resp.StatusCode != 206 || body != "home" {
+			t.Errorf("h2=%v index.html range: %d %q", h2, resp.StatusCode, body)
+		}
+	}
+}
