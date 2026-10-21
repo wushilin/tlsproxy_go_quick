@@ -17,6 +17,7 @@ package main
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -76,6 +77,15 @@ func yamlFixture(text string) string {
 				continue
 			}
 			k = strings.TrimSpace(k)
+			if k == "ca_root" { // cert_root since v1.5.0
+				k = "cert_root"
+			}
+			if k == "cert_path" { // the ACME certificates are in <cert_root>/acme since v1.5.0
+				if slices.ContainsFunc(cur.kvs, func(p kv) bool { return p.k == "cert_root" }) {
+					continue // the test's CAs say where cert_root is
+				}
+				k = "cert_root"
+			}
 			if k == "cert_validate_args" {
 				v = strings.TrimSpace(v) // a TOML array is a YAML flow list already
 			} else {

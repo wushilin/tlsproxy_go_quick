@@ -78,10 +78,10 @@ global:
 #                               #   `kill -USR1 <pid>` logs the summary plus every open connection
 
 # --- Certificates (only for rules that terminate TLS with cert: ...) ------------
-#   cert_path: ./certs          # (default: ./certs) automatic certificates: <cert_path>/<name>/cert.pem,
-#                               #   key.pem; the ACME account key lives in <cert_path>/_account/
-#   ca_root: ./ca               # (default: ./ca) your own CAs for cert: local-ca: <ca_root>/ca001/ca_cert.pem,
-#                               #   ca_key.pem, and <ca_root>/ca001/<name>/cert.pem, key.pem per name issued
+#   cert_root: ./certs          # (default: ./certs) every certificate: your CAs in <cert_root>/ca001/
+#                               #   (the default CA), ca002/, ... with what they issue; the automatic
+#                               #   ones in <cert_root>/acme/<name>/cert.pem, key.pem, account key in acme/_account/.
+#                               #   Was ca_root and cert_path before v1.5.0
 #   expiry_threshold_days: 15   # (default: 15) renew this many days before expiry (or when a third
 #                               #   of the lifetime is left, if that is later); failures retry every 6 h
   acme_agree_tos: true          # false unless set; must be true for cert: auto: you accept the CA's
@@ -201,7 +201,7 @@ logging:
 #                        port 443; no port 80 needed). A domain with * (or $anything_else) also needs cert_domains
 #                        and/or cert_validate_script.
 #             local-ca   your own CA: plain local-ca is ca001, the default CA, made at start-up when
-#                        ca_root has none ("Local CA", 20 years; the log names its ca_cert.pem to install).
+#                        cert_root has none ("Local CA", 20 years; the log names its ca_cert.pem to install).
 #                        local-ca:ca002 and on must exist (generate or import them on the console's
 #                        CAs page). One certificate per name,
 #                        issued the first time a client asks, renewed before it expires (checked every 6 h);

@@ -4,27 +4,27 @@ package main
 // CAs can't or shouldn't issue (internal hosts, no public DNS), or from your
 // organisation's CA, pasted in.
 //
-// Every CA has a folder in ca_root, caNNN; a rule picks one with
+// Every CA has a folder in cert_root, caNNN; a rule picks one with
 // cert = local-ca:ca002 (plain cert = local-ca is ca001):
 //
-//	<ca_root>/ca001/ca_cert.pem        the CA certificate, then its issuers if it
+//	<cert_root>/ca001/ca_cert.pem        the CA certificate, then its issuers if it
 //	                                   is an intermediate
-//	<ca_root>/ca001/ca_key.pem         its private key
-//	<ca_root>/ca001/<name>/cert.pem    one certificate per name (and the chain),
-//	<ca_root>/ca001/<name>/key.pem     issued the first time a client asks for it,
+//	<cert_root>/ca001/ca_key.pem         its private key
+//	<cert_root>/ca001/<name>/cert.pem    one certificate per name (and the chain),
+//	<cert_root>/ca001/<name>/key.pem     issued the first time a client asks for it,
 //	                                   renewed before it expires (checked every 6
 //	                                   hours; a handshake that finds it due renews
 //	                                   it too)
-//	<ca_root>/ca001/ip_<addresses>/    the same, for a client without a host name:
+//	<cert_root>/ca001/ip_<addresses>/    the same, for a client without a host name:
 //	                                   ip_10.0.0.5, ip_fd00--1 (":" can't be in a
 //	                                   file name on Windows), or several addresses
 //	                                   and names in one certificate joined by "+"
-//	<ca_root>/ca001/_archive/<name>-<UTC time>
+//	<cert_root>/ca001/_archive/<name>-<UTC time>
 //	                                   certificates found on disk that this CA did
 //	                                   not issue (or that are broken): moved aside,
 //	                                   never used, deleted after 14 days
 //
-// The default CA, ca001, is made at start-up when ca_root has none; others
+// The default CA, ca001, is made at start-up when cert_root has none; others
 // are made on the console's CAs page (generated, or an existing one pasted
 // in), and a rule naming one that doesn't exist is a config error. A self-signed CA's
 // certificate is renewed before it expires, with the same key and subject, so
@@ -70,7 +70,7 @@ const (
 
 var errLocalCAFull = fmt.Errorf("the local CA already holds %d certificates", maxLocalCerts)
 
-// localCA is one CA folder, <ca_root>/caNNN: its CA and the certificates it
+// localCA is one CA folder, <cert_root>/caNNN: its CA and the certificates it
 // issued.
 type localCA struct {
 	id   string // caNNN
@@ -112,7 +112,7 @@ func (e *localLeaf) current() *tls.Certificate {
 
 // caLocks serialises the operations on one CA (by its folder): making it,
 // renewing it, deleting it, saving its config.yaml. caRootLocks does the same
-// for a ca_root, so two new CAs never take the same id.
+// for a cert_root, so two new CAs never take the same id.
 var caLocks, caRootLocks syncMap[string, *sync.Mutex]
 
 func lockPath(m *syncMap[string, *sync.Mutex], path string) (unlock func()) {
@@ -127,14 +127,14 @@ func lockPath(m *syncMap[string, *sync.Mutex], path string) (unlock func()) {
 // lockCA holds the lock of the CA in dir until the returned func is called.
 func lockCA(dir string) func() { return lockPath(&caLocks, dir) }
 
-// lockCARoot holds the lock of a ca_root (choosing ids, making CA folders).
+// lockCARoot holds the lock of a cert_root (choosing ids, making CA folders).
 func lockCARoot(root string) func() { return lockPath(&caRootLocks, root) }
 
 var caIDPattern = regexp.MustCompile(`^ca[0-9]{3}$`)
 
 // openLocalCA loads the CA in dir. With create, a CA that is not there is
 // made (a rule refers to it); otherwise its absence is an error.
-// defaultCAID is the CA every proxy has: made at start-up when ca_root has
+// defaultCAID is the CA every proxy has: made at start-up when cert_root has
 // none, and kept renewed like any CA. cert: local-ca names it.
 const defaultCAID = "ca001"
 

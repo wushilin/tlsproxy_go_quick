@@ -1,6 +1,6 @@
 package main
 
-// The console's CA page: the certificate authorities in ca_root (caNNN),
+// The console's CA page: the certificate authorities in cert_root (caNNN),
 // made here (generated, or an existing one pasted in), downloaded for
 // clients to trust, and deleted once no rule uses them. A CA's private key
 // never leaves the proxy.
@@ -127,7 +127,7 @@ func (c *Console) caList(w http.ResponseWriter, r *http.Request) {
 func nextCADir(root string) (string, string, error) {
 	_, highest := caIDs(root)
 	if highest >= 999 {
-		return "", "", fmt.Errorf("ca_root already has ca999")
+		return "", "", fmt.Errorf("cert_root already has ca999")
 	}
 	id := fmt.Sprintf("ca%03d", highest+1)
 	return id, filepath.Join(root, id), nil

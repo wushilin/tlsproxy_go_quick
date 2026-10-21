@@ -41,11 +41,11 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 func startProxyConsole(t *testing.T, text, path string, con *ConsoleConfig) *proxyUnderTest {
 	t.Helper()
 	original := text
-	if !strings.Contains(text, "ca_root") { // the run's shared CAs (see testCA.localCA)
+	if !strings.Contains(text, "ca_root") && !strings.Contains(text, "cert_root") { // the run's shared CAs (see testCA.localCA)
 		if isFixture(text) {
-			text = strings.Replace(text, "[global]\n", "[global]\nca_root = "+testCARoot()+"\n", 1)
+			text = strings.Replace(text, "[global]\n", "[global]\ncert_root = "+testCARoot()+"\n", 1)
 		} else {
-			text = strings.Replace(text, "global:\n", "global:\n  ca_root: "+strconv.Quote(testCARoot())+"\n", 1)
+			text = strings.Replace(text, "global:\n", "global:\n  cert_root: "+strconv.Quote(testCARoot())+"\n", 1)
 		}
 	}
 	text = yamlFixture(text)

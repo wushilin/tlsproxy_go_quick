@@ -453,9 +453,9 @@ func TestDocumentedDefaultsMatchCode(t *testing.T) {
 	}
 	asIs, explicit := mustParse(t, string(text)), mustParse(t, strings.Join(lines, "\n"))
 	for _, c := range []*Config{asIs, explicit} {
-		c.sourceHash = "" // file bytes differ; this comparison is about parsed settings
-		if c.CARoot == defaultCARoot {
-			c.CARoot = "./ca" // tests move the default ca_root out of the source tree
+		c.sourceHash = ""              // file bytes differ; this comparison is about parsed settings
+		if c.CARoot == defaultCARoot { // tests move the default cert_root out of the source tree
+			c.CARoot, c.CertPath = "./certs", filepath.Join("./certs", acmeFolder)
 		}
 		for i := range c.Rules {
 			c.Rules[i].Pattern = nil // compiled regexps aren't comparable
@@ -629,7 +629,8 @@ func parserSource() ([]byte, error) {
 // sections, values or retired keys, not options.
 var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, "listeners": true, "routes": true, "rules": true, // sections
 	"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true, "auto": true, "none": true, "v1": true, "v2": true, "": true, // values
-	"proxy_protocol_from": true, // renamed: a load error that names proxy_trust_source
+	"proxy_protocol_from": true,                    // renamed: a load error that names proxy_trust_source
+	"ca_root":             true, "cert_path": true, // renamed cert_root, and gone: load errors that say so
 	// a rule's keys before config.yaml: refused, with the key to use
 	"pattern": true, "target_host": true, "target_port": true, "proxy_version": true,
 	// a user's keys, documented under users

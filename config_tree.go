@@ -214,7 +214,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			item(g, "acme_directory", cfg.AcmeDirectory),
 			item(g, "acme_agree_tos", strconv.FormatBool(cfg.AcmeAgreeTOS)),
 			item(g, "acme_email", map[bool]string{true: "none", false: cfg.AcmeEmail}[cfg.AcmeEmail == ""]),
-			item(g, "cert_path", cfg.CertPath),
+			item(g, "cert_root", cfg.CARoot),
 			item(g, "expiry_threshold_days", strconv.Itoa(cfg.ExpiryThresholdDays)),
 			item(g, "public_ip_address", listOr(cfg.PublicIPs, "not checked")),
 			item(g, "dns_resolvers", listOr(cfg.DNSResolvers, "none (required when the pre-check runs)")),

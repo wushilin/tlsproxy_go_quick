@@ -10,7 +10,7 @@
 #> other.org             => DENY
 
 global:
-  cert_path: /var/db/tlsproxy/certs
+  cert_root: /var/db/tlsproxy/certs
   acme_agree_tos: true
   acme_email: admin@example.com
   public_ip_address: [203.0.113.7]   # only ask the CA for names that really point here

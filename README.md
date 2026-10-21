@@ -220,7 +220,9 @@ file then lists no bind or port for it.)
   `[[basic_auth]]`'s `user` keys are a `users` list, `NONE` and `ANY` are
   `$no_sni` and `$anything_else`, and `;`-separated values are YAML lists.
   The old keys and spellings in a rule are load errors that say what to
-  write. A local CA's own settings file is `config.yaml` too (`ca:` and
+  write. `ca_root` is now `cert_root`, and `cert_path` is gone: the ACME
+  certificates live in `<cert_root>/acme`, so the old folder isn't read and
+  each name is issued again (or move its contents there). A local CA's own settings file is `config.yaml` too (`ca:` and
   `certificates:`); a `config.toml` there is no longer read, and the CAs
   page says so.
 - **The most specific rule wins, wherever it stands in the file.** A hostname
@@ -312,7 +314,7 @@ option is missing from it, from `config.yaml` or from this README):
 
 | section | options |
 |---|---|
-| `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_path` `ca_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
 | `listeners:` (a list) | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `routes:` (a list) | `listener` · `rules` |
 | each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `basic_auth`) |
@@ -664,7 +666,7 @@ certificate). With `cert`, the proxy terminates TLS for that rule:
 
 ```yaml
 global:
-  cert_path: /var/db/tlsproxy/certs
+  cert_root: /var/db/tlsproxy/certs
   acme_agree_tos: true                  # required for cert: auto
   acme_email: admin@example.com         # optional
   public_ip_address: [203.0.113.7]      # only ask the CA for names that point here
@@ -686,7 +688,7 @@ routes:
         upstream_tls: false               # plain HTTP backend
 
       - domain: intranet.example.com
-        cert: local-ca                    # your own CA: ca001 in ca_root, made at start-up
+        cert: local-ca                    # your own CA: ca001 in cert_root, made at start-up
         target: "192.168.1.40:443"
 ```
 
@@ -703,7 +705,7 @@ routes:
 
 | `global` | default | meaning |
 |---|---|---|
-| `cert_path` | ./certs | `<cert_path>/<name>/cert.pem`, `key.pem` (mode 0600); account key in `_account/` |
+| `cert_root` | ./certs | every certificate: `<cert_root>/acme/<name>/cert.pem`, `key.pem` (mode 0600), the ACME account key in `acme/_account/`, and your CAs in `ca001/`, `ca002/`, ... (was `cert_path` and `cert_root` before v1.5.0) |
 | `expiry_threshold_days` | 15 | renew this long before expiry, or when a third of the lifetime is left if that is later (short-lived certificates) |
 | `acme_agree_tos` | false | must be `true` before anything is issued |
 | `acme_email` | (none) | contact for the ACME account |
@@ -719,7 +721,7 @@ DNS, wildcards), the proxy runs CAs of its own, or uses your organisation's:
 
 ```yaml
 global:
-  ca_root: /var/db/tlsproxy/ca          # default ./ca
+  cert_root: /var/db/tlsproxy/certs     # default ./certs
 
 routes:
   - listener: https
@@ -732,13 +734,17 @@ routes:
 ```
 
 ```
-<ca_root>/ca002/ca_cert.pem             the CA (then its issuers, for an intermediate)
-<ca_root>/ca002/ca_key.pem              its private key
-<ca_root>/ca002/config.yaml             its settings (below)
-<ca_root>/ca002/git.lab.internal/       one folder per name it issued: cert.pem, key.pem
-<ca_root>/ca002/ip_203.0.113.5/         the same for clients without a host name (below)
-<ca_root>/ca002/_archive/<name>-<time>  certificates it did not issue, moved aside
+<cert_root>/ca002/ca_cert.pem             the CA (then its issuers, for an intermediate)
+<cert_root>/ca002/ca_key.pem              its private key
+<cert_root>/ca002/config.yaml             its settings (below)
+<cert_root>/ca002/git.lab.internal/       one folder per name it issued: cert.pem, key.pem
+<cert_root>/ca002/ip_203.0.113.5/         the same for clients without a host name (below)
+<cert_root>/ca002/_archive/<name>-<time>  certificates it did not issue, moved aside
+<cert_root>/ca001/...                     the default CA, the same way
+<cert_root>/acme/<name>/                  the automatic certificates (cert: auto), and acme/_account/
 ```
+
+`acme` is never a CA's folder: a CA's id is always `ca` and three digits.
 
 - **Clients without SNI** (they connect by IP address: `https://203.0.113.5/`)
   get a certificate too, with `domain: $no_sni` (or `$anything_else`). Only `local-ca`
@@ -787,9 +793,9 @@ routes:
   checked first: it must be signed by this CA's key, for exactly that name,
   and readable. Anything else is moved to `_archive/<name>-<UTC time>`, a new
   one is issued, and archived folders are deleted after 14 days.
-- **The default CA, `ca001`**, is made at start-up when `ca_root` has none,
+- **The default CA, `ca001`**, is made at start-up when `cert_root` has none,
   whether a rule uses it or not: "Local CA", ECDSA P-256, valid 20 years. The
-  log names its certificate (`<ca_root>/ca001/ca_cert.pem`, to install in the
+  log names its certificate (`<cert_root>/ca001/ca_cert.pem`, to install in the
   clients that should trust it) with its fingerprint. Plain `cert: local-ca`
   names it, so the first local-CA setup needs no other step.
 - **Other CAs** are made on the console's **CAs** page (generate one, or
@@ -800,7 +806,7 @@ routes:
   where it came from and import again). Certificates from an intermediate are
   sent with its chain, without the root, so clients that trust your
   organisation's root accept them. A CA is deleted only when no rule uses it
-  (moved to `<ca_root>/_archive`, removed after 14 days); its id is not
+  (moved to `<cert_root>/_archive`, removed after 14 days); its id is not
   reused.
 - **Each CA's `config.yaml`** is written when the CA is made, read again
   whenever it changes (a broken edit keeps the previous settings, logged and
@@ -846,7 +852,7 @@ routes:
   from disk, issuing, renewing, archiving and writing its files hold that
   name's lock, so racing handshakes for a new name get one certificate
   between them. Making, renewing or deleting a CA and saving its settings
-  hold that CA's lock; choosing a new CA's id holds the `ca_root`'s.
+  hold that CA's lock; choosing a new CA's id holds the `cert_root`'s.
 - **Clients must trust the CA**: download its certificate from the CAs page
   (the private key is never offered) and add it to their trust store.
 - **`cert_domains` says which names get a certificate**: host names or globs
@@ -889,7 +895,7 @@ from "could not find out" (exit 2).
 - **It runs only when a certificate has to be issued or renewed**: the first
   time a client asks for a name that has no certificate, and again each time
   that certificate comes up for renewal. Never per connection, and not after a
-  restart for names whose certificate in `cert_path` is still good.
+  restart for names whose certificate in `<cert_root>/acme` is still good.
 - Connections are never held up by it. The script runs in the background;
   until the certificate is there clients get the placeholder. Up to 4 names
   are handled at once, so the script may run up to 4 times in parallel, but
@@ -927,7 +933,7 @@ How it works:
   names with no or an expired certificate first, then renewals by due date.
   Names don't depend on each other, so a slow one (a hanging validation, a
   slow script) doesn't hold up the rest; one name never has two jobs running
-  at the same time. A failure is retried after 6 hours. Certificates found in `cert_path` are
+  at the same time. A failure is retried after 6 hours. Certificates found in `<cert_root>/acme` are
   reused after a restart.
 - **Three quick tries, then six hours.** Each job is attempted up to 3 times,
   5 seconds apart, to ride out temporary failures. Two kinds of failure are

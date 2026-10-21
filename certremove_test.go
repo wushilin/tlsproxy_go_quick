@@ -36,7 +36,8 @@ func archived(t *testing.T, dir, name string) int {
 func TestRemoveAutoCertificateOnlyWhenSomethingIsWrong(t *testing.T) {
 	certPath := t.TempDir()
 	const name = "a.remove.test"
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_path=%s\nacme_agree_tos=true\n[[host]]\nlistener=default\npattern=%s\ncert=auto\ntarget_host=127.0.0.1\ntarget_port=443\n", certPath, name))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\ncert_root=%s\nacme_agree_tos=true\n[[host]]\nlistener=default\npattern=%s\ncert=auto\ntarget_host=127.0.0.1\ntarget_port=443\n", certPath, name))
+	certPath = cfg.CertPath // <cert_root>/acme
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)

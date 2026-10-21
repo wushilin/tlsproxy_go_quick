@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -424,7 +425,7 @@ func TestCertConfigValidation(t *testing.T) {
 	}
 	r := c.Rules
 	if !r[0].UpstreamTLS || !r[0].UpstreamTLSVerify || r[0].Proxy || r[0].ProxyVersion != 2 || r[1].UpstreamTLS || r[2].Terminates() || len(c.Warnings) != 0 ||
-		fmt.Sprint(c.PublicIPs) != "[203.0.113.7 2001:db8::1]" || c.CertPath != "./certs" || c.ExpiryThresholdDays != 15 {
+		fmt.Sprint(c.PublicIPs) != "[203.0.113.7 2001:db8::1]" || c.CertPath != filepath.Join(defaultCARoot, "acme") || c.ExpiryThresholdDays != 15 {
 		t.Fatalf("%+v\n%+v", r, c)
 	}
 	// An IPv6 public address behind an IPv4-only listener: the CA could not get in.

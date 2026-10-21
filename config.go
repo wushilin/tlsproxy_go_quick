@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -23,9 +24,13 @@ import (
 	"time"
 )
 
-// defaultCARoot is ca_root when the file doesn't say. Tests point it at a
-// folder of their own (the default CA is made there).
-var defaultCARoot = "./ca"
+// defaultCARoot is cert_root when the file doesn't say. Tests point it at
+// a folder of their own (the default CA is made there).
+var defaultCARoot = "./certs"
+
+// acmeFolder is where, in cert_root, the ACME certificates and account
+// live. A CA's id is always ca and three digits, so it can't be one.
+const acmeFolder = "acme"
 
 // MinReloadInterval gates reloads to at most one per this many seconds.
 const MinReloadInterval = 5
@@ -60,8 +65,8 @@ type Config struct {
 	Log               LogConfig     // the [logging] section
 
 	// Certificates (only used by rules with cert = ...).
-	CertPath            string   // where automatic certificates and the ACME account live
-	CARoot              string   // where the local CAs (caNNN) and what they issued live
+	CertPath            string   // <cert_root>/acme: the automatic certificates and the ACME account
+	CARoot              string   // cert_root: the local CAs (caNNN) and what they issued, and acme
 	ExpiryThresholdDays int      // renew this many days before expiry
 	PublicIPs           []string // auto-issue only if the name resolves to one of these
 	DNSResolvers        []string // public resolvers for that check (IP or IP:port); required when it runs
@@ -627,7 +632,6 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 		RememberNonce:      true,
 		Log:                defaultLogConfig(),
 
-		CertPath:            "./certs",
 		CARoot:              defaultCARoot,
 		ExpiryThresholdDays: 15,
 		AcmeDirectory:       LetsEncryptDirectory,
@@ -725,13 +729,15 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 				if httpRedirect, err = parseBool(value); err != nil {
 					err = fail("http_to_https_redirect: %v", err)
 				}
-			case "cert_path":
-				cfg.CertPath = value
-			case "ca_root":
+			case "cert_root":
 				if value == "" {
-					return fail("ca_root must not be empty")
+					return fail("cert_root must not be empty")
 				}
 				cfg.CARoot = value
+			case "ca_root":
+				return fail("ca_root is now called cert_root, and holds the ACME certificates too (in its acme folder): write cert_root: %s", value)
+			case "cert_path":
+				return fail("cert_path is gone: ACME certificates live in <cert_root>/acme (cert_root, default ./certs, also holds your CAs). Leave it out, or set cert_root; certificates in %s are not read, so each name is issued again (or move its contents into <cert_root>/acme)", value)
 			case "expiry_threshold_days":
 				if err = count(&cfg.ExpiryThresholdDays); err == nil && cfg.ExpiryThresholdDays < 1 {
 					err = fail("expiry_threshold_days must be at least 1")
@@ -845,6 +851,7 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 	if err := walkYAML(cfg, text, apply, &raws, &auths); err != nil {
 		return nil, err
 	}
+	cfg.CertPath = filepath.Join(cfg.CARoot, acmeFolder)
 	if err := cfg.placeConsoleListener(console); err != nil {
 		return nil, err
 	}

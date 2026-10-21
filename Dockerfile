@@ -11,7 +11,7 @@
 # CONSOLE_PASSWORD are required (or pass /etc/tlsproxy/config.yaml
 # -noconsole as the command). The folder must be writable: the console saves
 # edits there. /var/lib/tlsproxy is the working directory, so the default
-# cert_path (./certs) and ca_root (./ca) are kept there. Both mounts must be
+# cert_root (./certs: the CAs and the ACME certificates) is kept there. Both mounts must be
 # writable by uid 65532.
 #
 # Built from this repository alone: dependencies are vendored, nothing is

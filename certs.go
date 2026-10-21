@@ -103,7 +103,7 @@ type CertManager struct {
 	mu           sync.RWMutex
 	view         atomic.Pointer[certView]
 	proposals    *ring[string]             // names a handshake asks to put to the script; the worker takes them
-	localCAs     syncMap[string, *localCA] // by dir (<ca_root>/caNNN); handshakes read it without a lock
+	localCAs     syncMap[string, *localCA] // by dir (<cert_root>/caNNN); handshakes read it without a lock
 	localLog     rateLimitedLog
 	localRenewed time.Time // when the local CAs were last gone through
 	cfg          *Config
@@ -321,7 +321,7 @@ func localCAIssues(cfg *Config, id, name string) bool {
 	return false
 }
 
-// LocalCA is the open CA id in cfg's ca_root, nil if no rule uses it.
+// LocalCA is the open CA id in cfg's cert_root, nil if no rule uses it.
 func (m *CertManager) LocalCA(cfg *Config, id string) *localCA {
 	l, _ := m.localCAs.Load(filepath.Join(cfg.CARoot, id))
 	return l
@@ -338,7 +338,7 @@ func (m *CertManager) reloadLocalCAConfigs() {
 // renewLocalCAs is the local CAs' renewal pass, run at start and every
 // localRenewInterval: each CA's own certificate when due, every certificate
 // it issued that is due (and a rule still issues for), and archives over 14
-// days old (each CA's, ca_root's own of deleted CAs, and cert_path's of
+// days old (each CA's, cert_root's own of deleted CAs, and acme's of
 // removed automatic certificates).
 func (m *CertManager) renewLocalCAs() {
 	cfg := m.current().cfg

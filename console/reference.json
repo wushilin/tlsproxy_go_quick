@@ -89,14 +89,9 @@
         "meaning": "Log a one-line summary every N seconds. 0 = never."
       },
       {
-        "key": "cert_path",
+        "key": "cert_root",
         "default": "./certs",
-        "meaning": "Where automatic certificates and the ACME account key are stored."
-      },
-      {
-        "key": "ca_root",
-        "default": "./ca",
-        "meaning": "Where your own CAs live, one folder each (ca001, ca002, ...), with the certificates they issued: see cert: local-ca."
+        "meaning": "Where all certificates live: your CAs, one folder each (ca001, the default CA, made at start-up; ca002, ...) with what they issued, and acme/ with the automatic certificates and the ACME account key. Was ca_root (and cert_path) before v1.5.0."
       },
       {
         "key": "expiry_threshold_days",
@@ -239,7 +234,7 @@
       {
         "key": "cert",
         "default": "(pass through)",
-        "meaning": "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in ca_root, made on the CAs page, issuing one certificate per name on first use)."
+        "meaning": "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in cert_root, made on the CAs page, issuing one certificate per name on first use)."
       },
       {
         "key": "cert_domains",

@@ -24,6 +24,12 @@ Breaking:
   timeouts, speed limits) and route more rules to it. Another listener with
   exactly its bind and port is an error. The console can't stop its own rule
   or listener. Without a console, nothing is reserved.
+- One folder for all certificates: `cert_root` (default `./certs`) holds the
+  CAs (`ca001`, `ca002`, ...) and `acme/` (the automatic certificates and the
+  ACME account). `ca_root` is renamed `cert_root` and `cert_path` is gone,
+  both load errors that say what to write. Certificates in an old
+  `cert_path` aren't read: each name is issued again, or move them into
+  `<cert_root>/acme`.
 - `proxy_protocol_from` is renamed `proxy_trust_source`. The old name is a
   load error that shows what to write.
 - New password hashes (`tlsproxy --hash-password`) are argon2id. Existing

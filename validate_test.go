@@ -173,15 +173,15 @@ func TestCertValidateScriptDecidesIssuanceAndRenewal(t *testing.T) {
 
 func TestCertValidateScriptAdoptsCertificatesOnDisk(t *testing.T) {
 	dir := t.TempDir()
-	script := validateScript(t, dir, "exit 1\n") // would refuse, but must not even be asked
-	certPath := filepath.Join(dir, "certs")
+	script := validateScript(t, dir, "exit 1\n")    // would refuse, but must not even be asked
+	certPath := filepath.Join(dir, "certs", "acme") // in cert_root
 	certPEM, keyPEM := newTestCA(t).issue(t, 12*time.Hour, "kept.s.test")
 	os.MkdirAll(filepath.Join(certPath, "kept.s.test"), 0o700)
 	os.MkdirAll(filepath.Join(certPath, "other.example.org"), 0o700) // not covered by the rule
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "cert.pem"), certPEM, 0o600)
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "key.pem"), keyPEM, 0o600)
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
-		"[[host]]\nlistener=default\npattern=*.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\ntarget_port=443\n", certPath, script))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_root=%s\n"+
+		"[[host]]\nlistener=default\npattern=*.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\ntarget_port=443\n", filepath.Dir(certPath), script))
 	m := NewCertManager()
 	m.issueFunc = func(context.Context, *Config, string) error { t.Error("nothing needs issuing"); return nil }
 	if err := m.Apply(cfg); err != nil {

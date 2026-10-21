@@ -47,8 +47,7 @@ global:
   stats_interval: 300               # log a summary line every N seconds; 0 = never
 
   # Certificates, for rules with cert: ...
-  cert_path: /var/db/tlsproxy/certs       # <cert_path>/<name>/cert.pem + key.pem, account key in _account/
-  ca_root: /var/db/tlsproxy/ca            # your own CAs for cert: local-ca: ca001/, ca002/, ...
+  cert_root: /var/db/tlsproxy/certs       # your CAs (ca001/, ca002/, ...) and acme/<name>/cert.pem + key.pem
   expiry_threshold_days: 20               # renew this long before expiry (or at 1/3 of the lifetime left)
   acme_agree_tos: true                    # required for cert: auto (the console's too)
   acme_email: admin@example.com           # optional account contact
@@ -134,7 +133,7 @@ routes:
         target: "192.168.1.50:8080"
         upstream_tls: false
 
-      # Terminate TLS with your own CA (ca002 in ca_root): a certificate per name,
+      # Terminate TLS with your own CA (ca002 in cert_root): a certificate per name,
       # issued the first time a client asks and renewed automatically. Clients must
       # trust the CA (download it from the console's CAs page).
       - domain: "*.lab.internal"
