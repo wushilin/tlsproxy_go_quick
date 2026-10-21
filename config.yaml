@@ -12,8 +12,9 @@
 # This file is written for a proxy whose web console is NOT on port 443:
 #   tlsproxy config.yaml -noconsole
 #   CONSOLE_PASSWORD=... tlsproxy config.yaml -console_domain admin.example.com -console_port 9443
-# With the console on its default port 443 it owns the listener https: then
-# drop bind and port from https below (see "Web console").
+# With the console on its default port 443 (all addresses) it owns that port,
+# on its listener $console: then name the listener below $console and drop its
+# bind and port (see "Web console").
 
 listeners:
   - name: https                 # (required) unique; what listener: in routes names
@@ -140,8 +141,7 @@ logging:
 #   CONSOLE_PASSWORD='change-me' tlsproxy config.yaml -console_domain admin.example.com -console_port 9443
 #
 # The console is always served over TLS, inside this process, with Secure
-# cookies. It owns a listener: named https when on port 443, console_http on
-# any other. That listener's name, bind and port and the console's rule for
+# cookies. It owns a listener named $console, whatever its port. That listener's name, bind and port and the console's rule for
 # its domain are fixed: this file may list it under listeners by name with
 # other options only (proxy_trust_source, max_connections, timeouts, speed
 # limits; a bind or port there is an error), and routes may add rules to it,
@@ -149,7 +149,7 @@ logging:
 # exactly the console's bind and port is an error. The console can't stop its
 # rule or its listener. Its config editor edits this file only.
 #
-# Without a console nothing is reserved: you name all listeners (even https).
+# Without a console nothing is reserved, and $console is an error.
 
 # --- Listeners -------------------------------------------------------------------
 # Every port is an item of listeners (at least one; bind and port are not

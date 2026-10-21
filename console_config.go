@@ -10,8 +10,8 @@ package main
 //	-console_cert auto                   or $CONSOLE_CERT     (auto | local-ca[:caNNN])
 //	-noconsole                           no console at all
 //
-// The console owns a listener: https on port 443, console_http on any
-// other. Its name, bind, port and the rule for the console's domain are
+// The console owns a listener named $console, whatever its port. Its
+// name, bind, port and the rule for the console's domain are
 // fixed; config.yaml may list it with other options (proxy_trust_source,
 // max_connections, timeouts, speed limits, no bind or port) and route more
 // rules to it. Another listener may not have exactly its bind and port.
@@ -40,12 +40,7 @@ type ConsoleConfig struct {
 }
 
 // ListenerName is the name of the listener the console owns.
-func (c *ConsoleConfig) ListenerName() string {
-	if c.Port == 443 {
-		return "https"
-	}
-	return "console_http"
-}
+func (c *ConsoleConfig) ListenerName() string { return consoleAlias }
 
 // Addrs is every address the console is reached on.
 func (c *ConsoleConfig) Addrs() []string {
@@ -133,34 +128,28 @@ func ConsoleFromSettings(flags map[string]string) (*ConsoleConfig, error) {
 	return c, nil
 }
 
-// consoleAlias names the console's listener in config.yaml whatever its
-// port (https or console_http), so moving the console breaks nothing.
+// consoleAlias is the name of the console's listener, whatever its port,
+// so moving the console breaks nothing. Only the console's listener can
+// have it.
 const consoleAlias = "$console"
 
-// resolveConsoleAlias turns $console in listeners and routes into the
-// console's listener name. Without a console, $console is an error.
+// resolveConsoleAlias checks that $console in listeners and routes has a
+// console to name: without one, it is an error.
 func (cfg *Config) resolveConsoleAlias(con *ConsoleConfig, raws []rawRule) error {
-	name := ""
 	if con != nil {
-		name = con.ListenerName()
+		return nil
 	}
 	none := func(line int) error {
 		return fmt.Errorf("line %d: %s names the web console's listener, and this proxy has no console (-noconsole)", line, consoleAlias)
 	}
-	for i := range cfg.Listeners {
-		if l := &cfg.Listeners[i]; l.Name == consoleAlias {
-			if con == nil {
-				return none(l.Line)
-			}
-			l.Name = name
+	for _, l := range cfg.Listeners {
+		if l.Name == consoleAlias {
+			return none(l.Line)
 		}
 	}
-	for i := range raws {
-		if r := &raws[i]; r.listener != nil && *r.listener == consoleAlias {
-			if con == nil {
-				return none(r.line)
-			}
-			r.listener = &name
+	for _, r := range raws {
+		if r.listener != nil && *r.listener == consoleAlias {
+			return none(r.line)
 		}
 	}
 	return nil
@@ -182,7 +171,7 @@ func (cfg *Config) placeConsoleListener(con *ConsoleConfig) error {
 			continue
 		}
 		if placed {
-			return fmt.Errorf("line %d: the web console's listener (%s, or %s) is listed twice", l.Line, name, consoleAlias)
+			return fmt.Errorf("line %d: the web console's listener (%s) is listed twice", l.Line, name)
 		}
 		if l.bindSet || l.portSet {
 			return fmt.Errorf("line %d: listener %s is the web console's: its bind and port come from the console's settings (%s), so leave them out here; its other options apply", l.Line, name, strings.Join(con.Addrs(), ", "))

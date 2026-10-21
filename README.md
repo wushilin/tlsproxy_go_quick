@@ -51,7 +51,7 @@ mkdir -p /srv/tlsproxy/etc /srv/tlsproxy/data
 ```
 
 **2. A configuration.** A small one to start from. The web console is on
-by default, on port 443 where it owns the listener `https`, so this file
+by default, on port 443, on a listener it owns named `$console`, so this file
 only adds rules to that listener (the full reference, [`config.yaml`](config.yaml),
 is in this repository):
 
@@ -61,7 +61,7 @@ global:
   acme_agree_tos: true          # the console's certificate (cert auto) comes from Let's Encrypt
 
 routes:
-  - listener: https             # the console's listener: name, bind and port come from it
+  - listener: $console          # the console's listener: its bind and port come from the console
     rules:
       # Pass TLS for this name through to a backend, untouched.
       - domain: www.example.com
@@ -101,9 +101,8 @@ add `-noconsole` after the file name to run without a console (then the file
 names its own listeners: `listeners: [{name: https, port: 443}]`). To keep
 the console off the public port, give it one of its own, published on the
 host's loopback only: `-e CONSOLE_PORT=9443 -p 127.0.0.1:9443:9443` (or
-`-console_port 9443` after the file name); its listener is then called
-`console_http`, and `https` in the file is yours to define, with its bind and
-port. Its certificate is still validated by the CA on port 443: the proxy
+`-console_port 9443` after the file name); its listener is still `$console`,
+and port 443 is yours to define, under any name. Its certificate is still validated by the CA on port 443: the proxy
 answers its own ACME challenges on any listener, so `cert: auto` works as
 long as port 443 reaches the proxy (publish it, as above). Otherwise use
 `-console_cert local-ca`: the default CA, `ca001`, always exists.
@@ -116,7 +115,7 @@ the like); elsewhere it does nothing. Without it, SELinux refuses with
 
 ```sh
 docker logs tlsproxy
-#   console: served at https://admin.example.com:443/tlsproxy_quick/ by listener https on 0.0.0.0:443 (cert: auto; password required)
+#   console: served at https://admin.example.com:443/tlsproxy_quick/ by listener $console on 0.0.0.0:443 (cert: auto; password required)
 #   listening on https 0.0.0.0:443 with 1 listener(s), 3 rules (...)
 ```
 
@@ -127,7 +126,7 @@ The console is at `https://admin.example.com/` (it redirects to
 
 ```sh
 # Where would these names go? (a dry run with the same config; the console's
-# settings make its listener https, and any password will do)
+# settings give it its listener $console, and any password will do)
 docker run --rm -e CONSOLE_DOMAIN=admin.example.com -e CONSOLE_PASSWORD=x \
   -v /srv/tlsproxy/etc:/etc/tlsproxy:Z docker.io/wushilin/tlsproxy_go_quick:latest \
   /etc/tlsproxy/config.yaml --test www.example.com other.example admin.example.com
@@ -202,8 +201,8 @@ routes:
 ```
 
 (Run like this, with `-noconsole`, or with the console on another port: on
-port 443 the [web console](#web-console) owns the listener `https`, and the
-file then lists no bind or port for it.)
+port 443 the [web console](#web-console) owns that port on all addresses,
+on its listener `$console`: route these rules to `$console` instead.)
 
 - **The file has five sections**, each optional but `listeners` (unless the
   console provides the only one): `global`, `logging`, `listeners`, `routes`
@@ -346,7 +345,7 @@ Each with its expected routing checked by `go test`:
 | [`08-no-sni`](samples/08-no-sni.yaml) | `domain: $no_sni` for clients without SNI |
 | [`09-tls-termination`](samples/09-tls-termination.yaml) | `cert: auto`, `cert_domains`, plaintext and TLS upstreams, pass-through side by side |
 | [`10-logging`](samples/10-logging.yaml) | rotating, compressed log files |
-| [`11-web-console`](samples/11-web-console.yaml) | the console on port 443 over TLS, with more rules on its listener `https` |
+| [`11-web-console`](samples/11-web-console.yaml) | the console on port 443 over TLS, with more rules on its listener `$console` |
 | [`12-everything`](samples/12-everything.yaml) | every option, annotated |
 | [`13-rule-precedence`](samples/13-rule-precedence.yaml) | literal, wildcard and `$anything_else` rules written broadest first, and which one wins |
 | [`14-listeners`](samples/14-listeners.yaml) | several listeners (a public port and a VPN-only port), each with its own rules and overrides |
@@ -398,12 +397,11 @@ routes:
 - A `routes` item without `listener`, or naming a listener that doesn't
   exist, is a load error.
 - Two listeners cannot share a port on the same (or a wildcard) address.
-- **The web console's listener** (`https` when the console is on port 443,
-  `console_http` on any other) is the console's: list it by name with its
-  other options only, no `bind` or `port`, and route rules to it. Name it
-  `$console` to keep the file working when the console's port changes (the
-  console's editors write it so). See
-  [Web console](#web-console). Without a console nothing is reserved.
+- **The web console's listener** is named `$console`, whatever its port:
+  list it by that name with its other options only, no `bind` or `port`, and
+  route rules to it. See [Web console](#web-console). Without a console,
+  `$console` is an error and nothing is reserved; `https` is an ordinary name
+  either way.
 - **Listeners follow hot reload.** A new listener opens its port, a changed
   `bind` or `port` moves it, and a removed one closes its port, all without a
   restart; connections already open carry on. If a port cannot be opened (in
@@ -1044,15 +1042,14 @@ error that says to use the flags. (Before v1.5.0 the console had a
 certificate for its domain (until there is one, a self-signed placeholder).
 Session cookies are always `Secure`.
 
-**It owns a listener**, named `https` when the console is on port 443 and
-`console_http` on any other port, on its bind and port:
+**It owns a listener**, named `$console` on any port, on its bind and port:
 
 - That listener's name, bind and port, and the console's rule for its
   domain, are fixed. `config.yaml` may list the listener by name with its
   other options only (`proxy_trust_source`, `max_connections`, the timeouts,
   the speed limits; a `bind` or `port` there is an error), and `routes` may
-  add rules to it, so the console and your sites share port 443. `$console`
-  names it whatever its port, so `-console_port` can change without
+  add rules to it, so the console and your sites share port 443. The name is
+  the same whatever the port, so `-console_port` can change without
   editing the file:
 
   ```yaml
@@ -1060,7 +1057,7 @@ Session cookies are always `Secure`.
     acme_agree_tos: true            # for the console's cert: auto
 
   listeners:
-    - name: $console                # the console's (https on 443): no bind, no port
+    - name: $console                # the console's: no bind, no port
       max_connections: 512
 
   routes:
@@ -1078,7 +1075,7 @@ Session cookies are always `Secure`.
   with a different bind on the same port is allowed.
 - The console can't stop its rule or its listener.
 - Without a console (`-noconsole`) nothing is reserved: you define and name
-  all listeners yourself, `https` included.
+  all listeners yourself, and `$console` is an error.
 
 With `cert: auto` the CA validates the console's name on public port 443, so
 a console on another port gets its certificate only if that name also reaches

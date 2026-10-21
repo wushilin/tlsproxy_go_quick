@@ -382,7 +382,7 @@ func TestCertValidateScriptArgs(t *testing.T) {
 	if fmt.Sprint(v) != "[a b ${1}]" {
 		t.Fatalf("read back: %#v", v)
 	}
-	got, _, _, err := editRules(text, 8, map[string]any{"cert_validate_args": v}, false, "")
+	got, _, _, err := editRules(text, 8, map[string]any{"cert_validate_args": v}, false)
 	if err != nil || !strings.Contains(got, `cert_validate_args: ["a b", "${1}"] # note`) {
 		t.Fatalf("written back unchanged: %v\n%s", err, got)
 	}

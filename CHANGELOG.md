@@ -17,8 +17,7 @@ Breaking:
   all addresses, port 443, with `cert: auto`; `-console_bind`,
   `-console_port` and `-console_cert` (or `$CONSOLE_BIND`, `$CONSOLE_PORT`,
   `$CONSOLE_CERT`) change that. It is always served over TLS, inside the
-  proxy, on a listener it owns: `https` on port 443, `console_http` on any
-  other. That listener's name, bind and port, and the rule for the console's
+  proxy, on a listener it owns, named `$console` on any port. That listener's name, bind and port, and the rule for the console's
   domain, can't be changed from `config.yaml`, which may still list the
   listener with other options (`proxy_trust_source`, `max_connections`,
   timeouts, speed limits) and route more rules to it. Another listener with
@@ -72,9 +71,10 @@ New:
   with a sub-tab per issuer (ACME, then each CA): the issuer on top, the
   certificates it issued in a table below; *+ New CA* and *Import CA…* sit
   in the sub-tab bar. The address remembers the sub-tab (`#certs/ca002`).
-- `$console` in `listeners` and `routes` names the console's listener
-  whatever its port (`https` or `console_http`), so moving the console
-  needs no edit; the console writes it so. Without a console it is an error.
+- `$console` in `listeners` and `routes` is the console's listener,
+  whatever its port, so moving the console needs no edit. No other listener
+  can be named so, and without a console it is an error; `https` is an
+  ordinary name.
 - What no rule takes is denied as before; the console now shows that as a
   locked `$anything_else → deny (implicit)` rule on each listener without
   one, with the connections it refused.

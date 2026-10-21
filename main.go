@@ -24,7 +24,7 @@ const usage = `usage: %[1]s [config.yaml] [-noconsole] [-console_domain <name>] 
 
 The web console is on unless -noconsole: it needs -console_domain (or
 $CONSOLE_DOMAIN) and $CONSOLE_PASSWORD. It listens on all addresses, port
-443 (listener https; any other port: console_http), with cert auto.
+443 (on its own listener, $console), with cert auto.
 -console_bind, -console_port and -console_cert (or $CONSOLE_BIND,
 $CONSOLE_PORT, $CONSOLE_CERT) change that. Flags take one dash or two, and
 -flag value or -flag=value.

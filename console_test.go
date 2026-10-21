@@ -243,7 +243,7 @@ func TestConsoleSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Domain != "admin.example.com" || c.Port != 443 || c.Bind != "0.0.0.0" || c.Cert != "auto" || c.ListenerName() != "https" ||
+	if c.Domain != "admin.example.com" || c.Port != 443 || c.Bind != "0.0.0.0" || c.Cert != "auto" || c.ListenerName() != "$console" ||
 		!checkPassword(c.PasswordHash, "s3cret pass") || checkPassword(c.PasswordHash, "other") {
 		t.Fatalf("defaults: %+v", c)
 	}
@@ -253,7 +253,7 @@ func TestConsoleSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Domain != "flag.example.com" || c.Port != 8443 || c.ListenerName() != "console_http" || c.Cert != "local-ca:ca002" || c.Bind != "127.0.0.1; ::1" {
+	if c.Domain != "flag.example.com" || c.Port != 8443 || c.ListenerName() != "$console" || c.Cert != "local-ca:ca002" || c.Bind != "127.0.0.1; ::1" {
 		t.Fatalf("flags and environment: %+v", c)
 	}
 	hash := mustHash(t, "pw")
@@ -564,8 +564,8 @@ func TestConsoleDashboardConnectionsCertsAndLog(t *testing.T) {
 	}
 }
 
-// The console owns a listener: https on 443, console_http otherwise. Its
-// name, bind, port and rule are fixed; config.yaml may give it options and
+// The console owns a listener, $console, on any port. Its name, bind,
+// port and rule are fixed; config.yaml may give it options and
 // rules.
 func TestConsoleListener(t *testing.T) {
 	t.Parallel()
@@ -574,14 +574,14 @@ func TestConsoleListener(t *testing.T) {
 		return LoadConfig("global:\n  acme_agree_tos: true\n"+text, c)
 	}
 	cfg, err := load(`listeners:
-  - name: https
+  - name: $console
     max_connections: 7
     proxy_trust_source: [10.0.0.0/8]
   - name: lan
     bind: [192.168.1.1]
     port: 443
 routes:
-  - listener: https
+  - listener: $console
     rules:
       - domain: "*.example.com"
         action: deny
@@ -589,12 +589,12 @@ routes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := cfg.Listener("https")
+	l := cfg.Listener("$console")
 	if l == nil || !l.Console || l.Port != 443 || l.Bind != "0.0.0.0" || l.MaxConnections != 7 || l.ProxyTrustSource == nil {
 		t.Fatalf("the console's listener, with config.yaml's options: %+v", l)
 	}
 	r := cfg.ConsoleRule()
-	if r == nil || r.Listener != "https" || r.Source != "admin.example.com" || !r.Serves() || r.Line != 0 {
+	if r == nil || r.Listener != "$console" || r.Source != "admin.example.com" || !r.Serves() || r.Line != 0 {
 		t.Fatalf("its rule: %+v", r)
 	}
 	if d := cfg.ForListener(l).Route("admin.example.com"); d.Rule != r {
@@ -603,25 +603,30 @@ routes:
 	if !slices.Contains(cfg.AutoDomains(), "admin.example.com") {
 		t.Fatal("cert: auto issues for its domain")
 	}
-	// Without config.yaml listing it, it is there anyway; another port is console_http.
+	// Without config.yaml listing it, it is there anyway, on any port.
 	other := *con
 	other.Port = 8443
 	cfg, err = load("listeners:\n  - {name: lan, port: 9000}\n", &other)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l := cfg.Listener("console_http"); l == nil || !l.Console || l.Port != 8443 || l.Line != 0 {
-		t.Fatalf("console_http: %+v", cfg.Listeners)
+	if l := cfg.Listener("$console"); l == nil || !l.Console || l.Port != 8443 || l.Line != 0 {
+		t.Fatalf("$console: %+v", cfg.Listeners)
 	}
 	for text, want := range map[string]string{
-		"listeners:\n  - {name: https, port: 443}\n":                                                    "listener https is the web console's",
-		"listeners:\n  - {name: https, bind: [0.0.0.0]}\n":                                              "listener https is the web console's",
-		"listeners:\n  - {name: web, bind: [0.0.0.0], port: 443}\n":                                     "is the web console's listener https, reserved",
-		"routes:\n  - listener: https\n    rules:\n      - {domain: admin.example.com, action: deny}\n": "is the web console's domain",
+		"listeners:\n  - {name: $console, port: 443}\n":                                                    "listener $console is the web console's",
+		"listeners:\n  - {name: $console, bind: [0.0.0.0]}\n":                                              "listener $console is the web console's",
+		"listeners:\n  - {name: $console}\n  - {name: $console}\n":                                         "listed twice",
+		"listeners:\n  - {name: https, bind: [0.0.0.0], port: 443}\n":                                      "is the web console's listener $console, reserved",
+		"routes:\n  - listener: $console\n    rules:\n      - {domain: admin.example.com, action: deny}\n": "is the web console's domain",
 	} {
 		if _, err := load(text, con); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", text, err, want)
 		}
+	}
+	// https is a name like any other: only the console's bind and port are its own.
+	if _, err := load("listeners:\n  - {name: https, port: 8443}\nroutes:\n  - listener: https\n    rules:\n      - {domain: a.test, action: deny}\n", con); err != nil {
+		t.Errorf("a listener named https next to the console: %v", err)
 	}
 	if _, err := LoadConfig("listeners:\n  - {name: lan, port: 9}\n", con); err == nil || !strings.Contains(err.Error(), "acme_agree_tos") {
 		t.Errorf("cert: auto without acme_agree_tos: %v", err)
@@ -674,7 +679,7 @@ func TestConsoleOverTLS(t *testing.T) {
 		for _, r := range lv["rules"].([]any) {
 			if r.(map[string]any)["console"] == true {
 				consoleRule = r.(map[string]any)
-				if lv["name"] != "console_http" || lv["console"] != true {
+				if lv["name"] != "$console" || lv["console"] != true {
 					t.Errorf("the console's listener: %v", lv["name"])
 				}
 			}
@@ -686,16 +691,16 @@ func TestConsoleOverTLS(t *testing.T) {
 	if code, _ := c.post("/api/rules/stop", map[string]string{"key": consoleRule["key"].(string)}); code != 409 {
 		t.Errorf("stopping the console's rule: %d", code)
 	}
-	if code, _ := c.post("/api/listeners/stop", map[string]string{"name": "console_http"}); code != 409 {
+	if code, _ := c.post("/api/listeners/stop", map[string]string{"name": "$console"}); code != 409 {
 		t.Errorf("stopping the console's listener: %d", code)
 	}
 	_, cfg := c.get("/api/config")
-	edit := cfg["text"].(string) + "  - listener: console_http\n    rules:\n      - {domain: console.test, action: deny}\n"
+	edit := cfg["text"].(string) + "  - listener: $console\n    rules:\n      - {domain: console.test, action: deny}\n"
 	if _, out := c.post("/api/config/validate", map[string]string{"text": edit}); out["ok"] == true || !strings.Contains(out["error"].(string), "is the web console's domain") {
 		t.Errorf("a rule for the console's domain: %v", out)
 	}
 	// A rule for another name on the console's listener is fine.
-	edit = cfg["text"].(string) + "  - listener: console_http\n    rules:\n      - {domain: other.test, action: deny}\n"
+	edit = cfg["text"].(string) + "  - listener: $console\n    rules:\n      - {domain: other.test, action: deny}\n"
 	if _, out := c.post("/api/config/save", map[string]any{"text": edit, "baseHash": cfg["hash"], "baseMtime": cfg["mtime"]}); out["ok"] != true {
 		t.Fatalf("a rule on the console's listener: %v", out)
 	}
@@ -707,7 +712,7 @@ func TestConsoleOverTLS(t *testing.T) {
 	// Its options: not in the file yet (line 0), so saving them adds an
 	// entry with its name and the options, never bind or port.
 	_, cfg = c.get("/api/config")
-	vals := map[string]any{"name": "console_http", "max_connections": "77"}
+	vals := map[string]any{"name": "$console", "max_connections": "77"}
 	if _, out := c.post("/api/listeners/save", map[string]any{"line": 0, "baseHash": cfg["hash"], "baseMtime": cfg["mtime"], "values": vals}); out["ok"] != true {
 		t.Fatalf("its options: %v", out)
 	}
@@ -715,13 +720,13 @@ func TestConsoleOverTLS(t *testing.T) {
 	if !strings.Contains(string(written), "- name: $console\n    max_connections: 77\n") {
 		t.Fatalf("written as:\n%s", written)
 	}
-	if l := p.srv.runtime.Load().cfg.Listener("console_http"); l == nil || l.MaxConnections != 77 || !l.Console {
+	if l := p.srv.runtime.Load().cfg.Listener("$console"); l == nil || l.MaxConnections != 77 || !l.Console {
 		t.Fatalf("applied: %+v", l)
 	}
 	_, st = c.get("/api/state")
 	var line float64
 	for _, l := range st["listeners"].([]any) {
-		if l := l.(map[string]any); l["name"] == "console_http" {
+		if l := l.(map[string]any); l["name"] == "$console" {
 			line = l["line"].(float64)
 		}
 	}
@@ -737,22 +742,18 @@ func TestConsoleOverTLS(t *testing.T) {
 func TestConsoleAlias(t *testing.T) {
 	t.Parallel()
 	text := "global:\n  acme_agree_tos: true\nlisteners:\n  - {name: $console, max_connections: 9}\nroutes:\n  - listener: $console\n    rules:\n      - {domain: www.test, action: deny}\n"
-	for port, want := range map[int]string{443: "https", 8443: "console_http"} {
+	for _, port := range []int{443, 8443} {
 		con := &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: port, Domain: "admin.test", Cert: "auto"}
 		c, err := LoadConfig(text, con)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if l := c.Listener(want); l == nil || !l.Console || l.MaxConnections != 9 || c.Rules[0].Listener != want {
+		if l := c.Listener("$console"); l == nil || !l.Console || l.Port != port || l.MaxConnections != 9 || c.Rules[0].Listener != "$console" {
 			t.Fatalf("port %d: %+v", port, c.Listeners)
 		}
 	}
 	if _, err := LoadConfig(text, nil); err == nil || !strings.Contains(err.Error(), "no console") {
 		t.Fatalf("without a console: %v", err)
-	}
-	both := strings.Replace(text, "  - {name: $console, max_connections: 9}\n", "  - {name: $console}\n  - {name: https}\n", 1)
-	if _, err := LoadConfig(both, &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: 443, Domain: "admin.test", Cert: "auto"}); err == nil || !strings.Contains(err.Error(), "listed twice") {
-		t.Fatalf("$console and https both: %v", err)
 	}
 }
 

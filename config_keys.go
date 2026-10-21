@@ -50,7 +50,7 @@ var configReference = []sectionDoc{
 		{"io_model", "", "Legacy: accepted and ignored."},
 		{"worker_threads", "", "Legacy: accepted and ignored."},
 	}},
-	{"listeners", "A list of ports, each with its own rules; at least one is required. Overrides apply to that listener only. With the web console on, its listener (https on 443, console_http otherwise) may be listed by name with options only: no bind or port.", []keyDoc{
+	{"listeners", "A list of ports, each with its own rules; at least one is required. Overrides apply to that listener only. With the web console on, its listener, $console, may be listed by name with options only: no bind or port.", []keyDoc{
 		{"name", "(required)", "Up to 64 letters, digits, spaces and -_@#~()[]<>\"'; unique ignoring case. What listener: in routes refers to."},
 		{"bind", "0.0.0.0", "Listen addresses, a list: 0.0.0.0 all IPv4, :: all IPv6 and IPv4. The web console's exact bind and port are reserved."},
 		{"port", "(required)", "Listen port. Two listeners can't share a port on the same or a wildcard address."},
@@ -63,7 +63,7 @@ var configReference = []sectionDoc{
 		{"max_single_connection_speed", "unlimited", "For each connection on this listener, each direction."},
 	}},
 	{"routes", "A list of items, each the rules of one listener.", []keyDoc{
-		{"listener", "(required)", "The listener its rules belong to: a name from listeners, or the console's https / console_http."},
+		{"listener", "(required)", "The listener its rules belong to: a name from listeners, or $console (the web console's)."},
 		{"rules", "(none)", "Its list of rules (see rules)."},
 	}},
 	{"rules", "Each item of a routes item's rules. The most specific domain wins: $no_sni and literal names, then wildcards (more fixed characters first), then $anything_else. A name no rule matches is denied.", []keyDoc{
@@ -107,7 +107,7 @@ var configReference = []sectionDoc{
 		{"-console_domain", "$CONSOLE_DOMAIN (required)", "The name it is served under, as a rule of its listener that this file can't override."},
 		{"$CONSOLE_PASSWORD", "(required)", "Its password, hashed at start-up, or a hash from tlsproxy --hash-password."},
 		{"-console_bind", "$CONSOLE_BIND, or all addresses", "Where it listens."},
-		{"-console_port", "$CONSOLE_PORT, or 443", "Its port: listener https on 443, console_http on any other. That listener's name, bind and port are reserved."},
+		{"-console_port", "$CONSOLE_PORT, or 443", "Its port. The console's listener is $console on any port; its bind and port are reserved."},
 		{"-console_cert", "$CONSOLE_CERT, or auto", "auto (needs acme_agree_tos: true) or local-ca / local-ca:ca002."},
 	}},
 }

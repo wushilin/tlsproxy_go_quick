@@ -68,11 +68,10 @@ logging:
   compress_after: 2                       # generations above this number are gzip
 
 listeners:
-  # https is the web console's listener (it is on port 443): its name, bind
-  # and port come from the console's settings, so only its other options may
-  # be given here. Its rules below sit next to the console's own rule for
+  # $console is the web console's listener: its bind and port come from the
+  # console's settings, so only its other options may be given here. Its rules below sit next to the console's own rule for
   # console.example.com.
-  - name: https                     # what listener: in routes names
+  - name: $console                  # what listener: in routes names
     proxy_trust_source: [10.0.0.2]  # overrides global for this listener
     max_connections: 2048           # a cap for this listener, on top of the global one
     handshake_timeout: 4            # seconds; overrides global
@@ -88,7 +87,7 @@ listeners:
 
 # ---- rules: the most specific wins (see 13-rule-precedence); no match = deny --
 routes:
-  - listener: https
+  - listener: $console
     rules:
       # Clients without SNI (domain $no_sni), e.g. by IP address:
       # terminated with one certificate from your own CA for these addresses and the

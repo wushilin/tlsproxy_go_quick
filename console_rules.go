@@ -603,7 +603,7 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{"ok": false, "stale": req.Line > 0 && (req.BaseMtime != ver.Mtime || req.BaseHash != ver.Hash)}
-	full, block, at, err := editRules(string(onDisk), req.Line, req.Values, false, c.srv.consoleListener())
+	full, block, at, err := editRules(string(onDisk), req.Line, req.Values, false)
 	if err != nil {
 		resp["error"] = err.Error()
 		writeJSON(w, 200, resp)
@@ -663,7 +663,7 @@ func (c *Console) ruleEdit(w http.ResponseWriter, r *http.Request, del bool) {
 		fail(w, http.StatusConflict, "not saved: the config file changed after this page loaded it. The rules shown are now up to date; try again")
 		return
 	}
-	full, _, _, err := editRules(string(onDisk), req.Line, req.Values, del, c.srv.consoleListener())
+	full, _, _, err := editRules(string(onDisk), req.Line, req.Values, del)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -724,9 +724,6 @@ func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []by
 				}
 			}
 		}
-	}
-	if name, _ := req.Values["name"].(string); req.Line == 0 && name != "" && name == c.srv.consoleListener() {
-		req.Values["name"] = consoleAlias // its options, under a name that survives the console moving
 	}
 	if full, block, _, notes, err = editListeners(string(onDisk), req.Line, req.Values, del); err != nil {
 		return

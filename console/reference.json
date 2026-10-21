@@ -142,7 +142,7 @@
   },
   {
     "section": "listeners",
-    "about": "A list of ports, each with its own rules; at least one is required. Overrides apply to that listener only. With the web console on, its listener (https on 443, console_http otherwise) may be listed by name with options only: no bind or port.",
+    "about": "A list of ports, each with its own rules; at least one is required. Overrides apply to that listener only. With the web console on, its listener, $console, may be listed by name with options only: no bind or port.",
     "keys": [
       {
         "key": "name",
@@ -203,7 +203,7 @@
       {
         "key": "listener",
         "default": "(required)",
-        "meaning": "The listener its rules belong to: a name from listeners, or the console's https / console_http."
+        "meaning": "The listener its rules belong to: a name from listeners, or $console (the web console's)."
       },
       {
         "key": "rules",
@@ -403,7 +403,7 @@
       {
         "key": "-console_port",
         "default": "$CONSOLE_PORT, or 443",
-        "meaning": "Its port: listener https on 443, console_http on any other. That listener's name, bind and port are reserved."
+        "meaning": "Its port. The console's listener is $console on any port; its bind and port are reserved."
       },
       {
         "key": "-console_cert",

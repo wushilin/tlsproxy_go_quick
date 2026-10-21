@@ -33,16 +33,6 @@ var (
 type yamlDoc struct {
 	doc  *yaml.Node
 	root *yaml.Node // the top mapping
-	// console is the console's listener name ("" without a console):
-	// it and $console are the same listener.
-	console string
-}
-
-// sameListener reports whether two listener names in routes are the same
-// listener: equal, or both the console's (its name and $console).
-func (d *yamlDoc) sameListener(a, b string) bool {
-	isConsole := func(x string) bool { return d.console != "" && (x == consoleAlias || x == d.console) }
-	return a == b || isConsole(a) && isConsole(b)
 }
 
 func loadDoc(text string) (*yamlDoc, error) {
@@ -113,15 +103,12 @@ func (d *yamlDoc) ruleAt(line int) (group, rules, rule *yaml.Node) {
 func (d *yamlDoc) groupFor(listener string) *yaml.Node {
 	routes := d.section("routes")
 	for _, g := range routes.Content {
-		if l := mapGet(g, "listener"); l != nil && d.sameListener(l.Value, listener) {
+		if l := mapGet(g, "listener"); l != nil && l.Value == listener {
 			if mapGet(g, "rules") == nil {
 				g.Content = append(g.Content, scalar("rules"), &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"})
 			}
 			return g
 		}
-	}
-	if d.sameListener(listener, consoleAlias) {
-		listener = consoleAlias // a name that survives the console moving
 	}
 	g := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
 		scalar("listener"), scalar(listener), scalar("rules"), {Kind: yaml.SequenceNode, Tag: "!!seq"}}}
@@ -320,8 +307,8 @@ func ruleValues(group, rule *yaml.Node) map[string]any {
 //
 // console is the console's listener name, "" without one: a rule for it goes
 // to the routes item for it or $console, and a new one is written $console.
-func editRules(text string, line int, values map[string]any, del bool, console string) (string, string, int, error) {
-	full, block, rule, d, err := editRule(text, line, values, del, console)
+func editRules(text string, line int, values map[string]any, del bool) (string, string, int, error) {
+	full, block, rule, d, err := editRule(text, line, values, del)
 	if err != nil || rule == nil {
 		return full, "", 0, err
 	}
@@ -361,12 +348,11 @@ func (d *yamlDoc) lineAfter(full string, node *yaml.Node) int {
 	return 0
 }
 
-func editRule(text string, line int, values map[string]any, del bool, console string) (string, string, *yaml.Node, *yamlDoc, error) {
+func editRule(text string, line int, values map[string]any, del bool) (string, string, *yaml.Node, *yamlDoc, error) {
 	d, err := loadDoc(text)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
-	d.console = console
 	listener, _ := values["listener"].(string)
 	values = without(values, "listener")
 	var rule *yaml.Node
@@ -395,7 +381,7 @@ func editRule(text string, line int, values map[string]any, del bool, console st
 			return "", "", nil, nil, err
 		}
 		rule = r
-		if l := mapGet(group, "listener"); listener != "" && (l == nil || !d.sameListener(l.Value, listener)) {
+		if l := mapGet(group, "listener"); listener != "" && (l == nil || l.Value != listener) {
 			// Another listener: the rule moves to that listener's routes item.
 			rules.Content = slices.DeleteFunc(rules.Content, func(n *yaml.Node) bool { return n == r })
 			d.dropEmptyGroup(group)
