@@ -1,0 +1,51 @@
+# Egress allowlist: clients (e.g. IoT VLAN, redirected by a pfSense NAT port
+# forward on :443) may only reach approved sites; the proxy connects to the
+# real hostname (${host} = the whole SNI).
+#
+# A * is one label, so every depth that is allowed is written down: github.com,
+# its direct subdomains, and nothing deeper. That is a feature here: one more
+# label does not slip through an allowlist.
+#
+#> github.com                 => github.com:443
+#> api.github.com             => api.github.com:443
+#> objects.githubusercontent.com => objects.githubusercontent.com:443
+#> a.b.github.com             => DENY
+#> time.apple.com             => time.apple.com:443
+#> deb.debian.org             => deb.debian.org:443
+#> security.debian.org        => security.debian.org:443
+#> evilgithub.com             => DENY
+#> github.com.evil.io         => DENY
+#> tracker.example.net        => DENY
+#> <none>                     => DENY
+
+global:
+  max_connections: 256
+
+listeners:
+  - name: https
+    bind: [0.0.0.0]
+    port: 8443
+
+routes:
+  - listener: https
+    rules:
+      - domain: github.com
+        target: "${host}:443"
+
+      - domain: "*.github.com"
+        target: "${host}:443"
+
+      - domain: "*.githubusercontent.com"
+        target: "${host}:443"
+
+      - domain: time.apple.com
+        target: "${host}:443"
+
+      - domain: deb.debian.org
+        target: "${host}:443"
+
+      - domain: security.debian.org
+        target: "${host}:443"
+
+      - domain: $anything_else
+        action: deny

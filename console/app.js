@@ -25,7 +25,7 @@ const RATE_MAX_SAMPLES = 64;
 const HISTORY_POINTS = 120; // two minutes at one sample per second
 const MAX_ROWS = 200;
 const ARM_MS = 3000;
-const TABS = ["rules", "flows", "certs", "ca", "log", "config"];
+const TABS = ["rules", "flows", "certs", "auth", "log", "config"];
 
 const ui = {
   state: null,
@@ -629,7 +629,7 @@ function connState(c) {
 // addresses), a rule (pattern, target) and a connection (#id, addresses,
 // SNI). Whatever an upper level matches, everything below it matches too.
 const listenerHay = (l) => `${l.name} ${l.bind} ${l.port} ${(l.addrs || []).join(" ")}`.toLowerCase();
-const ruleHay = (r) => `${r.pattern} ${r.target}`.toLowerCase();
+const ruleHay = (r) => `${r.pattern} ${r.target} ${(r.routes || []).join(" ")}`.toLowerCase();
 
 function matches(c, r, l) {
   const f = ui.filter;
@@ -904,9 +904,12 @@ function paint() {
     if (ui.filter) matched += r.connections.filter((c) => matches(c, r, rr.listener)).length;
 
     setText(rr.pattern, r.pattern);
-    rr.pattern.title = r.line ? `[[host]] at line ${r.line} of the config file` : "";
+    rr.pattern.title = r.line ? `The rule at line ${r.line} of the config file` : "";
     setText(rr.target, removed ? "removed" : r.allow ? r.target : "deny");
     rr.target.classList.toggle("deny", !removed && !r.allow);
+    rr.target.title = r.console ? "The web console, set at start-up: it can't be stopped or edited here"
+      : r.implicit ? "No rule matches: denied, as if the listener had $anything_else with action: deny. Add an $anything_else rule to change it."
+      : r.routes ? r.routes.join("\n") : "";
     rr.card.classList.toggle("stopped", out);
 
     rr.status.hidden = !out;
@@ -984,8 +987,8 @@ function paint() {
 function paintListener(lr, l, now, file) {
   setText(lr.lname, l.name);
   setText(lr.listen, `[${listenAddrs(l)}]`);
-  lr.listen.title = l.redirect ? "http_to_https_redirect = true in [global]: port 80 on every address the other listeners use"
-    : `[[listener]] at line ${l.line} of the config file`;
+  lr.listen.title = l.redirect ? "http_to_https_redirect: true in global: port 80 on every address the other listeners use"
+    : l.line ? `The listener at line ${l.line} of the config file` : "The web console's listener, set at start-up";
   const n = l.rules.length;
   setText(lr.target, l.redirect ? "https://" : `${n} rule${n === 1 ? "" : "s"}`);
   const out = l.stopped || !l.running;
@@ -1009,10 +1012,10 @@ function paintListener(lr, l, now, file) {
   setText(lr.err, l.error ? `Could not open the port: ${l.error}` : "");
   lr.redirectChip.hidden = !l.redirect;
   setText(lr.redirectChip, "HTTP → HTTPS redirect");
-  lr.redirectChip.title = "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in [global]; it has no rules and cannot be edited here.";
-  lr.ppf.hidden = !l.proxyProtocolFrom;
-  setText(lr.ppf, `PROXY from ${l.proxyProtocolFrom || ""}`);
-  lr.ppf.title = "Accepts a PROXY protocol header from these addresses (proxy_protocol_from)";
+  lr.redirectChip.title = "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in global; it has no rules and cannot be edited here.";
+  lr.ppf.hidden = !l.proxyTrustSource;
+  setText(lr.ppf, `PROXY from ${l.proxyTrustSource || ""}`);
+  lr.ppf.title = "Accepts a PROXY protocol header from these addresses (proxy_trust_source)";
   lr.maxConns.hidden = !l.maxConnections;
   setText(lr.maxConns, `≤ ${l.maxConnections} conns`);
   lr.maxConns.className = l.maxConnections && l.active >= l.maxConnections ? "chip bad" : "chip limit";
@@ -1024,7 +1027,7 @@ function paintListener(lr, l, now, file) {
     [lr.idle, l.idleTimeout, "idle", "idle_timeout"], [lr.half, l.halfCloseTimeout, "half-close", "half_close_timeout"]]) {
     chip.hidden = v === null || v === undefined;
     setText(chip, `${label} ${v}s`);
-    chip.title = `${key} for this listener (overrides [global])`;
+    chip.title = `${key} for this listener (overrides global)`;
   }
   const vals = l.values || {};
   lr.limTotal.hidden = !l.aggSpeed;
@@ -1053,7 +1056,9 @@ function paintListener(lr, l, now, file) {
   lr.editBtn.disabled = busy || !editable;
   lr.editBtn.title = !editable ? "Editing is off: see the note above"
     : "Edit this listener in the config file";
-  lr.delBtn.hidden = !!l.redirect;
+  // The console's listener can't be stopped or deleted; Edit changes its options only.
+  lr.toggleBtn.hidden = !!l.console;
+  lr.delBtn.hidden = !!l.redirect || !!l.console; // the console's listener stays
   lr.addBtn.hidden = lr.editBtn.hidden = !!l.redirect;
   lr.delBtn.disabled = busy || !editable;
   lr.delBtn.title = editable ? "Delete this listener from the config file (only once no rule uses it)" : "Editing is off: see the note above";
@@ -1194,9 +1199,11 @@ function paintRuleActions(rr, r, file) {
   const removed = r.kind === "removed" || r.kind === "redirect"; // nothing to stop, edit or delete
   const editable = !!(file && file.editable && r.line > 0);
   const busy = pendingRules.has(r.key);
-  rr.toggleBtn.hidden = removed;
-  rr.editBtn.hidden = removed;
-  rr.delBtn.hidden = removed;
+  // The console's own rule is set at start-up: nothing here may stop or change it.
+  const locked = removed || !!r.console || !!r.implicit;
+  rr.toggleBtn.hidden = locked;
+  rr.editBtn.hidden = locked;
+  rr.delBtn.hidden = locked;
   rr.toggleBtn.disabled = busy || (!r.running && !r.stopped);
   if (!busy) setText(rr.toggleLabel, r.stopped ? "Start" : "Stop");
   rr.toggleBtn.className = r.stopped ? "act start" : "act";
@@ -1345,7 +1352,7 @@ function dryRun(path, body) {
 // Three steps over one form: what to match, where to send it, options. Only
 // the fields that apply are shown. Every change runs quick checks here and,
 // 300 ms later, a dry run on the server (api/rules/validate) that returns the
-// exact [[host]] block that would be written and where sample names route.
+// exact rule that would be written and where sample names route.
 // Values go to the server as raw strings; "" removes the key from the file.
 
 const ed = {
@@ -1361,15 +1368,27 @@ const ed = {
   tryTouched: false,
 };
 
-const BOOL_KEYS = new Set(["proxy", "upstream_tls", "upstream_tls_verify"]);
-const DEFAULTS = { action: "allow", proxy: "false", proxy_version: "2", upstream_tls: "true", upstream_tls_verify: "true" };
+const BOOL_KEYS = new Set(["upstream_tls", "upstream_tls_verify"]);
+const DEFAULTS = { action: "allow", proxy: "none", upstream_tls: "true", upstream_tls_verify: "true" };
+
+// listText shows a YAML list (or a single value) in one text field;
+// textList reads it back. Lists are separated by commas, semicolons or spaces.
+const listText = (v) => Array.isArray(v) ? v.join(", ") : String(v ?? "");
+const textList = (s) => String(s ?? "").split(/[\s,;]+/).filter(Boolean);
+// splitTarget reads host:port, an IPv6 host in brackets.
+function splitTarget(t) {
+  const s = String(t ?? "").trim();
+  const m = /^\[([^\]]*)\]:(.*)$/.exec(s) || /^(.*):([^:]*)$/.exec(s);
+  return m ? [m[1], m[2]] : [s, ""];
+}
+const joinTarget = (host, port) => (host.includes(":") ? `[${host}]` : host) + ":" + port;
 const LISTENER_NAME_RE = /^[A-Za-z0-9_@#~()[\]<>"'-](?:[A-Za-z0-9 _@#~()[\]<>"'-]{0,62}[A-Za-z0-9_@#~()[\]<>"'-])?$/; // as config.go
 const RATE_RE = /^\s*\d+(\.\d+)?\s*(bit|bps|[kmg](bit|bps)|[kmg]?b|[kmg]ib)\s*(\/s)?\s*$/i;
 
 // normal is a value's meaning, so a file's own spelling ("yes", "Allow") is
 // kept when the user did not change what it means.
 function normal(key, v) {
-  let s = String(v ?? "").trim();
+  let s = Array.isArray(v) ? v.join(", ") : String(v ?? "").trim();
   if (BOOL_KEYS.has(key)) {
     const l = s.toLowerCase();
     s = ["true", "yes", "on"].includes(l) ? "true" : ["false", "no", "off"].includes(l) ? "false" : l;
@@ -1395,38 +1414,179 @@ function setRadio(name, v) {
 // "" so they leave the file.
 function formValues() {
   const allow = radio("f-action") !== "deny";
-  const term = allow && radio("f-tls") === "terminate";
+  const serve = radio("f-action") === "serve"; // serve entries: no target, nothing upstream
+  const term = serve || (allow && radio("f-tls") === "terminate");
   const src = radio("f-certsrc");
   const auto = term && src === "auto";
   const local = term && src === "local";
-  const upTLS = term && $("f-upstream-tls").value !== "false";
-  const proxy = allow && $("f-proxy").checked;
+  const upTLS = term && !serve && $("f-upstream-tls").value !== "false";
+  const proxy = allow && !serve && $("f-proxy").checked;
+  const host = val("f-target-host"), port = val("f-target-port");
   const v = {
     listener: $("f-listener").value,
-    pattern: val("f-pattern"),
+    domain: val("f-pattern"),
     action: allow ? "allow" : "deny",
-    target_host: allow ? val("f-target-host") : null,
-    target_port: allow ? val("f-target-port") : null,
+    target: allow && !serve && (host || port) ? joinTarget(host, port) : null,
+    serve: serve ? readServe() : null,
     max_aggregated_speed: allow ? val("f-agg") : null,
     max_single_connection_speed: allow ? val("f-conn") : null,
-    proxy: allow ? (proxy ? "true" : "") : null,
-    proxy_version: proxy ? $("f-proxy-version").value : null,
+    proxy: proxy ? "v" + $("f-proxy-version").value : null,
     cert: term ? (local ? localCAValue($("f-cert-ca").value) : "auto") : null,
-    cert_domains: auto || local ? val("f-cert-domains") : null,
+    cert_domains: auto || local ? textList(val("f-cert-domains")) : null,
     cert_validate_script: auto ? val("f-cert-script") : null,
-    cert_validate_args: auto && val("f-cert-script") ? val("f-cert-args") : null,
-    upstream_tls: term ? $("f-upstream-tls").value : null,
+    cert_validate_args: auto && val("f-cert-script") ? argsList(val("f-cert-args")) : null,
+    upstream_tls: term && !serve ? $("f-upstream-tls").value : null,
     upstream_tls_verify: upTLS ? $("f-upstream-verify").value : null,
     upstream_sni: upTLS ? val("f-upstream-sni") : null,
   };
   const orig = ed.rule ? ed.rule.values : {};
   for (const k of Object.keys(v)) {
-    if (v[k] === null) { v[k] = ""; continue; }
+    if (v[k] === null) { v[k] = k === "serve" || k === "cert_domains" ? [] : ""; }
+    if (k === "serve" || k === "cert_domains" || k === "cert_validate_args") {
+      if (JSON.stringify(v[k]) === JSON.stringify(orig[k] ?? [])) delete v[k]; // unchanged: left as written
+      continue;
+    }
     const o = orig[k] ?? "";
     if (normal(k, o) === normal(k, v[k])) v[k] = o;
   }
   return v;
 }
+
+// argsList reads the script arguments field: a list like ["--customer", "${1}"],
+// or words separated by spaces.
+function argsList(s) {
+  if (!s) return [];
+  try { const a = JSON.parse(s); if (Array.isArray(a)) return a.map(String); } catch (_) {}
+  return s.split(/\s+/).filter(Boolean);
+}
+
+// ---- serve entries: one row each ----
+
+const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth"];
+
+function serveRow(e) {
+  const row = el("div", "serve-row");
+  const field = (label, input, cls, hint) => {
+    const l = el("label", "field" + (cls ? " " + cls : ""));
+    l.append(el("span", "", label), input);
+    if (hint) l.appendChild(el("em", "hint", hint));
+    return l;
+  };
+  const text = (cls, value, placeholder) => {
+    const i = el("input");
+    i.type = "text"; i.className = cls; i.value = value || ""; i.placeholder = placeholder || ""; i.spellcheck = false;
+    return i;
+  };
+  const check = (cls, label, on) => {
+    const l = el("label", "check");
+    const c = el("input");
+    c.type = "checkbox"; c.className = cls; c.checked = on;
+    l.append(c, document.createTextNode(" " + label));
+    return [l, c];
+  };
+
+  // Head: what it is, and Remove.
+  const head = el("div", "serve-head");
+  const type = el("select", "s-type");
+  for (const [v, t] of [["reverse_proxy", "Reverse proxy"], ["static_content", "Static files"]]) {
+    const o = el("option", "", t); o.value = v; type.appendChild(o);
+  }
+  type.value = e.type === "static_content" ? "static_content" : "reverse_proxy";
+  type.setAttribute("aria-label", "Type");
+  const summary = el("span", "serve-sum mono");
+  const remove = el("button", "btn btn-quiet", "Remove");
+  remove.type = "button";
+  remove.addEventListener("click", () => { row.remove(); onFormChange(); });
+  head.append(type, summary, remove);
+
+  // Where: the prefix, and what serves it.
+  const prefix = text("s-prefix", e.prefix, "/");
+  const where = text("s-where", e.type === "static_content" ? e.base_dir : e.target, "");
+  const whereField = field("", where, "grow");
+  const main = el("div", "serve-grid");
+  main.append(field("Path prefix", prefix, "", "the longest matching prefix serves a request"), whereField);
+
+  // Reverse proxy options, one per row.
+  const opts = el("div", "serve-opts");
+  const host = text("s-host", e.force_host, "unset: the Host the client sent");
+  const hostField = field("Host header sent to the target", host, "wide");
+  const [stripL, strip] = check("s-strip", "Strip the prefix before forwarding", String(e.strip_prefix) === "true");
+  const [verifyL, verify] = check("s-verify", "Verify the target's certificate (https:// targets)", String(e.tls_verify) !== "false");
+  opts.append(hostField, stripL, verifyL);
+
+  // Static options.
+  const sopts = el("div", "serve-opts");
+  const [listL] = check("s-list", "Directory listing: list a folder that has no index.html or index.htm (otherwise 403)", String(e.directory_listing) === "true");
+  sopts.appendChild(listL);
+
+  // Access.
+  const auth = el("select", "s-auth");
+  const groups = (ui.state && ui.state.authGroups) || [];
+  for (const g of ["", ...groups, ...(e.basic_auth && !groups.includes(e.basic_auth) ? [e.basic_auth] : [])]) {
+    const o = el("option", "", g === "" ? "Anyone (no basic auth)" : groups.includes(g) ? `Users of ${g}` : `${g} (no such group)`);
+    o.value = g;
+    auth.appendChild(o);
+  }
+  auth.value = e.basic_auth || "";
+  const authField = field("Who may use it", auth, "", groups.length ? "" : "no basic_auth group yet: add one on the Basic auth page");
+
+  row.append(head, main, opts, sopts, authField);
+  const sync = () => {
+    const proxy = type.value === "reverse_proxy";
+    whereField.firstChild.textContent = proxy ? "Target URL" : "Folder";
+    where.placeholder = proxy ? "http://127.0.0.1:8080" : "/opt/www/site";
+    opts.hidden = !proxy;
+    sopts.hidden = proxy;
+    verifyL.hidden = !/^https:/i.test(where.value.trim());
+    // An example request and where it goes: a static folder, like a proxy
+    // with strip_prefix, gets the path after the prefix.
+    const path = (prefix.value.trim() || "/").replace(/\/$/, "") + "/x";
+    const sent = !proxy || strip.checked ? "/x" : path;
+    summary.textContent = `${path} → ${(where.value.trim() || "…").replace(/\/$/, "")}${sent}`;
+  };
+  for (const n of [type, prefix, where, strip]) n.addEventListener(n.tagName === "SELECT" || n.type === "checkbox" ? "change" : "input", sync);
+  sync();
+  return row;
+}
+
+// byPrefix orders serve entries as a request tries them: the longest prefix
+// first, / last (equal lengths keep their order).
+const byPrefix = (list) => list.slice().sort((a, b) => String(b.prefix || "").length - String(a.prefix || "").length);
+
+// readServe is the entries as the config file has them, in the order they
+// are tried: only what is set.
+function readServe() {
+  return byPrefix([...document.querySelectorAll("#f-serve-rows .serve-row")].map((row) => {
+    const q = (c) => row.querySelector(c).value.trim();
+    const e = { type: q(".s-type"), prefix: q(".s-prefix") };
+    if (e.type === "static_content") {
+      e.base_dir = q(".s-where");
+      if (row.querySelector(".s-list").checked) e.directory_listing = "true";
+    }
+    else {
+      e.target = q(".s-where");
+      if (row.querySelector(".s-strip").checked) e.strip_prefix = "true";
+      if (q(".s-host")) e.force_host = q(".s-host");
+      if (!row.querySelector(".s-verify").checked) e.tls_verify = "false";
+    }
+    if (q(".s-auth")) e.basic_auth = q(".s-auth");
+    for (const k of Object.keys(e)) if (e[k] === "") delete e[k];
+    return e;
+  }));
+}
+
+// sameServe reads an entry from the file the way readServe writes one, so an
+// unchanged list compares equal.
+function sameServe(e) {
+  const out = {};
+  for (const k of SERVE_KEYS) if (e[k] !== undefined && e[k] !== "") out[k] = String(e[k]);
+  return out;
+}
+
+$("f-serve-add").addEventListener("click", () => {
+  $("f-serve-rows").appendChild(serveRow({ type: "reverse_proxy", prefix: "/" }));
+  onFormChange();
+});
 
 // localCAOf is the CA a cert value names ("local-ca" is ca001), "" if none.
 function localCAOf(cert) {
@@ -1437,13 +1597,13 @@ function localCAOf(cert) {
 function localCAValue(id) { return id === "ca001" ? "local-ca" : `local-ca:${id}`; }
 
 // fillCASelect lists the CAs that exist for the rule editor. A new one is
-// made on the CAs page, never from here.
+// made on the Certificates page, never from here.
 function fillCASelect(selected) {
   const sel = $("f-cert-ca");
   return getJSON("api/cas").then((d) => {
     sel.replaceChildren();
     if (!d.cas.length) {
-      const o = el("option", "", "no CA yet: make one on the CAs page");
+      const o = el("option", "", "no CA yet: make one on the Certificates page");
       o.value = "";
       sel.appendChild(o);
     }
@@ -1470,23 +1630,28 @@ function boolSelect(raw) {
 
 function prefill(values) {
   const v = values || {};
-  $("f-pattern").value = v.pattern || "";
-  setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : "allow");
-  $("f-target-host").value = v.target_host || "";
-  $("f-target-port").value = v.target_port || "";
+  $("f-pattern").value = v.domain || "";
+  // In the order a request tries them: the longest prefix first, / last.
+  const serve = byPrefix(Array.isArray(v.serve) ? v.serve : []);
+  setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : serve.length ? "serve" : "allow");
+  $("f-serve-rows").replaceChildren(...serve.map(serveRow));
+  if (ed.rule) ed.rule.values = { ...ed.rule.values, serve: serve.map(sameServe) };
+  const [host, port] = splitTarget(v.target);
+  $("f-target-host").value = host;
+  $("f-target-port").value = port;
   const cert = (v.cert || "").trim();
   setRadio("f-tls", cert ? "terminate" : "pass");
   const ca = localCAOf(cert);
   setRadio("f-certsrc", ca ? "local" : "auto");
   ed.ca = ca || "";
-  $("f-cert-domains").value = v.cert_domains || "";
+  $("f-cert-domains").value = listText(v.cert_domains);
   $("f-cert-script").value = v.cert_validate_script || "";
-  $("f-cert-args").value = v.cert_validate_args || "";
+  $("f-cert-args").value = Array.isArray(v.cert_validate_args) ? JSON.stringify(v.cert_validate_args) : v.cert_validate_args || "";
   $("f-upstream-tls").value = boolSelect(v.upstream_tls);
   $("f-upstream-verify").value = boolSelect(v.upstream_tls_verify);
   $("f-upstream-sni").value = v.upstream_sni || "";
-  $("f-proxy").checked = normal("proxy", v.proxy) === "true";
-  $("f-proxy-version").value = normal("proxy_version", v.proxy_version) === "1" ? "1" : "2";
+  $("f-proxy").checked = /^v[12]$/i.test(v.proxy || "");
+  $("f-proxy-version").value = /^v1$/i.test(v.proxy || "") ? "1" : "2";
   $("f-agg").value = v.max_aggregated_speed || "";
   $("f-conn").value = v.max_single_connection_speed || "";
 }
@@ -1495,8 +1660,10 @@ function prefill(values) {
 function patternInfo(p) {
   const t = p.trim();
   if (!t) return { kind: "", text: "Type the host name clients ask for, or pick an example." };
-  if (/^none$/i.test(t)) return { kind: "no SNI", text: "Only clients that send no server name (old clients, connections to an IP address). Exact names are checked before it, wildcards after." };
-  if (/^any$/i.test(t) || /^\^?\.\*\$?$/.test(t)) return { kind: "catch-all", text: "Everything, with or without a name: used only when no other rule matches." };
+  if (t === "$no_sni") return { kind: "no SNI", text: "Only clients that send no server name (old clients, connections to an IP address). Exact names are checked before it, wildcards after." };
+  if (t === "$anything_else") return { kind: "catch-all", text: "Everything, with or without a name: used only when no other rule matches." };
+  if (/^(none|any|\^?\.\*\$?)$/i.test(t)) return { kind: "", bad: true, text: `Write ${/^none$/i.test(t) ? "$no_sni" : "$anything_else"} instead.` };
+  if (t.startsWith("$")) return { kind: "", bad: true, text: "The special domains are $no_sni and $anything_else." };
   const name = t.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\./g, ".").toLowerCase();
   if (!/^[a-z0-9_*.-]+$/.test(name) || name.startsWith(".") || name.endsWith(".") || name.includes("..")) {
     return { kind: "", bad: true, text: "Not a host name: use letters, digits, hyphens and dots, with * for one label or part of one. Regular expressions are not supported." };
@@ -1522,8 +1689,8 @@ function patternRegex(p) {
 function sampleNames(p) {
   const t = p.trim();
   if (!t) return "";
-  if (/^none$/i.test(t)) return "<none>";
-  if (/^any$/i.test(t) || /^\^?\.\*\$?$/.test(t)) return "example.org <none>";
+  if (t === "$no_sni") return "<none>";
+  if (t === "$anything_else") return "example.org <none>";
   return t.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\./g, ".").replace(/\*/g, "www").toLowerCase();
 }
 
@@ -1536,9 +1703,18 @@ function quickChecks(v) {
   const out = [];
   const info = patternInfo($("f-pattern").value);
   if (!$("f-listener").value) out.push([0, "Choose the listener this rule belongs to."]);
-  if (!v.pattern) out.push([0, "The pattern is required."]);
+  if (!v.domain) out.push([0, "The domain is required."]);
   else if (info.bad) out.push([0, info.text]);
-  if (v.action !== "deny") {
+  if (radio("f-action") === "serve") {
+    const entries = readServe();
+    if (!entries.length) out.push([1, "Add at least one entry: a reverse proxy or static files."]);
+    entries.forEach((e, i) => {
+      if (!e.prefix || !e.prefix.startsWith("/")) out.push([1, `Entry ${i + 1}: the prefix is a path starting with /.`]);
+      else if (e.type === "reverse_proxy" && !e.target) out.push([1, `Entry ${i + 1}: a reverse proxy needs its target, http://host:port.`]);
+      else if (e.type === "static_content" && !e.base_dir) out.push([1, `Entry ${i + 1}: static files need their folder.`]);
+    });
+    if (radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the Certificates page first."]);
+  } else if (v.action !== "deny") {
     const host = val("f-target-host");
     if (!host) out.push([1, "A target host is required for an allow rule."]);
     const bare = /\$(?!\{)(\d*)/.exec(host);
@@ -1549,7 +1725,7 @@ function quickChecks(v) {
     const port = val("f-target-port");
     if (!port) out.push([1, "A target port is required for an allow rule."]);
     else if ((!/^\d+$/.test(port) || +port < 1 || +port > 65535)) out.push([1, "The target port must be a number from 1 to 65535."]);
-    if (radio("f-tls") === "terminate" && radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the CAs page first."]);
+    if (radio("f-tls") === "terminate" && radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the Certificates page first."]);
     for (const [id, label] of [["f-agg", "aggregated speed"], ["f-conn", "per-connection speed"]]) {
       const s = val(id);
       if (s && !RATE_RE.test(s)) out.push([2, `The ${label} needs a number and a unit, like 1Gbit or 15MiB/s.`]);
@@ -1569,14 +1745,16 @@ function syncWizard() {
   $("pattern-help").classList.toggle("bad", !!info.bad);
 
   const allow = radio("f-action") !== "deny";
-  $("target-fields").hidden = !allow;
+  const serve = radio("f-action") === "serve";
+  $("target-fields").hidden = !allow || serve;
+  $("routes-fields").hidden = !serve;
   $("deny-help").hidden = allow;
   $("options-allow").hidden = !allow;
   $("options-deny").hidden = allow;
 
   // ${1}, ${2}, ... in the target: explain them with a sample name.
   const cap = $("capture-help");
-  cap.hidden = !allow || info.kind !== "wildcard";
+  cap.hidden = !allow || serve || info.kind !== "wildcard";
   if (!cap.hidden) {
     const sample = tryNames().find((n) => n) || sampleNames(pattern);
     const re = patternRegex(pattern);
@@ -1594,9 +1772,13 @@ function syncWizard() {
     }
   }
 
+  if (serve) setRadio("f-tls", "terminate"); // serving needs the requests decrypted
+  for (const r of document.querySelectorAll('input[name="f-tls"]')) r.disabled = serve && r.value === "pass";
   const term = radio("f-tls") === "terminate";
   $("tls-fields").hidden = !term;
-  setText($("tls-help"), term
+  setText($("tls-help"), serve
+    ? "The proxy decrypts here with its own certificate and answers the requests itself, by the service rules."
+    : term
     ? "The proxy decrypts here with its own certificate and opens a new connection to the target."
     : "The encrypted stream goes to the target untouched; the target presents its own certificate.");
   const src = radio("f-certsrc");
@@ -1604,7 +1786,9 @@ function syncWizard() {
   for (const n of document.querySelectorAll(".auto-only")) n.hidden = src !== "auto";
   setText($("cert-names-hint"), src === "local" ? "optional: names or globs (*.dev.abc.com, *.abc.com); any other name is refused" : "optional");
   const upTLS = $("f-upstream-tls").value !== "false";
-  for (const n of document.querySelectorAll(".upstream-tls-only")) n.hidden = !upTLS;
+  for (const n of document.querySelectorAll(".upstream-tls-only")) n.hidden = !upTLS || serve;
+  $("f-upstream-tls").closest(".field").hidden = serve;
+  $("proxy-group").hidden = serve;
   $("proxy-version-field").hidden = !$("f-proxy").checked;
 }
 
@@ -1717,7 +1901,7 @@ function openEditor(r, listenerName) {
   setText($("editor-title"), r ? `Edit ${r.pattern}` : "Add rule");
   setText($("editor-save"), r ? "Save" : "Add rule");
   setText($("editor-hint"), `Saved to ${s.file.path} (previous version kept as a backup) and applied at once.` +
-    (r ? ` This is the [[host]] at line ${r.line}.` : " A new rule goes after the last one."));
+    (r ? ` This is the rule at line ${r.line}.` : " A new rule goes after the last one of its listener."));
   setText($("preview-title"), `Will be written to ${s.file.path}`);
   prefill(r ? r.values : null);
   fillCASelect(ed.ca);
@@ -1767,7 +1951,7 @@ $("editor-form").addEventListener("submit", (ev) => {
     .then((d) => {
       $("editor").close();
       if (d.unchanged) toast("Nothing to save: the rule is as it was.");
-      else toast(was ? `Saved ${values.pattern}` : `Added ${values.pattern}${d.backup ? ` (previous file kept as ${d.backup})` : ""}`);
+      else toast(was ? `Saved ${values.domain}` : `Added ${values.domain}${d.backup ? ` (previous file kept as ${d.backup})` : ""}`);
       for (const w of d.warnings || []) toast(`Warning: ${w}`);
       saveProblems(d);
       if (d.restartNeeded) toast("bind/port changed: that part needs a restart.");
@@ -1782,25 +1966,29 @@ $("editor-form").addEventListener("submit", (ev) => {
 
 // ---------- listener wizard ----------
 //
-// Two steps: name and address, then optional overrides of [global]. Same
+// Two steps: name and address, then optional overrides of global. Same
 // flow as the rule wizard: quick checks here, a dry run on the server 300 ms
-// after typing stops, the [[listener]] block and the extra changes the save
+// after typing stops, the listener as written and the extra changes the save
 // will make (notes) shown before Save is enabled.
 
 const led = { l: null, base: null, step: 0, seq: 0, timer: 0, result: null, pending: false, conflict: false, saving: false };
 const L_FIELDS = {
-  name: "l-name", bind: "l-bind", port: "l-port", proxy_protocol_from: "l-ppf", max_connections: "l-maxconn",
+  name: "l-name", bind: "l-bind", port: "l-port", proxy_trust_source: "l-ppf", max_connections: "l-maxconn",
   handshake_timeout: "l-hs", idle_timeout: "l-idle", half_close_timeout: "l-half",
   max_aggregated_speed: "l-agg", max_single_connection_speed: "l-conn",
 };
+
+const L_LISTS = new Set(["bind", "proxy_trust_source"]); // YAML lists
 
 function lFormValues() {
   const orig = led.l ? led.l.values || {} : {};
   const v = {};
   for (const [k, id] of Object.entries(L_FIELDS)) {
+    if (led.l && led.l.console && (k === "bind" || k === "port")) continue; // not the file's to set
     const now = val(id);
     const o = orig[k] ?? "";
-    v[k] = now === String(o).trim() ? o : now; // keep the file's spelling when unchanged
+    if (now === listText(o).trim()) v[k] = o; // keep the file's spelling when unchanged
+    else v[k] = L_LISTS.has(k) ? textList(now) : now;
   }
   return v;
 }
@@ -1811,7 +1999,8 @@ function lQuickChecks(v) {
   if (!v.name) out.push([0, "The name is required."]);
   else if (!LISTENER_NAME_RE.test(v.name)) out.push([0, "The name may use letters, digits, spaces and - _ @ # ~ ( ) [ ] < > \" ' (up to 64, no space at either end)."]);
   else if (others.includes(v.name.toLowerCase())) out.push([0, `There is already a listener called ${v.name}.`]);
-  if (!v.port) out.push([0, "The port is required."]);
+  if (led.l && led.l.console) { /* its bind and port are the console's */ }
+  else if (!v.port) out.push([0, "The port is required."]);
   else if (!/^\d+$/.test(v.port) || +v.port < 1 || +v.port > 65535) out.push([0, "The port must be a number from 1 to 65535."]);
   for (const [k, label] of [["max_connections", "Max connections"], ["handshake_timeout", "The handshake timeout"],
     ["idle_timeout", "The idle timeout"], ["half_close_timeout", "The half-close timeout"]]) {
@@ -1897,14 +2086,22 @@ function openListenerEditor(l) {
   const start = {
     name: v.name ?? (l ? l.name : ""), bind: v.bind ?? (l ? l.bind : ""), port: v.port ?? (l ? String(l.port) : ""),
   };
-  for (const [k, id] of Object.entries(L_FIELDS)) $(id).value = start[k] ?? v[k] ?? "";
+  for (const [k, id] of Object.entries(L_FIELDS)) $(id).value = listText(start[k] ?? v[k] ?? "");
+  // The console's listener: its name, bind and port come from the console's
+  // settings; only its options are edited here.
+  const fixed = !!(l && l.console);
+  for (const id of ["l-name", "l-bind", "l-port"]) {
+    $(id).disabled = fixed;
+    $(id).title = fixed ? "Set at start-up by the console's settings (-console_bind, -console_port)" : "";
+  }
   setText($("lst-title"), l ? `Edit listener ${l.name}` : "Add listener");
   setText($("lst-save"), l ? "Save" : "Add listener");
   setText($("lst-hint"), `Saved to ${s.file.path} (previous version kept as a backup) and applied at once: the port opens or moves right away.`);
   setText($("lst-preview-title"), `Will be written to ${s.file.path}`);
   lShowStep(0);
   $("lst-editor").showModal();
-  $("l-name").focus();
+  if (fixed) lShowStep(1); // nothing to change on the first step
+  else $("l-name").focus();
   lOnFormChange();
 }
 
@@ -1994,6 +2191,11 @@ $("collapse-all").addEventListener("click", () => {
 // ---------- tabs ----------
 
 function selectTab(name, force) {
+  // certs/ca002: a sub-tab of the Certificates page; the CAs page is gone into it.
+  let [base, sub] = String(name || "").split("/");
+  if (base === "ca") base = "certs";
+  if (base === "certs" && sub) certSub = sub;
+  name = base;
   if (!TABS.includes(name)) name = "rules";
   if (!force && ui.tab === "config" && name !== "config" && cfgDirty() &&
       !confirm("Leave the config editor? Your unsaved text stays in this page until you reload it.")) {
@@ -2003,12 +2205,12 @@ function selectTab(name, force) {
   ui.tab = name;
   for (const b of document.querySelectorAll(".tab")) b.setAttribute("aria-selected", String(b.dataset.tab === name));
   for (const t of TABS) $("tab-" + t).hidden = t !== name;
-  const hash = name === "rules" ? "" : "#" + name;
+  const hash = name === "rules" ? "" : name === "certs" ? "#certs/" + certSub : "#" + name;
   if (location.hash !== hash) history.replaceState(null, "", hash || location.pathname + location.search);
   clearInterval(ui.pageTimer);
   ui.pageTimer = 0;
   const every = { certs: 10000, log: 2000 }[name];
-  const load = { certs: loadCerts, ca: loadCAs, log: loadLog, config: loadConfigOnce }[name];
+  const load = { certs: loadCerts, auth: loadAuth, log: loadLog, config: loadConfigOnce }[name];
   if (load) {
     const run = () => { if (!document.hidden) load().catch((e) => { if (e.status !== 401) pageError(name, e); }); };
     run();
@@ -2421,7 +2623,7 @@ function renderRef() {
       const name = el("code", "ref-k", k.key);
       name.title = `Copy "${k.key} = " to the clipboard`;
       name.addEventListener("click", () => {
-        navigator.clipboard?.writeText(`${k.key} = `).then(() => toast(`Copied “${k.key} = ”`), () => {});
+        navigator.clipboard?.writeText(`${k.key}: `).then(() => toast(`Copied “${k.key}: ”`), () => {});
       });
       const def = el("span", "ref-def", k.default ? `default ${k.default}` : "");
       row.append(name, def, el("p", "ref-m", k.meaning));
@@ -2454,86 +2656,68 @@ $("ref").addEventListener("click", (ev) => { if (ev.target === $("ref")) $("ref"
 
 let caNext = "";
 
-function loadCAs() {
-  return getJSON("api/cas").then(renderCAs);
-}
+const loadCAs = () => loadCerts(); // every CA change redraws the Certificates page
 
-// Each CA is a card: who it is and until when on top, what it issues in the
-// middle, where it is used and its fingerprint below, actions on the right.
-function renderCAs(d) {
-  caNext = d.next;
-  setText($("ca-meta"), `in ${d.caRoot}`);
-  const list = $("cas");
-  list.replaceChildren();
-  if (!d.cas.length) {
-    const empty = el("div", "empty");
-    const img = el("img");
-    img.src = "logo-sleep.svg";
-    img.alt = "";
-    empty.append(img, el("span", "", "No CA yet. Generate one, import yours, or save a rule with cert = local-ca (that makes ca001)."));
-    list.appendChild(empty);
-    return;
+// caCard is a CA's card for its sub-tab: who it is and until when, what it
+// issues, where it is used, its fingerprint, and its actions.
+function caCard(ca) {
+  const card = el("div", "ca-card" + (ca.error ? " broken" : ""));
+  const main = el("div", "ca-main");
+  const head = el("div", "ca-head");
+  head.append(el("span", "chip mono", ca.id), el("span", "ca-name", ca.name || "—"));
+  if (ca.id === "ca001") head.appendChild(Object.assign(el("span", "chip", "default"), { title: "Made at start-up; plain cert: local-ca is this CA" }));
+  if (!ca.error) {
+    head.appendChild(el("span", ca.selfSigned ? "chip" : "chip tls", ca.selfSigned ? "self-signed root" : `intermediate of ${ca.issuer}`));
+    head.appendChild(el("span", "chip t-muted", ca.keyType));
+    const exp = el("span", ca.daysLeft < 30 ? "chip bad" : "chip ok", `until ${ca.notAfter} · ${ca.daysLeft} days`);
+    exp.title = ca.selfSigned ? "Renewed with the same key before it expires" : "Issued elsewhere: import a renewed one before it expires";
+    head.appendChild(exp);
   }
-  for (const ca of d.cas) {
-    const card = el("div", "ca-card" + (ca.error ? " broken" : ""));
-    const main = el("div", "ca-main");
-    const head = el("div", "ca-head");
-    head.append(el("span", "chip mono", ca.id), el("span", "ca-name", ca.name || "—"));
-    if (!ca.error) {
-      head.appendChild(el("span", ca.selfSigned ? "chip" : "chip tls", ca.selfSigned ? "self-signed root" : `intermediate of ${ca.issuer}`));
-      head.appendChild(el("span", "chip t-muted", ca.keyType));
-      const exp = el("span", ca.daysLeft < 30 ? "chip bad" : "chip ok", `until ${ca.notAfter} · ${ca.daysLeft} days`);
-      exp.title = ca.selfSigned ? "Renewed with the same key before it expires" : "Issued elsewhere: import a renewed one before it expires";
-      head.appendChild(exp);
-    }
-    main.appendChild(head);
-    if (ca.error) {
-      main.appendChild(el("div", "ca-line bad", ca.error));
-    } else {
-      const issues = el("div", "ca-line");
-      issues.append(el("span", "ca-k", "issues"), el("span", "", ca.settings || "—"));
-      main.appendChild(issues);
-      if (ca.configError) main.appendChild(el("div", "ca-line bad", `config.toml: ${ca.configError} (previous settings in use)`));
-      const facts = el("div", "ca-line ca-facts");
-      facts.append(el("span", "ca-k", "issued"), el("span", "", `${ca.issued} certificate${ca.issued === 1 ? "" : "s"}`),
-        el("span", "ca-k", "used by"), el("span", "", ca.rules.length ? ca.rules.map((l) => "line " + l).join(", ") : "no rule"));
-      main.appendChild(facts);
-      const fp = el("div", "ca-line");
-      const v = el("span", "mono ca-fp", ca.fingerprint.match(/.{2}/g).join(":"));
-      fp.append(el("span", "ca-k", "SHA-256"), v);
-      main.appendChild(fp);
-    }
-    const act = el("div", "ca-actions");
-    if (!ca.error) {
-      const dl = el("a", "btn btn-quiet", "Download certificate");
-      dl.href = `api/cas/cert?id=${encodeURIComponent(ca.id)}`;
-      dl.title = "The CA certificate, for clients to trust (the key is never offered)";
-      const [set] = actionButton("Settings", "");
-      set.title = "Edit what this CA issues (its config.toml)";
-      set.addEventListener("click", () => openCASettings(ca.id));
-      act.append(dl, set);
-    }
-    const [del, delLabel] = actionButton("Delete", "danger");
-    del.disabled = ca.rules.length > 0;
-    del.title = ca.rules.length ? "Used by a rule: change the rule first" : "Move this CA to the archive (deleted after 14 days)";
-    let armed = 0;
-    del.addEventListener("click", () => {
-      if (!armed) {
-        del.classList.add("armed");
-        setText(delLabel, "Confirm delete");
-        armed = setTimeout(() => { armed = 0; del.classList.remove("armed"); setText(delLabel, "Delete"); }, ARM_MS);
-        return;
-      }
-      clearTimeout(armed);
-      del.disabled = true;
-      api("api/cas/delete", { id: ca.id })
-        .then(() => { toast(`Deleted ${ca.id}: moved to the archive`); return loadCAs(); })
-        .catch((e) => { del.disabled = false; toast(`Could not delete ${ca.id}: ${e.message}`, true); });
-    });
-    act.appendChild(del);
-    card.append(main, act);
-    list.appendChild(card);
+  main.appendChild(head);
+  if (ca.error) {
+    main.appendChild(el("div", "ca-line bad", ca.error));
+  } else {
+    const issues = el("div", "ca-line");
+    issues.append(el("span", "ca-k", "issues"), el("span", "", ca.settings || "—"));
+    main.appendChild(issues);
+    if (ca.configError) main.appendChild(el("div", "ca-line bad", `config.yaml: ${ca.configError} (previous settings in use)`));
+    const facts = el("div", "ca-line ca-facts");
+    facts.append(el("span", "ca-k", "used by"), el("span", "", ca.rules.length ? ca.rules.map((l) => "line " + l).join(", ") : "no rule"));
+    main.appendChild(facts);
+    const fp = el("div", "ca-line");
+    fp.append(el("span", "ca-k", "SHA-256"), el("span", "mono ca-fp", ca.fingerprint.match(/.{2}/g).join(":")));
+    main.appendChild(fp);
   }
+  const act = el("div", "ca-actions");
+  if (!ca.error) {
+    const dl = el("a", "btn btn-quiet", "Download certificate");
+    dl.href = `api/cas/cert?id=${encodeURIComponent(ca.id)}`;
+    dl.title = "The CA certificate, for clients to trust (the key is never offered)";
+    const [set] = actionButton("Settings", "");
+    set.title = "Edit what this CA issues (its config.yaml)";
+    set.addEventListener("click", () => openCASettings(ca.id));
+    act.append(dl, set);
+  }
+  const [del, delLabel] = actionButton("Delete", "danger");
+  del.disabled = ca.rules.length > 0;
+  del.title = ca.rules.length ? "Used by a rule: change the rule first" : "Move this CA to the archive (deleted after 14 days)";
+  let armed = 0;
+  del.addEventListener("click", () => {
+    if (!armed) {
+      del.classList.add("armed");
+      setText(delLabel, "Confirm delete");
+      armed = setTimeout(() => { armed = 0; del.classList.remove("armed"); setText(delLabel, "Delete"); }, ARM_MS);
+      return;
+    }
+    clearTimeout(armed);
+    del.disabled = true;
+    api("api/cas/delete", { id: ca.id })
+      .then(() => { toast(`Deleted ${ca.id}: moved to the archive`); certSub = "acme"; return loadCerts(); })
+      .catch((e) => { del.disabled = false; toast(`Could not delete ${ca.id}: ${e.message}`, true); });
+  });
+  act.appendChild(del);
+  card.append(main, act);
+  return card;
 }
 
 $("ca-generate").addEventListener("click", () => {
@@ -2551,7 +2735,7 @@ $("ca-gen-form").addEventListener("submit", (ev) => {
   const [alg, bits] = $("ca-gen-key").value.split(":");
   api("api/cas/generate", { commonName: val("ca-gen-name"), organization: val("ca-gen-org"), keyAlgorithm: alg, keyBits: +bits,
     hashAlgorithm: $("ca-gen-hash").value, validityDays: Math.round(+$("ca-gen-years").value * 365) || 3650 })
-    .then((d) => { $("ca-gen").close(); toast(`Generated ${d.id}`); return loadCAs(); })
+    .then((d) => { $("ca-gen").close(); toast(`Generated ${d.id}`); certSub = d.id; return loadCAs(); })
     .catch((e) => setText($("ca-gen-error"), e.message))
     .finally(() => { $("ca-gen-save").disabled = false; });
 });
@@ -2598,7 +2782,7 @@ $("ca-imp-form").addEventListener("submit", (ev) => {
   ev.preventDefault();
   $("ca-imp-save").disabled = true;
   api("api/cas/import", { cert: $("ca-imp-cert").value, key: $("ca-imp-key").value })
-    .then((d) => { $("ca-imp").close(); toast(`Imported as ${d.id}`); return loadCAs(); })
+    .then((d) => { $("ca-imp").close(); toast(`Imported as ${d.id}`); certSub = d.id; return loadCAs(); })
     .catch((e) => setText($("ca-imp-error"), e.message))
     .finally(() => { $("ca-imp-save").disabled = false; });
 });
@@ -2610,28 +2794,35 @@ const CERT_STATUS = { ok: "chip ok", expiring: "chip warn", missing: "chip warn"
 let certData = null;
 let certFilter = "";
 
+let certSub = "acme"; // the issuer whose sub-tab shows: acme, or a CA's id
+let caData = null;
+
 function loadCerts() {
-  return getJSON("api/certs").then((d) => { certData = d; renderCerts(d); });
+  return Promise.all([getJSON("api/certs"), getJSON("api/cas")]).then(([d, cas]) => {
+    certData = d;
+    caData = cas;
+    caNext = cas.next;
+    renderCerts();
+  });
 }
 
 $("cert-filter").addEventListener("input", (ev) => {
   certFilter = ev.target.value.trim().toLowerCase();
-  if (certData) renderCerts(certData);
+  if (certData) renderCerts();
 });
 
-// certMatches: the filter against the name, every name in the certificate,
-// the CA and the status.
+// certMatches: the filter against the name, every name in the certificate
+// and the status.
 function certMatches(c) {
   if (!certFilter) return true;
-  return [c.Name, ...(c.Names || []), c.Source === "auto" ? "acme" : c.CA, c.Status]
-    .some((s) => s && s.toLowerCase().includes(certFilter));
+  return [c.Name, ...(c.Names || []), c.Status].some((s) => s && s.toLowerCase().includes(certFilter));
 }
 
 // removeButton archives the certificate after a second click to confirm.
 function removeButton(c) {
   const [b, label] = actionButton("Remove", "danger");
   b.title = c.Source === "auto"
-    ? "Move it to cert_path's _archive (deleted after 14 days) and request a new one"
+    ? "Move it to acme's _archive (deleted after 14 days) and request a new one"
     : `Move it to CA ${c.CA}'s _archive (deleted after 14 days); a new one is issued when a client asks for it`;
   let armed = 0;
   b.addEventListener("click", () => {
@@ -2650,54 +2841,94 @@ function removeButton(c) {
   return b;
 }
 
-function renderCerts(d) {
-  setText($("cert-meta"), `automatic ones live in ${d.certPath || "—"} · ${d.acmeDirectory || ""}`);
-  const list = $("certs");
-  list.replaceChildren();
+// ofIssuer is whether a certificate is the current sub-tab's.
+const ofIssuer = (c, sub) => (sub === "acme" ? c.Source === "auto" : c.Source === "local-ca" && c.CA === sub);
+
+// renderCerts draws the Certificates page: the sub-tabs, the issuer on top,
+// its certificates in a table.
+function renderCerts() {
+  const d = certData, cas = (caData && caData.cas) || [];
   const all = d.certs || [];
-  const certs = all.filter(certMatches);
-  if (!certs.length) {
-    const empty = el("div", "empty");
-    const img = el("img");
-    img.src = "logo-sleep.svg";
-    img.alt = "";
-    empty.append(img, el("span", "", all.length ? `No certificate matches “${certFilter}”.` : "No rule terminates TLS, so there are no certificates."));
-    list.appendChild(empty);
-    return;
+  if (certSub !== "acme" && !cas.some((ca) => ca.id === certSub)) certSub = "acme";
+  if (ui.tab === "certs" && location.hash !== "#certs/" + certSub) history.replaceState(null, "", "#certs/" + certSub);
+
+  const bar = $("cert-subtabs");
+  bar.replaceChildren();
+  const subtab = (id, label, title) => {
+    const b = el("button", "subtab", label);
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(id === certSub));
+    b.title = title;
+    b.appendChild(el("span", "n", String(all.filter((c) => ofIssuer(c, id)).length)));
+    b.addEventListener("click", () => { certSub = id; renderCerts(); });
+    bar.appendChild(b);
+  };
+  let host = "";
+  try { host = new URL(d.acmeDirectory).host; } catch (_) { /* no directory */ }
+  subtab("acme", /letsencrypt\.org$/.test(host) ? "ACME · Let's Encrypt" : "ACME", `Automatic certificates (cert: auto) from ${d.acmeDirectory || "the ACME directory"}`);
+  for (const ca of cas) subtab(ca.id, `${ca.id} · ${ca.name || ca.error || ""}`, `Certificates CA ${ca.id} issued (cert: local-ca${ca.id === "ca001" ? "" : ":" + ca.id})`);
+  bar.appendChild(el("span", "spacer"));
+  for (const [id, label] of [["ca-generate", "+ New CA"], ["ca-import", "Import CA…"]]) {
+    const b = el("button", "btn" + (id === "ca-generate" ? " btn-add" : ""), label);
+    b.type = "button";
+    b.addEventListener("click", () => $(id).click());
+    bar.appendChild(b);
   }
-  for (const c of certs) {
-    const card = el("div", "ca-card" + (c.LastError ? " broken" : ""));
+
+  // The issuer.
+  const issuer = $("cert-issuer");
+  issuer.replaceChildren();
+  if (certSub === "acme") {
+    const card = el("div", "ca-card");
     const main = el("div", "ca-main");
     const head = el("div", "ca-head");
-    head.append(el("span", "ca-name mono", c.Name), el("span", CERT_STATUS[c.Status] || "chip", c.Status));
-    head.appendChild(el("span", c.Source === "auto" ? "chip tls" : "chip", c.Source === "auto" ? "ACME" : `local CA ${c.CA}`));
-    if (c.NotAfter) {
-      const exp = el("span", c.DaysLeft < 8 ? "chip bad" : c.DaysLeft < 30 ? "chip warn" : "chip ok", `until ${c.NotAfter} · ${c.DaysLeft} days`);
-      if (c.RenewFrom) exp.title = `Renewed automatically from ${c.RenewFrom}`;
-      head.appendChild(exp);
-    }
+    head.append(el("span", "ca-name", "Automatic certificates"), el("span", "chip tls", "ACME"), el("span", "chip t-muted", "TLS-ALPN-01"));
     main.appendChild(head);
-    if (c.Names && c.Names.length && c.Names.join(", ") !== c.Name) {
-      const names = el("div", "ca-line");
-      names.append(el("span", "ca-k", "names"), el("span", "mono", c.Names.join(", ")));
-      main.appendChild(names);
+    for (const [k, v] of [["directory", d.acmeDirectory || "—"], ["folder", d.certPath || "—"]]) {
+      const line = el("div", "ca-line");
+      line.append(el("span", "ca-k", k), el("span", "mono", v));
+      main.appendChild(line);
     }
-    const facts = el("div", "ca-line ca-facts");
-    facts.append(el("span", "ca-k", "issuer"), el("span", "", c.Issuer || "—"),
-      el("span", "ca-k", "renews from"), el("span", "num", c.RenewFrom || "—"),
-      el("span", "ca-k", "used by"), el("span", "", (c.RuleLines || []).map((l) => "line " + l).join(", ") || "no rule"));
-    main.appendChild(facts);
-    if (c.LastError) {
-      main.appendChild(el("div", "ca-line bad", `Last attempt failed: ${c.LastError}`));
-      const next = el("div", "ca-line");
-      next.append(el("span", "ca-k", "next attempt"), el("span", "num", c.NextAttempt || "—"));
-      main.appendChild(next);
-    } else if (c.Detail) {
-      main.appendChild(el("div", "ca-line", c.Detail));
-    }
-    if (c.Dir) main.appendChild(el("div", "ca-line mono ca-fp", c.Dir));
+    main.appendChild(el("div", "ca-line", "Issued for the names of rules with cert: auto, renewed before they expire. The CA validates on public port 443; this proxy answers its challenges on any listener."));
     card.appendChild(main);
-    const act = el("div", "ca-actions");
+    issuer.appendChild(card);
+    setText($("cert-note"), "A failed request is retried after 6 hours; Retry now skips the wait. Remove moves a certificate to the archive (deleted after 14 days) and requests a new one.");
+  } else {
+    issuer.appendChild(caCard(cas.find((ca) => ca.id === certSub)));
+    setText($("cert-note"), `A rule uses this CA with cert: local-ca${certSub === "ca001" ? "" : ":" + certSub}. Certificates are issued the first time a client asks for a name, kept in the CA's folder, and renewed automatically; anything in the folder the CA did not issue is moved to its _archive and deleted after 14 days. A self-signed CA is renewed with the same key, so what it issued stays valid. Clients must trust the CA: download its certificate above. Private keys never leave the proxy.`);
+  }
+
+  // Its certificates.
+  const mine = all.filter((c) => ofIssuer(c, certSub));
+  const rows = mine.filter(certMatches);
+  setText($("cert-list-title"), certSub === "acme" ? "Automatic certificates" : `Issued by ${certSub}`);
+  setText($("cert-meta"), `${mine.length} certificate${mine.length === 1 ? "" : "s"}`);
+  const body = $("certs");
+  body.replaceChildren();
+  $("certs-empty").hidden = rows.length > 0;
+  setText($("certs-empty"), mine.length ? `No certificate matches “${certFilter}”.`
+    : certSub === "acme" ? "No rule has cert: auto." : "Nothing issued yet: a certificate is made the first time a client asks for a name of a rule using this CA.");
+  for (const c of rows) {
+    const tr = el("tr");
+    const names = el("td", "names");
+    names.appendChild(el("span", "mono", c.Name));
+    if (c.Names && c.Names.length && c.Names.join(", ") !== c.Name) names.appendChild(el("span", "also mono", c.Names.join(", ")));
+    if (c.Dir) names.title = c.Dir;
+    tr.appendChild(names);
+    const st = el("td");
+    st.appendChild(el("span", CERT_STATUS[c.Status] || "chip", c.Status));
+    tr.appendChild(st);
+    const until = el("td", "num");
+    if (c.NotAfter) until.appendChild(el("span", c.DaysLeft < 8 ? "chip bad" : c.DaysLeft < 30 ? "chip warn" : "chip ok", `${c.NotAfter} · ${c.DaysLeft} d`));
+    else until.textContent = "—";
+    tr.appendChild(until);
+    tr.appendChild(el("td", "num", c.RenewFrom || "—"));
+    tr.appendChild(el("td", "", (c.RuleLines || []).map((l) => "line " + l).join(", ") || "no rule"));
+    const notes = el("td", "notes" + (c.LastError ? " bad" : ""));
+    notes.textContent = c.LastError ? `Last attempt failed: ${c.LastError}` + (c.NextAttempt ? ` · next ${c.NextAttempt}` : "") : (c.Detail || "");
+    tr.appendChild(notes);
+    const act = el("td", "acts");
     if (c.Source === "auto" && c.LastError) {
       const [b] = actionButton("Retry now", "");
       b.addEventListener("click", () => {
@@ -2709,8 +2940,8 @@ function renderCerts(d) {
       act.appendChild(b);
     }
     if (c.Removable) act.appendChild(removeButton(c));
-    if (act.childElementCount) card.appendChild(act);
-    list.appendChild(card);
+    tr.appendChild(act);
+    body.appendChild(tr);
   }
 }
 
@@ -2823,9 +3054,9 @@ function treeNodeEl(n, depth) {
 
 // showValidation renders the Validate answer: green with the settings tree
 // when the file is valid, its warnings in yellow; red with the exact line
-// when it is not.
-function showValidation(d) {
-  $("cfg-msg").hidden = true;
+// when it is not. keepMessage leaves a message above it (Save's outcome).
+function showValidation(d, keepMessage) {
+  if (!keepMessage) $("cfg-msg").hidden = true;
   const box = $("cfg-result");
   box.hidden = false;
   box.classList.remove("stale");
@@ -2932,19 +3163,30 @@ $("cfg-test").addEventListener("click", () => {
     })
     .catch((e) => cfgMessage("bad", e.message));
 });
+// Save validates first, as Validate does: an invalid text shows why and is
+// not saved; a valid one is saved, its outcome shown above its tree.
 $("cfg-save").addEventListener("click", () => {
   const text = $("cfg").value;
-  cfgPost("api/config/save", { text, baseHash: cfg.hash, baseMtime: cfg.mtime })
+  let checked = null;
+  cfgPost("api/config/validate", { text })
+    .then((v) => {
+      checked = v;
+      if (!v.ok) { showValidation(v); return null; }
+      return cfgPost("api/config/save", { text, baseHash: cfg.hash, baseMtime: cfg.mtime });
+    })
     .then((d) => {
-      if (!d.ok) return cfgMessage("bad", d.error);
+      if (!d) return;
+      const tree = () => showValidation(checked, true);
+      if (!d.ok) { cfgMessage("bad", d.error); return; }
       cfg.hash = d.hash; cfg.mtime = d.mtime; cfg.loaded = text;
       gutter();
-      if (d.unchanged) return cfgMessage("ok", "Nothing to save: the text matches the file.");
+      if (d.unchanged) { cfgMessage("ok", "Nothing to save: the text matches the file."); tree(); return; }
       const problems = d.problems || [];
-      cfgMessage(problems.length ? "bad" : d.restartNeeded || (d.warnings || []).length ? "warn" : "ok",
+      cfgMessage(problems.length ? "bad" : d.restartNeeded ? "warn" : "ok",
         (problems.length ? `Saved, but not everything could be applied. Previous version kept as ${d.backup}.` : `Saved and applied. Previous version kept as ${d.backup}.`) +
         problems.map((p) => "\n" + p).join("") +
-        (d.restartNeeded ? "\nbind/port changed: that part needs a restart." : "") + (d.warnings || []).map((w) => "\nWarning: " + w).join(""));
+        (d.restartNeeded ? "\nbind/port changed: that part needs a restart." : ""));
+      tree(); // with the warnings
       return listBackups();
     })
     .catch((e) => cfgMessage("bad", e.message));
@@ -3078,4 +3320,203 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", red
 checkSession().then((ok) => {
   if (ok) connect();
   else if (ok === null) { showApp(); setStatus("down", "Reconnecting"); scheduleReconnect(); }
+});
+
+// ---------- basic auth ----------
+
+let authFile = null; // the config file version the page shows
+let authDlg = null;  // the change the dialog is making
+
+function loadAuth() {
+  return getJSON("api/auth").then(renderAuth);
+}
+
+// Each group is a card: a table of its users (password, status, expiry and
+// their buttons, aligned), the serve entries that use it, and the group's
+// own buttons.
+function renderAuth(d) {
+  authFile = d.file;
+  const editable = !!(d.file && d.file.editable);
+  setText($("auth-meta"), editable ? `${d.groups.length} group${d.groups.length === 1 ? "" : "s"} in ${d.file.path}` : (d.file.error || "the config file can't be edited"));
+  $("auth-add-group").disabled = !editable;
+  const list = $("auth-groups");
+  list.replaceChildren();
+  if (!d.groups.length) {
+    const empty = el("div", "empty");
+    empty.append(el("span", "", "No basic_auth group yet. Add one, then choose it for a serve entry in the rule editor."));
+    list.appendChild(empty);
+    return;
+  }
+  for (const g of d.groups) {
+    const card = el("div", "ca-card auth-card");
+    const main = el("div", "ca-main");
+    const head = el("div", "ca-head");
+    head.append(el("span", "ca-name", g.name), el("span", "chip t-muted", `${g.users.length} user${g.users.length === 1 ? "" : "s"}`));
+    if (g.line) head.title = `basic_auth at line ${g.line} of the config file`;
+    const act = el("div", "ca-actions");
+    const [add] = actionButton("Add user", "");
+    add.disabled = !editable;
+    add.addEventListener("click", () => openAuthDialog({ op: "add_user", group: g.name }));
+    const [ren] = actionButton("Rename", "");
+    ren.disabled = !editable;
+    ren.title = "Its serve entries are renamed with it";
+    ren.addEventListener("click", () => openAuthDialog({ op: "rename_group", group: g.name }));
+    const delGroup = armedButton("Delete group", () => authChange({ op: "delete_group", group: g.name }, `Deleted ${g.name}`));
+    delGroup.disabled = !editable || g.usedBy.length > 0;
+    delGroup.title = g.usedBy.length ? "Used by a serve entry: change it first" : `Delete the group ${g.name}`;
+    act.append(add, ren, delGroup);
+    head.appendChild(act);
+    main.appendChild(head);
+
+    const table = el("table", "grid auth-users");
+    const thead = el("thead");
+    const hr = el("tr");
+    for (const h of ["User", "Password", "Status", "Expires", ""]) hr.appendChild(el("th", "", h));
+    thead.appendChild(hr);
+    const tbody = el("tbody");
+    for (const u of g.users) {
+      const tr = el("tr");
+      tr.appendChild(el("td", "mono", u.name));
+      const pw = el("td");
+      pw.appendChild(u.plain ? Object.assign(el("span", "chip warn", "plain"), { title: "Written as password_plain: setting a password replaces it with a hash" }) : el("span", "chip", "hash"));
+      tr.appendChild(pw);
+      const status = el("td");
+      status.appendChild(u.disabled ? el("span", "chip bad", "disabled") : u.expired ? el("span", "chip bad", "expired") : el("span", "chip ok", "active"));
+      tr.appendChild(status);
+      const exp = el("td", "mono", u.expires ? fmtExpiry(u.expires) : "never");
+      if (u.expires) exp.title = u.expires;
+      tr.appendChild(exp);
+      const btns = el("td", "auth-btns");
+      const [setPw] = actionButton("Set password", "");
+      setPw.disabled = !editable;
+      setPw.addEventListener("click", () => openAuthDialog({ op: "set_password", group: g.name, user: u.name }));
+      const [toggle] = actionButton(u.disabled ? "Enable" : "Disable", "");
+      toggle.disabled = !editable;
+      toggle.title = u.disabled ? `Let ${u.name} sign in again` : `Refuse ${u.name}, even with the right password (at once)`;
+      toggle.addEventListener("click", () => {
+        toggle.disabled = true;
+        authChange({ op: "set_disabled", group: g.name, user: u.name, disabled: !u.disabled }, `${u.disabled ? "Enabled" : "Disabled"} ${u.name}`).catch(() => {});
+      });
+      const [setExp] = actionButton("Set expiry", "");
+      setExp.disabled = !editable;
+      setExp.addEventListener("click", () => openAuthDialog({ op: "set_expiry", group: g.name, user: u.name, expires: u.expires }));
+      const del = armedButton("Delete", () => authChange({ op: "delete_user", group: g.name, user: u.name }, `Deleted ${u.name} from ${g.name}`).catch(() => {}));
+      del.disabled = !editable || g.users.length === 1;
+      del.title = g.users.length === 1 ? "A group needs a user: delete the group instead" : `Delete ${u.name}`;
+      btns.append(setPw, toggle, setExp, del);
+      tr.appendChild(btns);
+      tbody.appendChild(tr);
+    }
+    table.append(thead, tbody);
+    const scroll = el("div", "scroll");
+    scroll.appendChild(table);
+    main.appendChild(scroll);
+
+    const used = el("div", "ca-line ca-facts");
+    used.append(el("span", "ca-k", "used by"), el("span", "", g.usedBy.length
+      ? g.usedBy.map((x) => `${x.rule} ${x.prefix}` + (x.line ? ` (line ${x.line})` : "")).join(", ") : "no serve entry"));
+    main.appendChild(used);
+    card.append(main);
+    list.appendChild(card);
+  }
+}
+
+// fmtExpiry shows when a user stops working: the last day for a date (it
+// is stored as the moment after it ends), the time otherwise.
+function fmtExpiry(iso) {
+  const t = new Date(iso);
+  if (iso.endsWith("T00:00:00Z")) return new Date(t - 1).toISOString().slice(0, 10) + " (end of day, UTC)";
+  return t.toLocaleString();
+}
+
+// armedButton is a delete that asks for a second click.
+function armedButton(label, run) {
+  const [b, text] = actionButton(label, "danger");
+  let armed = 0;
+  b.addEventListener("click", () => {
+    if (!armed) {
+      b.classList.add("armed");
+      setText(text, "Confirm");
+      armed = setTimeout(() => { armed = 0; b.classList.remove("armed"); setText(text, label); }, ARM_MS);
+      return;
+    }
+    clearTimeout(armed);
+    armed = 0;
+    b.disabled = true;
+    run();
+  });
+  return b;
+}
+
+// authChange saves one change and shows the result.
+function authChange(change, done) {
+  return api("api/auth/save", { ...change, baseHash: authFile.hash, baseMtime: authFile.mtime })
+    .then((d) => {
+      if (!d.ok) throw new Error(d.error || "not saved");
+      toast(done);
+      for (const p of d.problems || []) toast(p, true);
+      return loadAuth();
+    })
+    .catch((e) => { toast(e.message, true); loadAuth(); throw e; });
+}
+
+function openAuthDialog(change) {
+  authDlg = change;
+  const titles = { add_group: "Add a group", add_user: `Add a user to ${change.group}`, set_password: `Set ${change.user}'s password`, rename_group: `Rename ${change.group}`, set_expiry: `When ${change.user} expires` };
+  setText($("auth-dlg-title"), titles[change.op]);
+  setText($("auth-dlg-hint"), {
+    add_group: "A group needs its first user. The password is hashed in the proxy before it is written.",
+    add_user: "The password is hashed in the proxy before it is written.",
+    set_password: "The new password replaces the old one; a browser signed in with the old one is let in for up to 5 more minutes.",
+    rename_group: "The serve entries that use it are renamed with it.",
+    set_expiry: "From the next day on, the user is refused even with the right password. Never: no expiry.",
+  }[change.op]);
+  const needs = { add_group: ["group", "user", "pass"], add_user: ["user", "pass"], set_password: ["pass"], rename_group: ["group"], set_expiry: ["exp"] }[change.op];
+  $("auth-f-group").hidden = !needs.includes("group");
+  $("auth-f-user").hidden = !needs.includes("user");
+  $("auth-f-pass").hidden = $("auth-f-pass2").hidden = !needs.includes("pass");
+  $("auth-f-exp").hidden = $("auth-f-never").hidden = !needs.includes("exp");
+  const day = change.expires && change.expires.endsWith("T00:00:00Z") ? new Date(new Date(change.expires) - 1).toISOString().slice(0, 10) : "";
+  $("auth-exp").value = day;
+  $("auth-never").checked = !change.expires;
+  $("auth-exp").disabled = !change.expires;
+  $("auth-group").value = change.op === "rename_group" ? change.group : "";
+  for (const id of ["auth-user", "auth-pass", "auth-pass2"]) $(id).value = "";
+  setText($("auth-dlg-error"), "");
+  $("auth-dlg").showModal();
+  $({ group: "auth-group", user: "auth-user", pass: "auth-pass", exp: "auth-never" }[needs[0]]).focus();
+}
+
+$("auth-add-group").addEventListener("click", () => openAuthDialog({ op: "add_group" }));
+$("auth-never").addEventListener("change", () => { $("auth-exp").disabled = $("auth-never").checked; if (!$("auth-never").checked) $("auth-exp").focus(); });
+$("auth-dlg-cancel").addEventListener("click", () => $("auth-dlg").close());
+$("auth-dlg").addEventListener("close", () => { for (const id of ["auth-pass", "auth-pass2"]) $(id).value = ""; });
+$("auth-dlg-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const c = { ...authDlg };
+  const group = val("auth-group"), user = val("auth-user"), pass = $("auth-pass").value;
+  if (!$("auth-f-group").hidden) {
+    if (!group) return setText($("auth-dlg-error"), "The group needs a name.");
+    if (c.op === "rename_group") c.newName = group; else c.group = group;
+  }
+  if (!$("auth-f-user").hidden) {
+    if (!user || user.includes(":")) return setText($("auth-dlg-error"), "A username is required, without a colon.");
+    c.user = user;
+  }
+  if (!$("auth-f-exp").hidden) {
+    if (!$("auth-never").checked && !$("auth-exp").value) return setText($("auth-dlg-error"), "Choose a day, or Never.");
+    c.expires = $("auth-never").checked ? "" : $("auth-exp").value;
+  }
+  if (!$("auth-f-pass").hidden) {
+    if (!pass) return setText($("auth-dlg-error"), "The password must not be empty.");
+    if (pass !== $("auth-pass2").value) return setText($("auth-dlg-error"), "The two passwords differ.");
+    c.password = pass;
+  }
+  $("auth-dlg-save").disabled = true;
+  const done = { add_group: `Added ${c.group}`, add_user: `Added ${c.user} to ${c.group}`, set_password: `Set ${c.user}'s password`,
+    rename_group: `Renamed ${authDlg.group} to ${c.newName}`, set_expiry: c.expires ? `${c.user} expires after ${c.expires}` : `${c.user} never expires` }[c.op];
+  authChange(c, done)
+    .then(() => $("auth-dlg").close())
+    .catch((e) => setText($("auth-dlg-error"), e.message))
+    .finally(() => { $("auth-dlg-save").disabled = false; });
 });

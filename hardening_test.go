@@ -175,7 +175,7 @@ func TestSeveralBindAddresses(t *testing.T) {
 		t.Fatalf("%v %q %q", c.Binds, c.Bind, listenAddrs(c))
 	}
 	for _, bad := range []string{"bind = 0.0.0.0, 0.0.0.0", "bind = ;"} {
-		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n" + bad + "\n"); err == nil {
+		if _, err := parseFixture("[[listener]]\nname=default\nport=1\n" + bad + "\n"); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}
 	}
@@ -322,9 +322,12 @@ func TestTargetDialerCachesLookupsAndRacesFamilies(t *testing.T) {
 // ---------------------------------------------------------------- SNI and close reasons
 
 func TestIPAddressIsNotAnSNI(t *testing.T) {
-	for _, name := range []string{"10.0.0.1", "127.0.0.1"} {
-		if _, err := parseClientHello(clientHello(name)); err == nil || !strings.Contains(err.Error(), "an IP address is not a host name") {
-			t.Errorf("%s: %v", name, err)
+	// An IP address sent as SNI is no SNI for routing, kept aside for a local CA.
+	for _, name := range []string{"10.0.0.1", "127.0.0.1", "fd00::1", "::ffff:10.0.0.2"} {
+		h, err := parseHello(clientHello(name))
+		want := netip.MustParseAddr(name).Unmap()
+		if err != nil || h.SNI != "" || h.SNIIP != want {
+			t.Errorf("%s: sni=%q ip=%v %v", name, h.SNI, h.SNIIP, err)
 		}
 	}
 	if sni, err := parseClientHello(clientHello("10.0.0.1.nip.io")); err != nil || sni != "10.0.0.1.nip.io" {

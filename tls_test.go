@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -408,8 +409,8 @@ func TestPassThroughForwardsTLSALPN01Challenges(t *testing.T) {
 // cert = <dir> is gone: only auto (ACME) and local-ca terminate TLS, and
 // the error says what to do instead.
 func TestCertDirectoryIsRefused(t *testing.T) {
-	_, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=a.test\ncert=/etc/ssl/mine\ntarget_host=h\ntarget_port=443\n")
-	if err == nil || !strings.Contains(err.Error(), "no longer supported") || !strings.Contains(err.Error(), "cert = local-ca") {
+	_, err := parseFixture("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=a.test\ncert=/etc/ssl/mine\ntarget_host=h\ntarget_port=443\n")
+	if err == nil || !strings.Contains(err.Error(), "no longer supported") || !strings.Contains(err.Error(), "cert: local-ca") {
 		t.Fatalf("want a refusal naming the way forward: %v", err)
 	}
 }
@@ -424,7 +425,7 @@ func TestCertConfigValidation(t *testing.T) {
 	}
 	r := c.Rules
 	if !r[0].UpstreamTLS || !r[0].UpstreamTLSVerify || r[0].Proxy || r[0].ProxyVersion != 2 || r[1].UpstreamTLS || r[2].Terminates() || len(c.Warnings) != 0 ||
-		fmt.Sprint(c.PublicIPs) != "[203.0.113.7 2001:db8::1]" || c.CertPath != "./certs" || c.ExpiryThresholdDays != 15 {
+		fmt.Sprint(c.PublicIPs) != "[203.0.113.7 2001:db8::1]" || c.CertPath != filepath.Join(defaultCARoot, "acme") || c.ExpiryThresholdDays != 15 {
 		t.Fatalf("%+v\n%+v", r, c)
 	}
 	// An IPv6 public address behind an IPv4-only listener: the CA could not get in.
@@ -451,7 +452,7 @@ func TestCertConfigValidation(t *testing.T) {
 		"bad ip":                     "[[listener]]\nname=default\nport=443\n[global]\npublic_ip_address=not-an-ip\n",
 		"bad threshold":              "[[listener]]\nname=default\nport=443\n[global]\nexpiry_threshold_days=0\n",
 	} {
-		if _, err := ParseConfig(text); err == nil {
+		if _, err := parseFixture(text); err == nil {
 			t.Errorf("%s: should be rejected", name)
 		}
 	}
@@ -793,7 +794,7 @@ func TestUpstreamSNIDefaultsToTheClientsName(t *testing.T) {
 		"[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\ncert=/tmp\nupstream_tls=false\nupstream_sni=a.b.com\ntarget_host=x.lan\ntarget_port=443\n",
 		"[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=.*\nupstream_sni=a.b.com\ntarget_host=x.lan\ntarget_port=443\n",
 	} {
-		if _, err := ParseConfig(bad); err == nil {
+		if _, err := parseFixture(bad); err == nil {
 			t.Errorf("should be rejected: %q", bad)
 		}
 	}
@@ -959,5 +960,28 @@ func TestAutomaticRenewalReplacesTheCertificate(t *testing.T) {
 	}
 	if jobs := m.pendingJobs(time.Now()); len(jobs) != 0 {
 		t.Fatalf("nothing is due after renewal: %v", jobs)
+	}
+}
+
+// The CA comes to port 443 for a name whose rule is on another listener (the
+// console on its own port): our pending challenge is answered there too.
+func TestTLSALPN01ChallengeOnAnotherListener(t *testing.T) {
+	t.Parallel()
+	p := startProxy(t, "acme_agree_tos=true\n", fmt.Sprintf("[[listener]]\nname=other\nbind=127.0.0.1\nport=%d\n"+
+		"[[host]]\nlistener=default\npattern=ANY\naction=deny\n"+
+		"[[host]]\nlistener=other\npattern=x.test\ncert=auto\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=1\n", freePort(t)))
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	answer, err := (&acme.Client{Key: key}).TLSALPN01ChallengeCert("token-123", "x.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := p.srv.certs
+	m.lock()
+	m.challenges["x.test"] = &answer
+	m.unlock()
+	tc := tls.Client(dial(t, p), &tls.Config{ServerName: "x.test", NextProtos: []string{acme.ALPNProto}, InsecureSkipVerify: true})
+	tc.SetDeadline(time.Now().Add(T))
+	if err := tc.Handshake(); err != nil || tc.ConnectionState().NegotiatedProtocol != acme.ALPNProto {
+		t.Fatalf("the challenge is answered on the default listener: %v", err)
 	}
 }

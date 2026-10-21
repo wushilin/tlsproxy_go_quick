@@ -14,8 +14,10 @@ import (
 	"math/big"
 	mrand "math/rand"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -42,7 +44,7 @@ func trustCA(t *testing.T, dir string) *x509.CertPool {
 func TestLocalCAIssuesOnDemand(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	makeCA(t, root, "ca002") // a rule only uses a CA that exists (made on the CAs page)
+	makeCA(t, root, "ca002") // a rule only uses a CA that exists (made on the Certificates page)
 	port := echoBackend(t, "L:")
 	rules := fmt.Sprintf("[[host]]\nlistener=default\npattern=*.lan.test\ncert=local-ca:ca002\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)
 	p := startProxy(t, "ca_root="+root, rules)
@@ -226,7 +228,7 @@ func certPool(certs ...*x509.Certificate) *x509.CertPool {
 func TestLocalCAConfig(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
+	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the Certificates page)
 	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\npattern=*.x.test\ncert=local-ca\ncert_domains=a.x.test\ntarget_host=h\ntarget_port=443\n")
 	if r := cfg.Rules[0]; r.LocalCA() != "ca001" {
 		t.Fatalf("plain local-ca is ca001, got %q", r.LocalCA())
@@ -254,12 +256,108 @@ func TestLocalCAConfig(t *testing.T) {
 	}
 	for text, want := range map[string]string{
 		"cert=local-ca:ca1":                           "three digits",
-		"cert=local-ca:ca001\ncert_validate_script=x": "only applies to cert = auto",
+		"cert=local-ca:ca001\ncert_validate_script=x": "only applies to cert: auto",
 		"cert=local-ca\ncert_domains=a.y.test":        "does not match",
-		"cert=local-ca\ncert_domains=**.x.test":       "not a host name or a glob",
-		"cert=local-ca\ncert_domains=ANY":             "not a host name or a glob",
+		"cert=local-ca\ncert_domains=**.x.test":       "not a host name, a glob",
+		"cert=local-ca\ncert_domains=ANY":             "not a host name, a glob",
+		"cert=local-ca\ncert_domains=10.0.0.5":        "only applies to domain: $no_sni or $anything_else",
 	} {
-		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=*.x.test\n" + text + "\ntarget_host=h\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := parseFixture("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\npattern=*.x.test\n" + text + "\ntarget_host=h\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", text, err, want)
+		}
+	}
+}
+
+// Clients without a host name: a NONE or ANY rule issues for the address
+// they connected to, or for cert_domains' addresses (and a NONE rule's names)
+// in one certificate. An IP address sent as SNI must be listed.
+func TestLocalCAIPCertificates(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	makeCA(t, root, "ca001")
+	parse := func(rule string) (*Config, *CertManager) {
+		cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\n"+rule+"\ntarget_host=h\ntarget_port=443\n")
+		m := NewCertManager()
+		if err := m.Apply(cfg); err != nil {
+			t.Fatal(err)
+		}
+		return cfg, m
+	}
+	dialed := netip.MustParseAddr("192.0.2.10")
+	ipsOf := func(c *tls.Certificate) (out []string) {
+		for _, ip := range c.Leaf.IPAddresses {
+			out = append(out, ip.String())
+		}
+		return append(out, c.Leaf.DNSNames...)
+	}
+
+	// No cert_domains: the address the client connected to.
+	cfg, m := parse("pattern=NONE\ncert=local-ca")
+	c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, dialed)
+	if err != nil || !slices.Equal(ipsOf(c), []string{"192.0.2.10"}) || c.Leaf.Subject.CommonName != "192.0.2.10" {
+		t.Fatalf("dialed address: %v %v", c, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ca001", "ip_192.0.2.10", "cert.pem")); err != nil {
+		t.Fatal(err)
+	}
+	v6 := netip.MustParseAddr("fd00::1")
+	if c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, v6); err != nil || !slices.Equal(ipsOf(c), []string{"fd00::1"}) {
+		t.Fatalf("IPv6: %v %v", c, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ca001", "ip_fd00--1", "cert.pem")); err != nil {
+		t.Fatal("an IPv6 folder has no colon:", err)
+	}
+	if _, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{SNIIP: dialed}, dialed); err == nil || !strings.Contains(err.Error(), "does not list") {
+		t.Fatalf("an IP as SNI must be listed, even the dialed one: %v", err)
+	}
+
+	// Listed addresses and names: one certificate, whichever was dialed.
+	cfg, m = parse("pattern=NONE\ncert=local-ca\ncert_domains=203.0.113.5, 198.51.100.7; box.lan")
+	for _, d := range []string{"10.0.0.1", "203.0.113.5"} {
+		c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, netip.MustParseAddr(d))
+		if err != nil || !slices.Equal(ipsOf(c), []string{"198.51.100.7", "203.0.113.5", "box.lan"}) {
+			t.Fatalf("dialed %s: %v %v", d, ipsOf(c), err)
+		}
+	}
+	if _, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{SNIIP: netip.MustParseAddr("203.0.113.5")}, dialed); err != nil {
+		t.Fatalf("a listed IP as SNI: %v", err)
+	}
+	if _, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{SNIIP: netip.MustParseAddr("203.0.113.6")}, dialed); err == nil {
+		t.Fatal("an unlisted IP as SNI is refused")
+	}
+	if !localCAIssues(cfg, "ca001", "198.51.100.7,203.0.113.5,box.lan") || localCAIssues(cfg, "ca001", "198.51.100.7") {
+		t.Fatal("renewal keeps exactly the listed set")
+	}
+	key, ok := localCAName("ip_198.51.100.7+203.0.113.5+box.lan")
+	if !ok || key != "198.51.100.7,203.0.113.5,box.lan" {
+		t.Fatalf("folder name read back: %q %v", key, ok)
+	}
+	for _, bad := range []string{"ip_", "ip_box.lan", "ip_203.0.113.5+198.51.100.7", "_archive", "ip_zz"} {
+		if _, ok := localCAName(bad); ok {
+			t.Errorf("%s is not a certificate folder", bad)
+		}
+	}
+
+	// ANY: host names as before; no SNI gets the listed addresses only.
+	cfg, m = parse("pattern=ANY\ncert=local-ca\ncert_domains=*.x.test, 10.0.0.5")
+	if c, err := m.CertificateForClient(&cfg.Rules[0], helloInfo{}, dialed); err != nil || !slices.Equal(ipsOf(c), []string{"10.0.0.5"}) {
+		t.Fatalf("ANY without SNI: %v %v", c, err)
+	}
+	if _, err := m.CertificateFor(&cfg.Rules[0], "a.x.test"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = parse("pattern=ANY\ncert=local-ca\ncert_domains=10.0.0.5")
+	if cfg.Rules[0].LocalCAIssues("a.x.test") {
+		t.Fatal("cert_domains with addresses alone issues for no host name")
+	}
+
+	for text, want := range map[string]string{
+		"pattern=NONE\ncert=local-ca\ncert_domains=*.x.test":          "plain host names (no *)",
+		"pattern=NONE\ncert=local-ca\ncert_domains=fe80::1%eth0":      "has no zone",
+		"pattern=NONE\ncert=local-ca\ncert_domains=10.0.0.1,10.0.0.1": "twice",
+		"pattern=NONE\ncert=auto":                                     "use cert: local-ca",
+	} {
+		if _, err := parseFixture("[[listener]]\nname=default\nport=1\n[global]\nacme_agree_tos=true\n[[host]]\nlistener=default\n" + text + "\ntarget_host=h\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", text, err, want)
 		}
 	}
@@ -270,7 +368,7 @@ func TestLocalCAConfig(t *testing.T) {
 func TestConsoleCAPage(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
+	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the Certificates page)
 	p, c, _ := startConsoleProxyGlobal(t, "ca_root = "+root, "password = pw",
 		"[[host]]\nlistener=default\npattern=svc.lan.test\ncert=local-ca\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=1\n")
 	_ = p
@@ -331,7 +429,7 @@ func TestConsoleCAPage(t *testing.T) {
 func TestLocalCARefusesUnlistedNames(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
+	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the Certificates page)
 	dialed := make(chan struct{}, 4)
 	port := backend(t, func(c *net.TCPConn) { dialed <- struct{}{}; c.Write([]byte("B")); io.Copy(c, c) })
 	p := startProxy(t, "ca_root="+root, fmt.Sprintf("[[host]]\nlistener=default\npattern=*.lan.test\ncert=local-ca\ncert_domains=ok*.lan.test\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", port))
@@ -383,8 +481,8 @@ func TestLocalCAIssuesOncePerName(t *testing.T) {
 	}
 }
 
-// [certificates] in the CA's config.toml shapes what it issues; [ca] can't
-// be changed once the CA exists.
+// certificates in the CA's config.yaml shapes what it issues; ca can't be
+// changed once the CA exists.
 func TestCAConfig(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "ca001")
@@ -392,26 +490,24 @@ func TestCAConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "config.toml")
+	path := filepath.Join(dir, "config.yaml")
 	text, err := os.ReadFile(path)
-	if err != nil || !strings.Contains(string(text), "[certificates]") {
-		t.Fatalf("a new CA gets its config.toml: %v", err)
+	if err != nil || !strings.Contains(string(text), "\ncertificates:\n") {
+		t.Fatalf("a new CA gets its config.yaml: %v", err)
 	}
-	// Edit [certificates]: RSA keys, SHA-384, 30 days, client auth too, an organisation.
+	if _, err := parseCAConfig("ca001", string(text)); err != nil {
+		t.Fatalf("what it writes, it reads: %v\n%s", err, text)
+	}
+	// Edit certificates: RSA keys, SHA-384, 30 days, client auth too, an organisation.
 	edited := string(text)
-	for old, new := range map[string]string{
-		"[certificates]\n# What it issues": "[certificates]\n# What it issues",
-	} {
-		edited = strings.Replace(edited, old, new, 1)
-	}
-	certSection := edited[strings.Index(edited, "[certificates]"):]
+	certSection := edited[strings.Index(edited, "\ncertificates:\n"):]
 	newSection := certSection
 	for k, v := range map[string]string{"key_algorithm": "rsa", "key_bits": "2048", "hash_algorithm": "sha384", "validity_days": "30",
-		"ext_key_usage": `"serverAuth, clientAuth"`, "key_usage": `"digitalSignature, keyEncipherment"`, "organization": "Lab"} {
+		"ext_key_usage": "[serverAuth, clientAuth]", "key_usage": "[digitalSignature, keyEncipherment]", "organization": "Lab"} {
 		lines := strings.Split(newSection, "\n")
 		for i, line := range lines {
-			if strings.HasPrefix(line, k+" ") {
-				lines[i] = k + " = " + v
+			if strings.HasPrefix(line, "  "+k+":") {
+				lines[i] = "  " + k + ": " + v
 			}
 		}
 		newSection = strings.Join(lines, "\n")
@@ -434,10 +530,10 @@ func TestCAConfig(t *testing.T) {
 		t.Fatalf("issued as: key %T, sig %s, life %s, ext %v, org %v", leaf.PublicKey, leaf.SignatureAlgorithm, leaf.NotAfter.Sub(leaf.NotBefore), leaf.ExtKeyUsage, leaf.Subject.Organization)
 	}
 
-	// [ca] describes the CA: changing it is refused, and the settings in use stay.
-	bad := strings.Replace(edited, "key_bits = 256", "key_bits = 384", 1)
-	if _, err := l.parseConfig(bad); err == nil || !strings.Contains(err.Error(), "[ca] key_bits") {
-		t.Fatalf("a changed [ca] must be refused: %v", err)
+	// ca describes the CA: changing it is refused, and the settings in use stay.
+	bad := strings.Replace(edited, "  key_bits: 256", "  key_bits: 384", 1)
+	if _, err := l.parseConfig(bad); err == nil || !strings.Contains(err.Error(), "ca: key_bits") {
+		t.Fatalf("a changed ca must be refused: %v", err)
 	}
 	os.WriteFile(path, []byte(bad), 0o600)
 	os.Chtimes(path, time.Now(), time.Now().Add(2*time.Second))
@@ -446,11 +542,12 @@ func TestCAConfig(t *testing.T) {
 		t.Fatalf("after a bad edit: err %q, in use %s", s.err, s.c.Cert.KeyAlgorithm)
 	}
 	for text, want := range map[string]string{
-		"[certificates]\nkey_bits = 1024\nkey_algorithm = rsa": "rsa key_bits",
-		"[certificates]\nhash_algorithm = md5":                 "hash_algorithm",
-		"[certificates]\next_key_usage = codeSigning":          "ext_key_usage",
-		"[other]\n":      "unknown section",
-		"key_bits = 256": "outside a section",
+		"certificates:\n  key_bits: 1024\n  key_algorithm: rsa": "rsa key_bits",
+		"certificates:\n  hash_algorithm: md5":                  "hash_algorithm",
+		"certificates:\n  ext_key_usage: [codeSigning]":         "ext_key_usage",
+		"certificates:\n  colour: red":                          `unknown key "colour" in certificates`,
+		"other:\n  x: 1\n":                                      "unknown section",
+		"key_bits: 256":                                         `unknown section "key_bits"`,
 	} {
 		if _, err := parseCAConfig("ca001", text); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", text, err, want)
@@ -464,11 +561,16 @@ func TestConsoleGeneratesWithSettings(t *testing.T) {
 	root := t.TempDir()
 	_, c, _ := startConsoleProxyGlobal(t, "ca_root = "+root, "password = pw", "[[host]]\nlistener=default\npattern=ANY\naction=deny\n")
 	c.login("pw")
-	if code, out := c.post("/api/cas/generate", map[string]any{"commonName": "Big CA", "organization": "Lab",
-		"keyAlgorithm": "rsa", "keyBits": 2048, "hashAlgorithm": "sha384", "validityDays": 1000}); code != 200 {
+	code, out := c.post("/api/cas/generate", map[string]any{"commonName": "Big CA", "organization": "Lab",
+		"keyAlgorithm": "rsa", "keyBits": 2048, "hashAlgorithm": "sha384", "validityDays": 1000})
+	if code != 200 || out["id"] != "ca002" { // ca001 is the default CA, made at start-up
 		t.Fatalf("%d %v", code, out)
 	}
-	ca, err := readCertFile(filepath.Join(root, "ca001", "ca_cert.pem"))
+	if def, err := readCertFile(filepath.Join(root, "ca001", "ca_cert.pem")); err != nil || def.Subject.CommonName != "Local CA" ||
+		def.NotAfter.Sub(def.NotBefore) < 19*365*24*time.Hour {
+		t.Fatalf("the default CA: %v %v", def, err)
+	}
+	ca, err := readCertFile(filepath.Join(root, "ca002", "ca_cert.pem"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,16 +578,16 @@ func TestConsoleGeneratesWithSettings(t *testing.T) {
 		ca.Subject.CommonName != "Big CA" || ca.Subject.Organization[0] != "Lab" {
 		t.Fatalf("made: %T %s %s", ca.PublicKey, ca.SignatureAlgorithm, ca.Subject)
 	}
-	_, got := c.get("/api/cas/config?id=ca001")
+	_, got := c.get("/api/cas/config?id=ca002")
 	text := got["text"].(string)
-	if !strings.Contains(text, "key_bits = 2048") || !strings.Contains(text, "validity_days = 1000") {
-		t.Fatalf("config.toml must say how the CA was made:\n%s", text)
+	if !strings.Contains(text, "key_bits: 2048") || !strings.Contains(text, "validity_days: 1000") {
+		t.Fatalf("config.yaml must say how the CA was made:\n%s", text)
 	}
-	if _, out := c.post("/api/cas/config", map[string]any{"id": "ca001", "text": strings.Replace(text, "common_name = \"Big CA\"", "common_name = Other", 1)}); out["ok"] != false || !strings.Contains(out["error"].(string), "[ca] common_name") {
-		t.Fatalf("changing [ca] must be refused: %v", out)
+	if _, out := c.post("/api/cas/config", map[string]any{"id": "ca002", "text": strings.Replace(text, `common_name: "Big CA"`, "common_name: Other", 1)}); out["ok"] != false || !strings.Contains(out["error"].(string), "ca: common_name") {
+		t.Fatalf("changing ca must be refused: %v", out)
 	}
-	if _, out := c.post("/api/cas/config", map[string]any{"id": "ca001", "text": strings.Replace(text, "validity_days = 90", "validity_days = 45", 1)}); out["ok"] != true {
-		t.Fatalf("editing [certificates] must be accepted: %v", out)
+	if _, out := c.post("/api/cas/config", map[string]any{"id": "ca002", "text": strings.Replace(text, "validity_days: 90", "validity_days: 45", 1)}); out["ok"] != true {
+		t.Fatalf("editing certificates must be accepted: %v", out)
 	}
 }
 
@@ -612,7 +714,7 @@ func TestLocalCARenewBeforeDays(t *testing.T) {
 func TestLocalCARenewsInTheBackground(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
+	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the Certificates page)
 	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\npattern=*.bg.test\ncert=local-ca\ncert_domains=*.bg.test\ntarget_host=h\ntarget_port=443\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {
@@ -642,7 +744,7 @@ func TestLocalCARenewsInTheBackground(t *testing.T) {
 func TestLocalCARenewalRunsAtStart(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the CAs page)
+	makeCA(t, root, "ca001") // a rule only uses a CA that exists (made on the Certificates page)
 	cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nca_root="+root+"\n[[host]]\nlistener=default\npattern=*.start.test\ncert=local-ca\ntarget_host=h\ntarget_port=443\n")
 	m := NewCertManager()
 	if err := m.Apply(cfg); err != nil {

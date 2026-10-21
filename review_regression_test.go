@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,43 +59,21 @@ func TestPasswordUpdateWaitsForLogin(t *testing.T) {
 	}
 }
 
+// The console is served over TLS only: its session cookie is always Secure.
 func TestConsoleSecureCookies(t *testing.T) {
-	for _, tc := range []struct {
-		name                        string
-		configured, directTLS, want bool
-	}{
-		{"local HTTP", false, false, false},
-		{"published HTTPS", true, false, true},
-		{"direct TLS", false, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie="+strconv.FormatBool(tc.configured)+"\n")
-			hash, err := hashPassword("x")
-			if err != nil {
-				t.Fatal(err)
-			}
-			cfg.Console.PasswordHash = hash
-			c := &Console{sessions: map[string]*session{}}
-			c.update(cfg.Console)
-			req := httptest.NewRequest("POST", "/api/login", strings.NewReader(`{"password":"x"}`))
-			if tc.directTLS {
-				req.TLS = &tls.ConnectionState{}
-			}
-			w := httptest.NewRecorder()
-			c.login(w, req)
-			cookies := w.Result().Cookies()
-			if w.Code != 200 || len(cookies) != 1 || cookies[0].Secure != tc.want || !cookies[0].HttpOnly {
-				t.Fatalf("status=%d cookies=%v", w.Code, cookies)
-			}
-			cfg.Console.SecureCookie = !tc.configured
-			c.update(cfg.Console)
-			if len(c.sessions) != 0 {
-				t.Fatal("cookie policy change did not revoke old sessions")
-			}
-		})
+	hash, err := hashPassword("x")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[console]\nport=9443\npassword=x\nsecure_cookie=invalid\n"); err == nil {
-		t.Fatal("invalid secure_cookie accepted")
+	c := &Console{sessions: map[string]*session{}}
+	c.update(&ConsoleConfig{Domain: "admin.example.com", PasswordHash: hash})
+	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(`{"password":"x"}`))
+	req.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	c.login(w, req)
+	cookies := w.Result().Cookies()
+	if w.Code != 200 || len(cookies) != 1 || !cookies[0].Secure || !cookies[0].HttpOnly || c.domain != "admin.example.com" {
+		t.Fatalf("status=%d cookies=%v", w.Code, cookies)
 	}
 }
 
@@ -128,49 +105,6 @@ func TestRelayCountsPartialWrites(t *testing.T) {
 		if c.CToS.Load() != dirHalfClosed {
 			t.Fatal("partial write did not end direction")
 		}
-	}
-}
-
-func TestPasswordRewriteRejectsStaleSnapshot(t *testing.T) {
-	oldText := "[[listener]]\nname=default\nport=443\n[console]\nport=9443\npassword=old-password\n"
-	for name, newText := range map[string]string{
-		"new password":    strings.ReplaceAll(oldText, "old-password", "new-password"),
-		"unrelated edit":  oldText + "# newer edit\n",
-		"console removed": "[[listener]]\nname=default\nport=443\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.toml")
-			cfg := mustParse(t, oldText)
-			if err := os.WriteFile(path, []byte(newText), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if (&Server{}).securePassword(path, cfg) {
-				t.Fatal("stale snapshot rewrote a newer file")
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(data) != newText {
-				t.Fatal("newer file was overwritten")
-			}
-			// A fresh parse can still hash the current password normally.
-			fresh := mustParse(t, newText)
-			if fresh.Console != nil {
-				password := fresh.Console.Password
-				if !(&Server{}).securePassword(path, fresh) {
-					t.Fatal("current snapshot could not rewrite password")
-				}
-				data, err = os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				saved := mustParse(t, string(data))
-				if !checkPassword(saved.Console.PasswordHash, password) || fresh.sourceHash != saved.sourceHash {
-					t.Fatal("password or tracked snapshot differs from the saved file")
-				}
-			}
-		})
 	}
 }
 
@@ -279,7 +213,7 @@ func TestReloadUsesParsedSnapshotAtStartup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	oldText := "[[listener]]\nname=default\nport=1\n[global]\nreload_interval=0\nstats_interval=0\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n"
 	newText := strings.ReplaceAll(oldText, "stats_interval=0", "stats_interval=17")
-	if err := os.WriteFile(path, []byte(newText), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(yamlFixture(newText)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	p := startProxyText(t, oldText, path)

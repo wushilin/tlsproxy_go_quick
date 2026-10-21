@@ -1,7 +1,7 @@
 package main
 
-// Each CA folder has a config.toml: how the CA itself is made and renewed
-// ([ca]) and what the certificates it issues look like ([certificates]). It
+// Each CA folder has a config.yaml: how the CA itself is made and renewed
+// (ca) and what the certificates it issues look like (certificates). It
 // is written when the CA is made, read again whenever it changes, and a
 // broken one keeps the previous settings (and says so).
 
@@ -23,14 +23,14 @@ import (
 )
 
 type caConfig struct {
-	// [ca]
+	// ca
 	CommonName, Organization string
 	KeyAlgorithm             string // ecdsa, rsa or ed25519: when the CA is generated
 	KeyBits                  int
 	HashAlgorithm            string // its own renewals
 	ValidityDays             int
 
-	// [certificates]
+	// certificates
 	Cert struct {
 		KeyAlgorithm                string
 		KeyBits                     int
@@ -90,7 +90,7 @@ func checkHash(h string) error {
 func (c *caConfig) check() error {
 	fail := func(section string, err error) error { return fmt.Errorf("[%s] %v", section, err) }
 	if c.CommonName == "" {
-		return fmt.Errorf("[ca] common_name must not be empty")
+		return fmt.Errorf("ca: common_name must not be empty")
 	}
 	if err := checkKey(c.KeyAlgorithm, c.KeyBits); err != nil {
 		return fail("ca", err)
@@ -99,7 +99,7 @@ func (c *caConfig) check() error {
 		return fail("ca", err)
 	}
 	if c.ValidityDays < 1 || c.ValidityDays > 36500 {
-		return fmt.Errorf("[ca] validity_days must be 1..36500, got %d", c.ValidityDays)
+		return fmt.Errorf("ca: validity_days must be 1..36500, got %d", c.ValidityDays)
 	}
 	if err := checkKey(c.Cert.KeyAlgorithm, c.Cert.KeyBits); err != nil {
 		return fail("certificates", err)
@@ -108,26 +108,26 @@ func (c *caConfig) check() error {
 		return fail("certificates", err)
 	}
 	if c.Cert.ValidityDays < 1 || c.Cert.ValidityDays > 3650 {
-		return fmt.Errorf("[certificates] validity_days must be 1..3650, got %d", c.Cert.ValidityDays)
+		return fmt.Errorf("certificates: validity_days must be 1..3650, got %d", c.Cert.ValidityDays)
 	}
 	if c.Cert.RenewBeforeDays < 0 || c.Cert.RenewBeforeDays >= c.Cert.ValidityDays {
-		return fmt.Errorf("[certificates] renew_before_days must be 0 (a third of the lifetime) or less than validity_days, got %d", c.Cert.RenewBeforeDays)
+		return fmt.Errorf("certificates: renew_before_days must be 0 (a third of the lifetime) or less than validity_days, got %d", c.Cert.RenewBeforeDays)
 	}
 	for _, u := range c.Cert.KeyUsage {
 		if _, ok := keyUsages[u]; !ok {
-			return fmt.Errorf("[certificates] key_usage: unknown %q (use %s)", u, strings.Join(sortedKeys(keyUsages), ", "))
+			return fmt.Errorf("certificates: key_usage: unknown %q (use %s)", u, strings.Join(sortedKeys(keyUsages), ", "))
 		}
 	}
 	if len(c.Cert.ExtKeyUsage) == 0 {
-		return fmt.Errorf("[certificates] ext_key_usage must not be empty: serverAuth for TLS servers")
+		return fmt.Errorf("certificates: ext_key_usage must not be empty: serverAuth for TLS servers")
 	}
 	for _, u := range c.Cert.ExtKeyUsage {
 		if _, ok := extKeyUsages[u]; !ok {
-			return fmt.Errorf("[certificates] ext_key_usage: unknown %q (use serverAuth, clientAuth)", u)
+			return fmt.Errorf("certificates: ext_key_usage: unknown %q (use serverAuth, clientAuth)", u)
 		}
 	}
 	if len(c.Cert.Country) > 2 {
-		return fmt.Errorf("[certificates] country is a two-letter code, got %q", c.Cert.Country)
+		return fmt.Errorf("certificates: country is a two-letter code, got %q", c.Cert.Country)
 	}
 	return nil
 }
@@ -141,98 +141,99 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// parseCAConfig reads a CA's config.toml: [ca] and [certificates], keys as
-// in the main config file. Anything not given keeps its default.
+// caConfigFile is the name of a CA's settings in its folder; caConfigOld
+// is the one before v1.5.0, which is no longer read.
+const (
+	caConfigFile = "config.yaml"
+	caConfigOld  = "config.toml"
+)
+
+// parseCAConfig reads a CA's config.yaml: ca and certificates, keys as in
+// the main config file. Anything not given keeps its default.
 func parseCAConfig(id, text string) (*caConfig, error) {
 	c := defaultCAConfig(id)
-	section := ""
-	for n, raw := range strings.Split(text, "\n") {
-		line := strings.TrimSpace(raw)
-		fail := func(format string, a ...any) error {
-			return fmt.Errorf("line %d: %s", n+1, fmt.Sprintf(format, a...))
+	doc, err := parseYAML(text)
+	if err != nil {
+		return nil, err
+	}
+	sections, err := pairs(doc.Content[0], "the file")
+	if err != nil {
+		return nil, err
+	}
+	for _, sec := range sections {
+		section := sec[0].Value
+		if section != "ca" && section != "certificates" {
+			return nil, fmt.Errorf("line %d: unknown section %q: use ca or certificates", sec[0].Line, section)
 		}
-		if line == "" || strings.HasPrefix(line, "#") {
+		if sec[1].Tag == "!!null" {
 			continue
 		}
-		if strings.HasPrefix(line, "[") {
-			end := strings.IndexByte(line, ']')
-			if end < 0 {
-				return nil, fail("bad section header")
-			}
-			if section = strings.TrimSpace(line[1:end]); section != "ca" && section != "certificates" {
-				return nil, fail("unknown section [%s]: use [ca] or [certificates]", section)
-			}
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, fail("expected key = value")
-		}
-		key := strings.TrimSpace(k)
-		value, err := parseValue(v)
-		if err != nil {
-			return nil, fail("%v", err)
-		}
-		num := func(dst *int) error {
-			x, err := strconv.Atoi(value)
-			if err != nil {
-				return fail("%s: expected a number, got %q", key, value)
-			}
-			*dst = x
-			return nil
-		}
-		list := func(dst *[]string) {
-			*dst = nil
-			for _, s := range splitList(value) {
-				*dst = append(*dst, s)
-			}
-		}
-		lower := strings.ToLower(value)
-		switch section + "." + key {
-		case "ca.common_name":
-			c.CommonName = value
-		case "ca.organization":
-			c.Organization = value
-		case "ca.key_algorithm":
-			c.KeyAlgorithm = lower
-		case "ca.key_bits":
-			err = num(&c.KeyBits)
-		case "ca.hash_algorithm":
-			c.HashAlgorithm = lower
-		case "ca.validity_days":
-			err = num(&c.ValidityDays)
-		case "certificates.key_algorithm":
-			c.Cert.KeyAlgorithm = lower
-		case "certificates.key_bits":
-			err = num(&c.Cert.KeyBits)
-		case "certificates.hash_algorithm":
-			c.Cert.HashAlgorithm = lower
-		case "certificates.validity_days":
-			err = num(&c.Cert.ValidityDays)
-		case "certificates.renew_before_days":
-			err = num(&c.Cert.RenewBeforeDays)
-		case "certificates.key_usage":
-			list(&c.Cert.KeyUsage)
-		case "certificates.ext_key_usage":
-			list(&c.Cert.ExtKeyUsage)
-		case "certificates.organization":
-			c.Cert.Organization = value
-		case "certificates.organizational_unit":
-			c.Cert.OrganizationalUnit = value
-		case "certificates.country":
-			c.Cert.Country = strings.ToUpper(value)
-		case "certificates.province":
-			c.Cert.Province = value
-		case "certificates.locality":
-			c.Cert.Locality = value
-		default:
-			if section == "" {
-				return nil, fail("%s is outside a section: put it under [ca] or [certificates]", key)
-			}
-			return nil, fail("unknown key %q in [%s]", key, section)
-		}
+		items, err := pairs(sec[1], section)
 		if err != nil {
 			return nil, err
+		}
+		for _, it := range items {
+			key := it[0].Value
+			fail := func(format string, a ...any) error {
+				return fmt.Errorf("line %d: %s", it[0].Line, fmt.Sprintf(format, a...))
+			}
+			value, err := yamlValue(key, it[1])
+			if err != nil {
+				return nil, err
+			}
+			num := func(dst *int) error {
+				x, err := strconv.Atoi(value)
+				if err != nil {
+					return fail("%s: expected a number, got %q", key, value)
+				}
+				*dst = x
+				return nil
+			}
+			list := func(dst *[]string) { *dst = splitList(value) }
+			lower := strings.ToLower(value)
+			switch section + "." + key {
+			case "ca.common_name":
+				c.CommonName = value
+			case "ca.organization":
+				c.Organization = value
+			case "ca.key_algorithm":
+				c.KeyAlgorithm = lower
+			case "ca.key_bits":
+				err = num(&c.KeyBits)
+			case "ca.hash_algorithm":
+				c.HashAlgorithm = lower
+			case "ca.validity_days":
+				err = num(&c.ValidityDays)
+			case "certificates.key_algorithm":
+				c.Cert.KeyAlgorithm = lower
+			case "certificates.key_bits":
+				err = num(&c.Cert.KeyBits)
+			case "certificates.hash_algorithm":
+				c.Cert.HashAlgorithm = lower
+			case "certificates.validity_days":
+				err = num(&c.Cert.ValidityDays)
+			case "certificates.renew_before_days":
+				err = num(&c.Cert.RenewBeforeDays)
+			case "certificates.key_usage":
+				list(&c.Cert.KeyUsage)
+			case "certificates.ext_key_usage":
+				list(&c.Cert.ExtKeyUsage)
+			case "certificates.organization":
+				c.Cert.Organization = value
+			case "certificates.organizational_unit":
+				c.Cert.OrganizationalUnit = value
+			case "certificates.country":
+				c.Cert.Country = strings.ToUpper(value)
+			case "certificates.province":
+				c.Cert.Province = value
+			case "certificates.locality":
+				c.Cert.Locality = value
+			default:
+				return nil, fail("unknown key %q in %s", key, section)
+			}
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := c.check(); err != nil {
@@ -241,47 +242,48 @@ func parseCAConfig(id, text string) (*caConfig, error) {
 	return c, nil
 }
 
-// text writes c as a commented config.toml.
+// text writes c as a commented config.yaml.
 func (c *caConfig) text() string {
-	q := func(s string) string {
-		v, _ := fmtValue(s)
-		if v == "" {
-			return `""`
+	q := strconv.Quote
+	list := func(items []string) string {
+		var out []string
+		for _, s := range items {
+			out = append(out, s)
 		}
-		return v
+		return "[" + strings.Join(out, ", ") + "]"
 	}
 	return fmt.Sprintf(`# Settings of this CA, read again whenever this file changes. A mistake keeps
-# the previous settings; the console's CAs page and the log say what is wrong.
+# the previous settings; the console's Certificates page and the log say what is wrong.
 
-[ca]
-# The CA itself. Name and key are set when the CA is made and kept afterwards:
-# a new key or name would break every certificate it issued.
-common_name = %s
-organization = %s
-key_algorithm = %s          # ecdsa, rsa or ed25519
-key_bits = %d               # ecdsa: 256, 384, 521; rsa: 2048, 3072, 4096; ed25519: ignored
-# Used when it renews its own certificate (same key, same name):
-hash_algorithm = %s         # sha256, sha384 or sha512
-validity_days = %d
+ca:
+  # The CA itself. Name and key are set when the CA is made and kept afterwards:
+  # a new key or name would break every certificate it issued.
+  common_name: %s
+  organization: %s
+  key_algorithm: %s          # ecdsa, rsa or ed25519
+  key_bits: %d               # ecdsa: 256, 384, 521; rsa: 2048, 3072, 4096; ed25519: ignored
+  # Used when it renews its own certificate (same key, same name):
+  hash_algorithm: %s         # sha256, sha384 or sha512
+  validity_days: %d
 
-[certificates]
-# What it issues: one certificate per name, the name as its common name.
-# Changes apply to new certificates and renewals.
-key_algorithm = %s          # ecdsa, rsa or ed25519
-key_bits = %d
-hash_algorithm = %s         # the CA's signature on them: sha256, sha384 or sha512
-validity_days = %d
-renew_before_days = %d      # 0 = when a third of the lifetime is left
-key_usage = %s              # digitalSignature, keyEncipherment (RSA keys, old clients), keyAgreement, ...
-ext_key_usage = %s          # serverAuth, clientAuth
-organization = %s
-organizational_unit = %s
-country = %s                # two letters, e.g. SG
-province = %s
-locality = %s
+certificates:
+  # What it issues: one certificate per name, the name as its common name.
+  # Changes apply to new certificates and renewals.
+  key_algorithm: %s          # ecdsa, rsa or ed25519
+  key_bits: %d
+  hash_algorithm: %s         # the CA's signature on them: sha256, sha384 or sha512
+  validity_days: %d
+  renew_before_days: %d      # 0 = when a third of the lifetime is left
+  key_usage: %s              # digitalSignature, keyEncipherment (RSA keys, old clients), keyAgreement, ...
+  ext_key_usage: %s          # serverAuth, clientAuth
+  organization: %s
+  organizational_unit: %s
+  country: %s                # two letters, e.g. SG
+  province: %s
+  locality: %s
 `, q(c.CommonName), q(c.Organization), c.KeyAlgorithm, c.KeyBits, c.HashAlgorithm, c.ValidityDays,
 		c.Cert.KeyAlgorithm, c.Cert.KeyBits, c.Cert.HashAlgorithm, c.Cert.ValidityDays, c.Cert.RenewBeforeDays,
-		q(strings.Join(c.Cert.KeyUsage, ", ")), q(strings.Join(c.Cert.ExtKeyUsage, ", ")),
+		list(c.Cert.KeyUsage), list(c.Cert.ExtKeyUsage),
 		q(c.Cert.Organization), q(c.Cert.OrganizationalUnit), q(c.Cert.Country), q(c.Cert.Province), q(c.Cert.Locality))
 }
 
@@ -322,7 +324,7 @@ func signatureAlgorithm(key crypto.Signer, hash string) x509.SignatureAlgorithm 
 	return x509.PureEd25519
 }
 
-// describeKey fills [ca] key settings from an existing key (an imported CA).
+// describeKey fills the ca key settings from an existing key (an imported CA).
 func describeKey(c *caConfig, pub crypto.PublicKey) {
 	switch k := pub.(type) {
 	case *rsa.PublicKey:
@@ -334,14 +336,27 @@ func describeKey(c *caConfig, pub crypto.PublicKey) {
 	}
 }
 
-// loadConfig reads the CA's config.toml when it changed since last time,
+// loadConfig reads the CA's config.yaml when it changed since last time,
 // writing the defaults if there is none. It keeps the previous settings when
-// the file is broken, and remembers why.
+// the file is broken, and remembers why. A config.toml from before v1.5.0
+// is not read: it is reported until a config.yaml says the same.
 func (l *localCA) loadConfig() {
 	defer lockCA(l.dir)()
-	path := filepath.Join(l.dir, "config.toml")
+	path := filepath.Join(l.dir, caConfigFile)
 	fi, err := os.Stat(path)
 	if os.IsNotExist(err) {
+		if _, old := os.Stat(filepath.Join(l.dir, caConfigOld)); old == nil {
+			msg := fmt.Sprintf("%s is no longer read: write its settings as %s (YAML: ca: and certificates:, key: value; see the console's Certificates page for the form)", filepath.Join(l.dir, caConfigOld), path)
+			if cur := l.conf.Load(); cur == nil || cur.err != msg {
+				errorf("cert: CA %s: %s; the defaults are in use", l.id, msg)
+			}
+			c := defaultCAConfig(l.id)
+			if st := l.ca.Load(); st != nil {
+				setCAFromCert(c, st.cert)
+			}
+			l.setConfig(c, msg, time.Time{})
+			return
+		}
 		c := defaultCAConfig(l.id)
 		if st := l.ca.Load(); st != nil {
 			setCAFromCert(c, st.cert)
@@ -389,8 +404,8 @@ func (l *localCA) setConfig(c *caConfig, problem string, mtime time.Time) {
 	l.conf.Store(&caConfigState{c: c, err: problem, mtime: mtime})
 }
 
-// parseConfig reads a config.toml for this CA: valid, and with [ca] as the
-// CA was made (that section describes the CA; it can't change it).
+// parseConfig reads a config.yaml for this CA: valid, and with ca as the CA
+// was made (that section describes the CA; it can't change it).
 func (l *localCA) parseConfig(text string) (*caConfig, error) {
 	c, err := parseCAConfig(l.id, text)
 	if err != nil {
@@ -416,7 +431,7 @@ func (l *localCA) parseConfig(text string) (*caConfig, error) {
 		{"validity_days", c.ValidityDays, made.ValidityDays, false},
 	} {
 		if !f.skip && f.have != f.want {
-			return nil, fmt.Errorf("[ca] %s is %v, but this CA was made with %v: the [ca] section describes the CA and can't change it (only [certificates] can be edited)", f.key, f.have, f.want)
+			return nil, fmt.Errorf("ca: %s is %v, but this CA was made with %v: the ca section describes the CA and can't change it (only certificates can be edited)", f.key, f.have, f.want)
 		}
 	}
 	return c, nil

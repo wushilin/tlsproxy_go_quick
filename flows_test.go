@@ -123,7 +123,7 @@ func TestFlowHandlingDetails(t *testing.T) {
 	t.Parallel()
 	ca := newTestCA(t)
 	port := echoBackend(t, "up:")
-	p := startProxy(t, "proxy_protocol_from = 127.0.0.1",
+	p := startProxy(t, "proxy_trust_source = 127.0.0.1",
 		fmt.Sprintf("[[host]]\nlistener=default\npattern=via.flow.test\nproxy=true\nproxy_version=1\nmax_single_connection_speed=1MiB/s\ntarget_host=127.0.0.1\ntarget_port=%d\n", port)+
 			fmt.Sprintf("[[host]]\nlistener=default\npattern=term.flow.test\ncert=%s\nupstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", ca.localCA(t), port))
 

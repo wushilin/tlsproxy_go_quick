@@ -7,8 +7,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +19,7 @@ import (
 type treeItem struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
-	From  string `json:"from,omitempty"` // "" = written in this section; "default"; "[global]"
+	From  string `json:"from,omitempty"` // "" = written in this section; "default"; "global"
 }
 
 type treeNode struct {
@@ -95,19 +97,14 @@ func speed(bytesPerSec float64, written string) string {
 // configTree describes cfg, parsed from full; toEditor maps its lines to
 // the editor's.
 func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
-	lines := strings.Split(full, "\n")
-	written := func(header string) map[string]string {
-		if b := sectionBlocks(lines, header); len(b) > 0 {
-			return blockValues(lines, b[0])
+	written := func(section string) map[string]string { return sectionValues(full, section) }
+	hosts, lists := fileValues(full)
+	at := func(items map[int]map[string]any, line int) map[string]string {
+		out := map[string]string{}
+		for k, v := range items[line] {
+			out[k] = valueText(v)
 		}
-		return map[string]string{}
-	}
-	hosts, lists := sectionBlocks(lines, "[[host]]"), sectionBlocks(lines, "[[listener]]")
-	at := func(blocks []block, line int) map[string]string {
-		if b := blockAt(blocks, line); b != nil {
-			return blockValues(lines, *b)
-		}
-		return map[string]string{}
+		return out
 	}
 	item := func(set map[string]string, key, value string) treeItem {
 		it := treeItem{Key: key, Value: value}
@@ -117,8 +114,8 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		return it
 	}
 
-	g := written("[global]")
-	global := treeNode{Title: "[global]", Note: "applies to every listener unless it overrides it"}
+	g := written("global")
+	global := treeNode{Title: "global", Note: "applies to every listener unless it overrides it"}
 	for _, it := range []treeItem{
 		item(g, "handshake_timeout", secs(cfg.HandshakeTimeout, "none")),
 		item(g, "connect_timeout", secs(cfg.ConnectTimeout, "none")),
@@ -126,7 +123,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		item(g, "half_close_timeout", secs(cfg.HalfCloseTimeout, "unlimited")),
 		item(g, "max_connections", strconv.Itoa(cfg.MaxConnections)),
 		item(g, "max_handshakes_per_ip", map[bool]string{true: "unlimited", false: strconv.Itoa(cfg.MaxHandshakesPerIP)}[cfg.MaxHandshakesPerIP == 0]),
-		item(g, "proxy_protocol_from", prefixes(cfg.ProxyProtocolFrom)),
+		item(g, "proxy_trust_source", prefixes(cfg.ProxyTrustSource)),
 		item(g, "buffer_size", fmt.Sprintf("%d (%s)", cfg.BufferSize, humanBytes(int64(cfg.BufferSize)))),
 		item(g, "splice", strconv.FormatBool(cfg.Splice)),
 		item(g, "buffer_pool_max_idle", strconv.Itoa(cfg.BufferPoolMaxIdle)),
@@ -147,13 +144,13 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			if set {
 				return treeItem{Key: key, Value: own}
 			}
-			return treeItem{Key: key, Value: global, From: "[global]"}
+			return treeItem{Key: key, Value: global, From: "global"}
 		}
 		n.Line = toEditor(l.Line)
 		n.Items = append(n.Items, treeItem{Key: "bind", Value: l.Bind}, treeItem{Key: "port", Value: strconv.Itoa(l.Port)})
-		ppf := cfg.ProxyProtocolFrom
-		if l.ProxyProtocolFrom != nil {
-			ppf = *l.ProxyProtocolFrom
+		ppf := cfg.ProxyTrustSource
+		if l.ProxyTrustSource != nil {
+			ppf = *l.ProxyTrustSource
 		}
 		dur := func(p *time.Duration, g time.Duration, zero string) (string, bool) {
 			if p != nil {
@@ -170,7 +167,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			maxConns = strconv.Itoa(l.MaxConnections)
 		}
 		n.Items = append(n.Items,
-			inherit("proxy_protocol_from", prefixes(ppf), prefixes(ppf), l.ProxyProtocolFrom != nil),
+			inherit("proxy_trust_source", prefixes(ppf), prefixes(ppf), l.ProxyTrustSource != nil),
 			treeItem{Key: "max_connections", Value: maxConns, From: map[bool]string{true: "", false: "default"}[l.MaxConnections > 0]},
 			inherit("handshake_timeout", hs, hs, hsSet),
 			inherit("idle_timeout", idle, idle, idleSet),
@@ -191,6 +188,25 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 
 	out := []treeNode{global, listeners}
 
+	if len(cfg.BasicAuth) > 0 {
+		auths := treeNode{Title: "Basic auth", Note: fmt.Sprintf("%d", len(cfg.BasicAuth))}
+		names := slices.Sorted(maps.Keys(cfg.BasicAuth))
+		for _, name := range names {
+			a := cfg.BasicAuth[name]
+			users := slices.Sorted(maps.Keys(a.Users))
+			n := treeNode{Title: name, Note: fmt.Sprintf("%d user(s)", len(users)), Line: toEditor(a.Line)}
+			for _, u := range users {
+				how := "password hash"
+				if a.Users[u].hash == "" {
+					how = "plain password"
+				}
+				n.Items = append(n.Items, treeItem{Key: u, Value: how})
+			}
+			auths.Children = append(auths.Children, n)
+		}
+		out = append(out, auths)
+	}
+
 	if auto := cfg.AutoDomains(); len(auto) > 0 || cfg.AcmeAgreeTOS {
 		certs := treeNode{Title: "Automatic certificates", Note: fmt.Sprintf("%d name(s)", len(auto))}
 		certs.Items = []treeItem{
@@ -198,7 +214,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			item(g, "acme_directory", cfg.AcmeDirectory),
 			item(g, "acme_agree_tos", strconv.FormatBool(cfg.AcmeAgreeTOS)),
 			item(g, "acme_email", map[bool]string{true: "none", false: cfg.AcmeEmail}[cfg.AcmeEmail == ""]),
-			item(g, "cert_path", cfg.CertPath),
+			item(g, "cert_root", cfg.CARoot),
 			item(g, "expiry_threshold_days", strconv.Itoa(cfg.ExpiryThresholdDays)),
 			item(g, "public_ip_address", listOr(cfg.PublicIPs, "not checked")),
 			item(g, "dns_resolvers", listOr(cfg.DNSResolvers, "none (required when the pre-check runs)")),
@@ -206,8 +222,8 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		out = append(out, certs)
 	}
 
-	lg := written("[logging]")
-	logs := treeNode{Title: "[logging]"}
+	lg := written("logging")
+	logs := treeNode{Title: "logging"}
 	logs.Items = []treeItem{
 		item(lg, "stdout", map[bool]string{true: "the process's stdout", false: cfg.Log.Stdout}[cfg.Log.Stdout == ""]),
 		item(lg, "stderr", map[bool]string{true: "the process's stderr", false: cfg.Log.Stderr}[cfg.Log.Stderr == ""]),
@@ -226,8 +242,21 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 		add("action", "deny (TLS access_denied alert)")
 		return n
 	}
-	add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
-	if r.Terminates() {
+	switch {
+	case r.Console:
+		n.Tag = "console"
+		add("cert", r.Cert)
+	case r.Serves():
+		n.Tag = "serve"
+		add("cert", r.Cert)
+		if len(r.CertDomains) > 0 {
+			add("cert_domains", strings.Join(r.CertDomains, ", "))
+		}
+		for _, route := range r.Routes {
+			add(route.Key, route.Describe())
+		}
+	case r.Terminates():
+		add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
 		n.Tag = "terminate"
 		add("cert", r.Cert)
 		if len(r.CertDomains) > 0 {
@@ -235,7 +264,7 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 		}
 		if r.CertValidateScript != "" {
 			add("cert_validate_script", r.CertValidateScript)
-			add("cert_validate_args", tomlArray(mustJSON(r.CertValidateArgs)))
+			add("cert_validate_args", strings.Join(r.CertValidateArgs, ", "))
 		}
 		if r.UpstreamTLS {
 			add("upstream", map[bool]string{true: "TLS, certificate verified", false: "TLS, certificate not verified"}[r.UpstreamTLSVerify])
@@ -245,7 +274,8 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 		} else {
 			add("upstream", "plaintext")
 		}
-	} else {
+	default:
+		add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
 		n.Tag = "passthrough"
 	}
 	if r.Proxy {

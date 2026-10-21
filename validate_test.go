@@ -49,12 +49,12 @@ func TestCertValidateScriptConfig(t *testing.T) {
 		"with a directory": auto + "[[host]]\nlistener=default\npattern=.*\ncert=/tmp\ncert_validate_script=./d.sh\ntarget_host=x.lan\ntarget_port=443\n",
 		"empty":            auto + "[[host]]\nlistener=default\npattern=*.x\\.com\ncert=auto\ncert_validate_script=''\ntarget_host=x.lan\ntarget_port=443\n",
 	} {
-		if _, err := ParseConfig(text); err == nil {
+		if _, err := parseFixture(text); err == nil {
 			t.Errorf("%s: should be rejected", name)
 		}
 	}
 	// The script must exist and be executable, at startup and on reload.
-	if err := NewCertManager().Check(c); err == nil || !strings.Contains(err.Error(), "cert_validate_script = ./domains.sh") {
+	if err := NewCertManager().Check(c); err == nil || !strings.Contains(err.Error(), "cert_validate_script: ./domains.sh") {
 		t.Fatalf("missing script: %v", err)
 	}
 }
@@ -173,15 +173,15 @@ func TestCertValidateScriptDecidesIssuanceAndRenewal(t *testing.T) {
 
 func TestCertValidateScriptAdoptsCertificatesOnDisk(t *testing.T) {
 	dir := t.TempDir()
-	script := validateScript(t, dir, "exit 1\n") // would refuse, but must not even be asked
-	certPath := filepath.Join(dir, "certs")
+	script := validateScript(t, dir, "exit 1\n")    // would refuse, but must not even be asked
+	certPath := filepath.Join(dir, "certs", "acme") // in cert_root
 	certPEM, keyPEM := newTestCA(t).issue(t, 12*time.Hour, "kept.s.test")
 	os.MkdirAll(filepath.Join(certPath, "kept.s.test"), 0o700)
 	os.MkdirAll(filepath.Join(certPath, "other.example.org"), 0o700) // not covered by the rule
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "cert.pem"), certPEM, 0o600)
 	os.WriteFile(filepath.Join(certPath, "kept.s.test", "key.pem"), keyPEM, 0o600)
-	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_path=%s\n"+
-		"[[host]]\nlistener=default\npattern=*.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\ntarget_port=443\n", certPath, script))
+	cfg := mustParse(t, fmt.Sprintf("[[listener]]\nname=default\nport=443\n[global]\nacme_agree_tos=true\npublic_ip_address=1.2.3.4\ndns_resolvers=127.0.0.1:1\ncert_root=%s\n"+
+		"[[host]]\nlistener=default\npattern=*.s\\.test\ncert=auto\ncert_validate_script=%s\ntarget_host=x.lan\ntarget_port=443\n", filepath.Dir(certPath), script))
 	m := NewCertManager()
 	m.issueFunc = func(context.Context, *Config, string) error { t.Error("nothing needs issuing"); return nil }
 	if err := m.Apply(cfg); err != nil {
@@ -342,17 +342,15 @@ func TestCertValidateScriptArgs(t *testing.T) {
 		t.Errorf("default args: %q", got)
 	}
 	for text, want := range map[string]string{
-		`cert_validate_args = "${host}"`:   "expected an array of strings",
-		`cert_validate_args = [${host}]`:   "expected an array of quoted strings",
-		`cert_validate_args = ["a" "b"]`:   "expected , or ]",
-		`cert_validate_args = ["a"] extra`: "unexpected text after array",
-		`cert_validate_args = ["a`:         "unterminated string",
-		`cert_validate_args = []`:          "at least one argument",
-		`cert_validate_args = ["$1"]`:      "write ${1}, not $1",
-		`cert_validate_args = ["${3}"]`:    "${3} does not exist",
-		"cert_validate_args = [\"x\"]\n#":  "", // fine, for the comment-after check below
+		`cert_validate_args = "${host}"`:  "cert_validate_args is a list",
+		`cert_validate_args = ["a" "b"]`:  "did not find expected ','",
+		`cert_validate_args = ["a`:        "did not find expected ','",
+		`cert_validate_args = []`:         "at least one argument",
+		`cert_validate_args = ["$1"]`:     "write ${1}, not $1",
+		`cert_validate_args = ["${3}"]`:   "${3} does not exist",
+		"cert_validate_args = [\"x\"]\n#": "", // fine, for the comment-after check below
 	} {
-		_, err := ParseConfig(auto + "[[host]]\nlistener=default\npattern=*.*.x.com\ncert=auto\ncert_validate_script=/opt/d.sh\n" + text + "\ntarget_host=x.lan\ntarget_port=443\n")
+		_, err := parseFixture(auto + "[[host]]\nlistener=default\npattern=*.*.x.com\ncert=auto\ncert_validate_script=/opt/d.sh\n" + text + "\ntarget_host=x.lan\ntarget_port=443\n")
 		if want == "" {
 			if err != nil {
 				t.Errorf("%s: %v", text, err)
@@ -361,7 +359,7 @@ func TestCertValidateScriptArgs(t *testing.T) {
 			t.Errorf("%s: %v, want %q", text, err, want)
 		}
 	}
-	if _, err := ParseConfig(auto + "[[host]]\nlistener=default\npattern=a.x.com\ncert=auto\ncert_validate_args=[\"${host}\"]\ntarget_host=x.lan\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), "needs a cert_validate_script") {
+	if _, err := parseFixture(auto + "[[host]]\nlistener=default\npattern=a.x.com\ncert=auto\ncert_validate_args=[\"${host}\"]\ntarget_host=x.lan\ntarget_port=443\n"); err == nil || !strings.Contains(err.Error(), "needs a cert_validate_script") {
 		t.Errorf("args without a script: %v", err)
 	}
 
@@ -376,15 +374,16 @@ func TestCertValidateScriptArgs(t *testing.T) {
 		t.Fatalf("argv: %q", got)
 	}
 
-	// The console keeps the array as an array when it rewrites the rule.
-	text := auto + "[[host]]\nlistener = default\npattern=*.*.x.com\ncert=auto\ncert_validate_script=/opt/d.sh\ncert_validate_args = ['a b', \"${1}\"] # note\ntarget_host=x.lan\ntarget_port = 443\n"
-	lines := strings.Split(text, "\n")
-	b := sectionBlocks(lines, "[[host]]")[0]
-	v := blockValues(lines, b)
-	if v["cert_validate_args"] != `["a b", "${1}"]` {
-		t.Fatalf("read back: %q", v["cert_validate_args"])
+	// The console keeps the list a list when it rewrites the rule.
+	text := "listeners:\n  - {name: default, port: 443}\nglobal:\n  acme_agree_tos: true\nroutes:\n  - listener: default\n    rules:\n" +
+		"      - domain: \"*.*.x.com\"\n        cert: auto\n        cert_validate_script: /opt/d.sh\n        cert_validate_args: [\"a b\", \"${1}\"] # note\n        target: \"x.lan:443\"\n"
+	rules, _ := fileValues(text)
+	v := rules[8]["cert_validate_args"]
+	if fmt.Sprint(v) != "[a b ${1}]" {
+		t.Fatalf("read back: %#v", v)
 	}
-	if f, err := fmtValue(v["cert_validate_args"]); err != nil || f != `["a b", "${1}"]` {
-		t.Fatalf("written: %q %v", f, err)
+	got, _, _, err := editRules(text, 8, map[string]any{"cert_validate_args": v}, false)
+	if err != nil || !strings.Contains(got, `cert_validate_args: ["a b", "${1}"] # note`) {
+		t.Fatalf("written back unchanged: %v\n%s", err, got)
 	}
 }

@@ -1,0 +1,48 @@
+# TLS termination with automatic certificates (Let's Encrypt, TLS-ALPN-01).
+# Go version only. Routing expectations are checked by `go test`; certificates
+# are not needed for that.
+#
+#> nas.example.com       => 192.168.1.10:5001
+#> www.example.com       => 192.168.1.30:8080
+#> blog.example.com      => 192.168.1.30:8080
+#> shop.example.com      => 192.168.1.30:8080
+#> legacy.example.com    => 192.168.1.40:443
+#> other.org             => DENY
+
+global:
+  cert_root: /var/db/tlsproxy/certs
+  acme_agree_tos: true
+  acme_email: admin@example.com
+  public_ip_address: [203.0.113.7]   # only ask the CA for names that really point here
+  dns_resolvers: [1.1.1.1, 8.8.8.8, "2606:4700:4700::1111"]   # public DNS servers for that check (required with it)
+
+listeners:
+  - name: https
+    bind: [0.0.0.0]
+    port: 443                        # the CA validates on public port 443
+
+routes:
+  - listener: https
+    rules:
+      # A literal domain: the certificate name is taken from it. The NAS speaks
+      # HTTPS with a self-signed certificate, so don't verify it.
+      - domain: nas.example.com
+        cert: auto
+        target: "192.168.1.10:5001"
+        upstream_tls_verify: false
+
+      # A wildcard domain: certificates are per exact name, so list them. shop (and
+      # any other name under example.com) is routed too, but gets a self-signed
+      # placeholder until it is added here. The literal rules around it still win.
+      - domain: "*.example.com"
+        cert: auto
+        cert_domains: [www.example.com, blog.example.com]
+        target: "192.168.1.30:8080"
+        upstream_tls: false              # plain HTTP backend
+
+      # No cert: passed through untouched; the backend keeps its own certificate.
+      - domain: legacy.example.com
+        target: "192.168.1.40:443"
+
+      - domain: $anything_else
+        action: deny

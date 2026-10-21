@@ -2,8 +2,7 @@ package main
 
 // Certificates for rules that terminate TLS.
 //
-//   cert = <dir>   cert.pem (leaf + chain) and key.pem, plus an optional
-//                  ca.pem appended to the chain; re-read when the files change.
+//   cert = local-ca  issued by a CA of your own, per name (see localca.go).
 //   cert = auto    issued and renewed through ACME with the TLS-ALPN-01
 //                  challenge (RFC 8737): the CA connects to port 443 with ALPN
 //                  "acme-tls/1" and we answer with a special self-signed
@@ -39,6 +38,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,7 +103,7 @@ type CertManager struct {
 	mu           sync.RWMutex
 	view         atomic.Pointer[certView]
 	proposals    *ring[string]             // names a handshake asks to put to the script; the worker takes them
-	localCAs     syncMap[string, *localCA] // by dir (<ca_root>/caNNN); handshakes read it without a lock
+	localCAs     syncMap[string, *localCA] // by dir (<cert_root>/caNNN); handshakes read it without a lock
 	localLog     rateLimitedLog
 	localRenewed time.Time // when the local CAs were last gone through
 	cfg          *Config
@@ -187,10 +187,10 @@ func (m *CertManager) current() *certView {
 	return &certView{}
 }
 
-// Apply validates cfg's certificate settings and makes them current. Directory
-// certificates must load, otherwise the config is rejected (at startup and on
-// reload). Automatic ones are picked up from disk if present; the rest is the
-// background worker's job.
+// Apply validates cfg's certificate settings and makes them current. Every
+// local CA a rule names must open, otherwise the config is rejected (at
+// startup and on reload). Automatic certificates are picked up from disk if
+// present; the rest is the background worker's job.
 func (m *CertManager) Apply(cfg *Config) error {
 	m.applyMu.Lock()
 	defer m.applyMu.Unlock()
@@ -240,14 +240,18 @@ func (m *CertManager) Apply(cfg *Config) error {
 	return nil
 }
 
-// Check reports whether cfg's directory certificates can be loaded, without
+// Check reports whether cfg's local CAs and scripts can be used, without
 // changing anything (the console validates unsaved text with it).
 func (m *CertManager) Check(cfg *Config) error {
-	// Every CA a rule names must exist (made on the CAs page) and load.
+	// Every CA a rule names must exist (made on the Certificates page) and load.
 	for i := range cfg.Rules {
 		if id := cfg.Rules[i].LocalCA(); id != "" {
-			if _, err := openLocalCA(id, filepath.Join(cfg.CARoot, id), false); err != nil {
-				return fmt.Errorf("[[host]] at line %d: cert = local-ca:%s: %w", cfg.Rules[i].Line, id, err)
+			dir := filepath.Join(cfg.CARoot, id)
+			if _, err := os.Stat(dir); id == defaultCAID && errors.Is(err, os.ErrNotExist) {
+				continue // made when the configuration is applied
+			}
+			if _, err := openLocalCA(id, dir, false); err != nil {
+				return fmt.Errorf("rule at line %d: cert: local-ca:%s: %w", cfg.Rules[i].Line, id, err)
 			}
 		}
 	}
@@ -255,9 +259,18 @@ func (m *CertManager) Check(cfg *Config) error {
 }
 
 // openLocalCAs opens every CA a rule of cfg uses; each must exist already
-// (made on the CAs page). One already open stays open: its certificates are
+// (made on the Certificates page). One already open stays open: its certificates are
 // kept.
 func (m *CertManager) openLocalCAs(cfg *Config) error {
+	// The default CA, whether a rule uses it or not: made if missing, then
+	// renewed with the others. Only a rule that needs it fails without it.
+	if dir := filepath.Join(cfg.CARoot, defaultCAID); !m.hasLocalCA(dir) {
+		if l, err := openLocalCA(defaultCAID, dir, true); err != nil {
+			errorf("cert: the default CA %s can't be made or opened in %s: %v", defaultCAID, dir, err)
+		} else {
+			m.localCAs.Store(dir, l)
+		}
+	}
 	for i := range cfg.Rules {
 		id := cfg.Rules[i].LocalCA()
 		if id == "" {
@@ -269,7 +282,7 @@ func (m *CertManager) openLocalCAs(cfg *Config) error {
 		}
 		l, err := openLocalCA(id, dir, false)
 		if err != nil {
-			return fmt.Errorf("[[host]] at line %d: cert = local-ca:%s: %w", cfg.Rules[i].Line, id, err)
+			return fmt.Errorf("rule at line %d: cert: local-ca:%s: %w", cfg.Rules[i].Line, id, err)
 		}
 		m.localCAs.Store(dir, l)
 	}
@@ -278,26 +291,43 @@ func (m *CertManager) openLocalCAs(cfg *Config) error {
 
 // localCAIssues reports whether a rule of cfg would have CA id issue for
 // name: one using that CA matches the name, and its cert_domains allow it.
+// A name with addresses (see sanKey) is a NONE or ANY rule's: the one its
+// cert_domains make, or any one address with its host names when it lists
+// none (the address a client connected to).
 func localCAIssues(cfg *Config, id, name string) bool {
+	ips, hosts := sanSplit(name)
 	for i := range cfg.Rules {
 		r := &cfg.Rules[i]
-		if r.LocalCA() != id || !r.LocalCAIssues(name) {
+		if r.LocalCA() != id {
 			continue
 		}
-		if r.Kind == kindCatchAll || (r.Pattern != nil && r.Pattern.MatchString(name)) {
+		if len(ips) > 0 {
+			if !r.NoSNI && r.Kind != kindCatchAll {
+				continue
+			}
+			if len(r.certIPs) > 0 {
+				if r.certKey == name {
+					return true
+				}
+			} else if a, _ := netip.AddrFromSlice(ips[0]); len(ips) == 1 && sanKey([]netip.Addr{a.Unmap()}, r.certHosts) == name {
+				return true
+			}
+			continue
+		}
+		if len(hosts) == 1 && r.LocalCAIssues(name) && (r.Kind == kindCatchAll || (r.Pattern != nil && r.Pattern.MatchString(name))) {
 			return true
 		}
 	}
 	return false
 }
 
-// LocalCA is the open CA id in cfg's ca_root, nil if no rule uses it.
+// LocalCA is the open CA id in cfg's cert_root, nil if no rule uses it.
 func (m *CertManager) LocalCA(cfg *Config, id string) *localCA {
 	l, _ := m.localCAs.Load(filepath.Join(cfg.CARoot, id))
 	return l
 }
 
-// reloadLocalCAConfigs picks up edits of the CAs' config.toml files.
+// reloadLocalCAConfigs picks up edits of the CAs' config.yaml files.
 func (m *CertManager) reloadLocalCAConfigs() {
 	m.localCAs.Range(func(_ string, l *localCA) bool {
 		l.loadConfig()
@@ -308,7 +338,7 @@ func (m *CertManager) reloadLocalCAConfigs() {
 // renewLocalCAs is the local CAs' renewal pass, run at start and every
 // localRenewInterval: each CA's own certificate when due, every certificate
 // it issued that is due (and a rule still issues for), and archives over 14
-// days old (each CA's, ca_root's own of deleted CAs, and cert_path's of
+// days old (each CA's, cert_root's own of deleted CAs, and acme's of
 // removed automatic certificates).
 func (m *CertManager) renewLocalCAs() {
 	cfg := m.current().cfg
@@ -340,7 +370,7 @@ func checkScripts(cfg *Config) error {
 			err = errors.New("not an executable file")
 		}
 		if err != nil {
-			return fmt.Errorf("[[host]] at line %d: cert_validate_script = %s: %w", cfg.Rules[i].Line, script, err)
+			return fmt.Errorf("rule at line %d: cert_validate_script: %s: %w", cfg.Rules[i].Line, script, err)
 		}
 	}
 	return nil
@@ -541,8 +571,19 @@ func (m *CertManager) loadAutoFromDisk(cfg *Config, domain string) {
 // It runs in every terminated handshake and takes no lock: it reads the
 // published view, which may be a moment behind the worker.
 func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, error) {
+	return m.CertificateForClient(rule, helloInfo{SNI: sni}, netip.Addr{})
+}
+
+// CertificateForClient is CertificateFor with what a local CA also needs for
+// a client without a host name: an IP address it sent as its server name,
+// and the address it connected to.
+func (m *CertManager) CertificateForClient(rule *Rule, hello helloInfo, dialed netip.Addr) (*tls.Certificate, error) {
+	sni := hello.SNI
+	if rule.fixedCert != nil {
+		return rule.fixedCert, nil
+	}
 	if id := rule.LocalCA(); id != "" {
-		return m.localCertificate(rule, id, sni) // no placeholder: a name it doesn't issue for is refused
+		return m.localCertificate(rule, id, hello, dialed) // no placeholder: a name it doesn't issue for is refused
 	}
 	v := m.current()
 	var cert *tls.Certificate
@@ -586,15 +627,14 @@ func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, 
 	return ph, nil
 }
 
-// localCertificate is a cert = local-ca rule's certificate for sni. A name
-// it does not issue for (outside cert_domains), a full CA or a failure is an
-// error: the handshake fails and the client is refused, with no placeholder.
-func (m *CertManager) localCertificate(rule *Rule, id, sni string) (*tls.Certificate, error) {
-	if !validDomain(sni) {
-		return nil, fmt.Errorf("CA %s: %q is not a host name to issue for", id, sni)
-	}
-	if !rule.LocalCAIssues(sni) {
-		return nil, fmt.Errorf("CA %s does not issue for %s: it matches none of cert_domains (%s)", id, sni, strings.Join(rule.CertDomains, ", "))
+// localCertificate is a cert = local-ca rule's certificate for a client (see
+// Rule.LocalCAName). A name it does not issue for (outside cert_domains), a
+// full CA or a failure is an error: the handshake fails and the client is
+// refused, with no placeholder.
+func (m *CertManager) localCertificate(rule *Rule, id string, hello helloInfo, dialed netip.Addr) (*tls.Certificate, error) {
+	sni, err := rule.LocalCAName(hello.SNI, hello.SNIIP, dialed)
+	if err != nil {
+		return nil, fmt.Errorf("CA %s: %v", id, err)
 	}
 	cfg := m.current().cfg
 	l := (*localCA)(nil)
@@ -1394,7 +1434,8 @@ type CertInfo struct {
 	NextAttempt string // auto only: when it is retried
 }
 
-// Snapshot lists every certificate in use: automatic names and directories.
+// Snapshot lists every certificate in use: automatic ones and what each local
+// CA issued.
 func (m *CertManager) Snapshot() []CertInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1410,6 +1451,9 @@ func (m *CertManager) Snapshot() []CertInfo {
 		}
 		leaf := c.Leaf
 		info.Issuer, info.Names = leaf.Issuer.CommonName, leaf.DNSNames
+		for _, ip := range leaf.IPAddresses {
+			info.Names = append(info.Names, ip.String())
+		}
 		info.NotBefore, info.NotAfter = day(leaf.NotBefore), day(leaf.NotAfter)
 		info.DaysLeft = int(leaf.NotAfter.Sub(now).Hours() / 24)
 		switch {
@@ -1474,10 +1518,10 @@ func (m *CertManager) Snapshot() []CertInfo {
 			}
 		}
 		leaves := l.leaves()
-		sort.Slice(leaves, func(i, j int) bool { return leaves[i].Leaf.DNSNames[0] < leaves[j].Leaf.DNSNames[0] })
-		for _, c := range leaves {
-			name := c.Leaf.DNSNames[0]
-			info := CertInfo{Name: name, Source: "local-ca", CA: l.id, Dir: filepath.Join(dir, name), RuleLines: lines, Removable: true}
+		sort.Slice(leaves, func(i, j int) bool { return leaves[i].name < leaves[j].name })
+		for _, leaf := range leaves {
+			name, c := leaf.name, leaf.cert
+			info := CertInfo{Name: name, Source: "local-ca", CA: l.id, Dir: filepath.Join(dir, localCAFolder(name)), RuleLines: lines, Removable: true}
 			fill(&info, c)
 			if info.Status == "expiring" || info.Status == "ok" {
 				info.Status = "ok" // the renewal pass takes care of it
@@ -1571,4 +1615,10 @@ func (m *CertManager) RetryNow(domain string) bool {
 		}
 	}
 	return known
+}
+
+// hasLocalCA reports whether the CA in dir is open.
+func (m *CertManager) hasLocalCA(dir string) bool {
+	_, ok := m.localCAs.Load(dir)
+	return ok
 }

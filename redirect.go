@@ -127,7 +127,7 @@ func writeRedirectResponse(w io.Writer, status int, location string, keepAlive b
 		conn = "keep-alive"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\nServer: %s\r\n", status, http.StatusText(status), serverName)
 	if location != "" {
 		fmt.Fprintf(&b, "Location: %s\r\n", location)
 	}
@@ -156,10 +156,10 @@ func (s *Server) handleRedirect(id uint64, sock net.Conn, active int, cfg *Confi
 		}
 	}()
 
-	// As on the TLS listeners: a PROXY header only from proxy_protocol_from.
+	// As on the TLS listeners: a PROXY header only from proxy_trust_source.
 	sock.SetReadDeadline(start.Add(cfg.HandshakeTimeout))
 	client, err := &proxyConn{Conn: sock}, error(nil)
-	if cfg.trustsProxyProtocolFrom(sock.RemoteAddr()) {
+	if cfg.trustsProxySource(sock.RemoteAddr()) {
 		client, err = detectProxyProtocol(sock)
 	}
 	if err != nil {

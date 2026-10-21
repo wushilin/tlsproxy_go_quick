@@ -41,6 +41,7 @@ type Runtime struct {
 	// max_aggregated_speed buckets.
 	byListener     map[string]*Config
 	listenerLimits map[string]*ruleLimits
+	serve          *serveState // what rules with service_rule keys serve with
 }
 
 func newRuntime(cfg *Config, prev *Runtime) *Runtime {
@@ -92,9 +93,18 @@ type Server struct {
 	certs   *CertManager
 	nextID  atomic.Uint64
 
-	configPath string               // "" when the config did not come from a file
+	configPath string // "" when the config did not come from a file
+
+	// retiring are serve states a reload replaced, still open for the
+	// requests using them; stopServing closes them at once.
+	retiringMu sync.Mutex
+	retiring   map[*serveState]bool
 	reloadNow  chan chan<- []string // poked by the console after a save; the reply says what failed
 	console    *Console
+
+	// The console's settings, from start-up: every load of config.yaml
+	// merges them in (see loadConfig). nil = no console.
+	consoleCfg *ConsoleConfig
 
 	// Rules stopped from the console, by Rule.Key: routed as if absent. Kept
 	// in memory only, across reloads; a restart starts them all again.
@@ -106,6 +116,11 @@ type Server struct {
 	listeners        map[string]*liveListener
 	stoppedListeners map[string]bool // stopped from the console, in memory only
 	serving          bool            // start-up is over: log each listener that opens
+
+	// Connections served here (rules with service_rule keys), by their TLS
+	// connection, for the web server to find (see serve.go).
+	served sync.Map // *tls.Conn -> *servedConn
+	auth   *authChecker
 
 	dialer *targetDialer // resolves targets (cached) and connects
 
@@ -199,15 +214,39 @@ func (s *Server) sessionTicketKeys() [][32]byte {
 	}
 }
 
-// NewServer fails if a rule's cert = <dir> certificate cannot be loaded.
+// NewServer fails if a CA a rule names cannot be opened.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache()}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache(), auth: newAuthChecker()}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}
 	s.stats.prepare(cfg)
-	s.runtime.Store(newRuntime(cfg, nil))
+	rt := newRuntime(cfg, nil)
+	rt.serve = s.newServeState(cfg)
+	s.runtime.Store(rt)
+	s.consoleCfg = cfg.Console
 	return s, nil
+}
+
+// startConsoleOnce starts the console, if the configuration has one and it
+// is not running yet.
+func (s *Server) startConsoleOnce() error {
+	con := s.runtime.Load().cfg.Console
+	if con == nil || s.console != nil {
+		return nil
+	}
+	if err := s.startConsole(con); err != nil {
+		return fmt.Errorf("console: %w", err)
+	}
+	return nil
+}
+
+// loadConfig reads a version of config.yaml as the proxy runs it: with the
+// console merged in. Every load goes through here (start-up, reloads, and
+// each check or save from the console), so a version that passes a check
+// is one a reload accepts.
+func (s *Server) loadConfig(text string) (*Config, error) {
+	return LoadConfig(text, s.consoleCfg)
 }
 
 // rateLimitedLog writes at most one line a second and says how many it left
@@ -266,8 +305,17 @@ func (s *Server) endHandshake(n *atomic.Int32) { n.Add(-1) }
 
 // Run binds to the configured address and serves forever.
 func Run(cfg *Config, path string) error {
+	// From here on the streams go to their log files, if configured: making
+	// the default CA already logs.
+	if err := ConfigureLogging(cfg.Log); err != nil {
+		return err
+	}
 	srv, err := NewServer(cfg) // before binding: a bad certificate is a startup error
 	if err != nil {
+		return err
+	}
+	srv.configPath = path
+	if err := srv.startConsoleOnce(); err != nil { // before any listener: its rule may be the console's
 		return err
 	}
 	// A listener whose port cannot be opened is reported (and shown in the
@@ -275,10 +323,6 @@ func Run(cfg *Config, path string) error {
 	// none can open.
 	if failed := srv.syncListeners(cfg); !srv.anyOpen(cfg.Listeners) {
 		return errors.New(strings.Join(failed, "; "))
-	}
-	// From here on the streams go to their log files, if configured.
-	if err := ConfigureLogging(cfg.Log); err != nil {
-		return err
 	}
 	StartAsyncLogging() // from here on nobody waits for the log to be written
 	defer FlushLogs()
@@ -291,9 +335,14 @@ func Run(cfg *Config, path string) error {
 // watched and reloaded when it changes. With l, it returns when l is closed.
 func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error {
 	rt := s.runtime.Load()
+	s.configPath = path // before the console starts: its handlers read it
+	if err := s.startConsoleOnce(); err != nil {
+		return err
+	}
 	if l != nil {
 		first := &rt.cfg.Listeners[0]
-		live := &liveListener{name: first.Name, lns: append([]net.Listener{l}, more...), adopted: true}
+		live := newLiveListener(first.Name, nil)
+		live.lns, live.adopted = append([]net.Listener{l}, more...), true
 		for _, ln := range live.lns {
 			live.addrs = append(live.addrs, ln.Addr().String())
 		}
@@ -332,9 +381,7 @@ func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error 
 	for _, k := range rt.cfg.Ignored {
 		logf("config: %q is not used by this version and was ignored", k)
 	}
-	s.configPath = path
 	if path != "" {
-		s.securePassword(path, rt.cfg) // before anything reads the file again
 		go s.watchConfig(path)
 	}
 	go s.reportStats()
@@ -343,24 +390,21 @@ func (s *Server) Serve(l net.Listener, path string, more ...net.Listener) error 
 			s.stats.sample()
 		}
 	}()
-	if rt.cfg.Console != nil {
-		if err := s.startConsole(rt.cfg.Console); err != nil {
-			return fmt.Errorf("[console]: %w", err)
-		}
-	}
 	watchSignals(s)
 	if l == nil {
 		select {} // the listeners' accept loops do the work
 	}
-	name := rt.cfg.Listeners[0].Name
+	s.listenersMu.Lock()
+	live := s.listeners[rt.cfg.Listeners[0].Name]
+	s.listenersMu.Unlock()
 	for _, extra := range more {
-		go s.acceptLoop(extra, name)
+		go s.acceptLoop(extra, live)
 	}
-	return s.acceptLoop(l, name)
+	return s.acceptLoop(l, live)
 }
 
-// acceptLoop serves one socket of the named listener until it is closed.
-func (s *Server) acceptLoop(l net.Listener, name string) error {
+// acceptLoop serves one socket of a listener until it is closed.
+func (s *Server) acceptLoop(l net.Listener, live *liveListener) error {
 	for {
 		sock, err := l.Accept()
 		if err != nil {
@@ -372,6 +416,7 @@ func (s *Server) acceptLoop(l net.Listener, name string) error {
 			continue
 		}
 		rt := s.runtime.Load()
+		name := *live.name.Load()
 		cfg := rt.byListener[name]
 		if cfg == nil {
 			sock.Close() // removed by a reload an instant ago; its socket is closing
@@ -463,30 +508,20 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 		return []string{fmt.Sprintf("cannot read %s: %v; the running configuration is unchanged", path, err)}
 	}
 	hash := fileHash(text)
+	var problems []string
 	if *haveLast && hash == *lastHash {
 		return nil
 	}
 	*lastHash, *haveLast = hash, true
-	cfg, err := ParseConfig(string(text))
+	cfg, err := s.loadConfig(string(text))
 	if err != nil {
 		errorf("config reload: %s is invalid, keeping current config: %v", path, err)
-		return []string{fmt.Sprintf("the file is invalid, so the running configuration is unchanged: %v", err)}
+		return append(problems, fmt.Sprintf("the file is invalid, so the running configuration is unchanged: %v", err))
 	}
 	old := s.runtime.Load()
 	if err := s.certs.Apply(cfg); err != nil {
 		errorf("config reload: %s rejected, keeping current config: %v", path, err)
 		return []string{fmt.Sprintf("the file was not applied, the running configuration is unchanged: %v", err)}
-	}
-	if s.securePassword(path, cfg) {
-		*lastHash = cfg.sourceHash // only our exact rewrite, never a subsequent editor save
-	}
-	if s.console != nil {
-		s.console.update(cfg.Console)
-		if cfg.Console == nil {
-			errorf("config reload: [console] was removed but stopping it needs a restart")
-		}
-	} else if cfg.Console != nil {
-		errorf("config reload: [console] was added but needs a restart")
 	}
 	for _, w := range cfg.Warnings {
 		errorf("config: %s", w)
@@ -495,9 +530,11 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 		errorf("config reload: %v; logging is unchanged", err)
 	}
 	rt := newRuntime(cfg, old)
+	rt.serve = s.newServeState(cfg)
 	s.stats.prepare(cfg) // before it goes live: connections only read these counters
 	s.runtime.Store(rt)
-	problems := s.syncListeners(cfg) // after the store: a new listener's connections need its config
+	s.retire(old.serve)
+	problems = append(problems, s.syncListeners(cfg)...) // after the store: a new listener's connections need its config
 	extra := ""
 	if rt.pool != old.pool {
 		extra = ", buffer pool replaced (old buffers freed)"
@@ -510,6 +547,16 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 func isTimeout(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// addrOf is a TCP address's IP, the zero Addr for anything else.
+func addrOf(a net.Addr) netip.Addr {
+	if tcp, ok := a.(*net.TCPAddr); ok {
+		if ip, ok := netip.AddrFromSlice(tcp.IP); ok {
+			return ip.Unmap()
+		}
+	}
+	return netip.Addr{}
 }
 
 // readHello reads until the ClientHello is complete. It returns the SNI/ALPN
@@ -618,14 +665,14 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	}()
 
 	// A PROXY protocol header is only looked for when the peer is listed in
-	// proxy_protocol_from: whoever may send one chooses the address that is
+	// proxy_trust_source: whoever may send one chooses the address that is
 	// logged, counted by max_handshakes_per_ip and passed on to the target, so
 	// it must not be any client that happens to connect. For everybody else
 	// the stream is TLS from its first byte (a header would simply be a bad
 	// ClientHello). Header detection shares the ClientHello deadline.
 	sock.SetReadDeadline(start.Add(cfg.HandshakeTimeout))
 	client, err := &proxyConn{Conn: sock}, error(nil)
-	if cfg.trustsProxyProtocolFrom(sock.RemoteAddr()) {
+	if cfg.trustsProxySource(sock.RemoteAddr()) {
 		client, err = detectProxyProtocol(sock)
 	}
 	if err != nil {
@@ -680,6 +727,9 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	sniDisp := sni
 	if sni == "" {
 		sniDisp = "<none>"
+		if info.SNIIP.IsValid() {
+			sniDisp = "<ip " + info.SNIIP.String() + ">" // routed as no SNI
+		}
 	}
 	if cfg.RememberNonce && s.nonces.seen(info.Digest, time.Now()) {
 		rt.pool.Put(helloBuf)
@@ -702,12 +752,15 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	} else {
 		s.stats.CacheMisses.Add(1)
 	}
-	// The CA validating a TLS-ALPN-01 challenge for one of our names: only
-	// answered here when the rule that routes the name terminates TLS here.
-	// A passed-through name's challenges reach its target untouched, like
-	// any other connection (its backend runs its own ACME client), and so
-	// do a terminated name's when no challenge of ours is pending.
-	if info.offers(acme.ALPNProto) && d.Allow && d.Rule != nil && d.Rule.Terminates() {
+	// The CA validating a TLS-ALPN-01 challenge for a name this proxy is
+	// ordering a certificate for. The CA always comes to port 443, and the
+	// name's rule may be on another listener (the console on its own port),
+	// so it is answered here unless this listener passes the name through:
+	// then the challenge is its backend's (running its own ACME client) and
+	// reaches it untouched, like any other connection. Only a pending order
+	// of ours has an answer.
+	passedThrough := d.Allow && d.Rule != nil && !d.Rule.Terminates()
+	if info.offers(acme.ALPNProto) && !passedThrough {
 		if answer := s.certs.Challenge(sni); answer != nil {
 			tc := tls.Server(&prefixConn{Conn: client, prefix: hello}, &tls.Config{
 				Certificates: []tls.Certificate{*answer},
@@ -739,8 +792,16 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		c.SNI, c.routed = sni, true
 		if d.Rule != nil {
 			c.RuleKey, c.rulePattern = d.Rule.Key(), d.Rule.Source
+		} else if d.Err == "" {
+			// No rule: the implicit $anything_else deny, counted as a rule of
+			// its own so the console can show it.
+			c.RuleKey, c.rulePattern = implicitDenyKey(cfg.listener.Name), anythingElse
+			c.rule = s.stats.rule(c.RuleKey)
 		}
 		c.mu.Unlock()
+		if c.rule != nil {
+			c.rule.Total.Add(1)
+		}
 		switch {
 		case d.Err != "":
 			c.setEnd(flowDenied, "error: "+d.Err)
@@ -757,6 +818,9 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	}
 	dest := net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 	destDisp := dest // [2001:db8::1]:443 for an IPv6 target
+	if d.Rule.Serves() {
+		destDisp = "served here"
+	}
 	logf("[#%d] route sni=%s -> %s (ALLOW, rule line %d%s)", id, sniDisp, destDisp, d.RuleLine, cached)
 	ruleKey := d.Rule.Key()
 	l := cfg.listener
@@ -781,13 +845,19 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 
 	// A local CA only issues for the names its rule allows: refuse the others
 	// before connecting anywhere.
-	if caID := d.Rule.LocalCA(); caID != "" && !d.Rule.LocalCAIssues(sni) {
-		rt.pool.Put(helloBuf)
-		s.stats.Failed.Add(1)
-		reason := fmt.Sprintf("CA %s does not issue for %s: it matches none of cert_domains (%s)", caID, sniDisp, strings.Join(d.Rule.CertDomains, ", "))
-		c.setEnd(flowFailed, reason)
-		logf("[#%d] closed src=%s sni=%s: %s", id, src, sniDisp, reason)
-		client.Write(alertAccessDenied)
+	if caID := d.Rule.LocalCA(); caID != "" {
+		if _, err := d.Rule.LocalCAName(sni, info.SNIIP, addrOf(client.LocalAddr())); err != nil {
+			rt.pool.Put(helloBuf)
+			s.stats.Failed.Add(1)
+			reason := fmt.Sprintf("CA %s: %v", caID, err)
+			c.setEnd(flowFailed, reason)
+			logf("[#%d] closed src=%s sni=%s: %s", id, src, sniDisp, reason)
+			client.Write(alertAccessDenied)
+			return
+		}
+	}
+	if d.Rule.Serves() {
+		s.serveHere(c, client, hello, helloBuf, info, d, cfg, rt)
 		return
 	}
 
@@ -1058,7 +1128,7 @@ func (s *Server) terminate(client, up net.Conn, hello []byte, info helloInfo, d 
 	var served *tls.Certificate
 	clientConfig := &tls.Config{
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			c, err := s.certs.CertificateFor(rule, info.SNI)
+			c, err := s.certs.CertificateForClient(rule, info, addrOf(client.LocalAddr()))
 			served = c
 			return c, err
 		},
@@ -1360,62 +1430,4 @@ func (r *relay) finish() {
 	}
 	r.c.closed = true
 	r.c.mu.Unlock()
-}
-
-// securePassword replaces a plaintext [console] password in the config file
-// with its hash, so the secret sits on disk only until the proxy first sees
-// it. Only that one line is rewritten. It reports whether the file changed.
-func (s *Server) securePassword(path string, cfg *Config) bool {
-	c := cfg.Console
-	if c == nil || c.Password == "" {
-		return false
-	}
-	hash, err := hashPassword(c.Password)
-	if err != nil {
-		errorf("console: cannot hash the password: %v", err)
-		return false
-	}
-	c.PasswordHash, c.Password = hash, ""
-	configFileMu.Lock() // no console save may slip between this read and write
-	defer configFileMu.Unlock()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		errorf("console: cannot read %s to remove the plaintext password: %v", path, err)
-		return false
-	}
-	if cfg.sourceHash == "" || fileHash(data) != cfg.sourceHash {
-		logf("console: config changed since it was parsed; leaving the newer file intact for the next reload")
-		return false
-	}
-	lines := strings.Split(string(data), "\n")
-	section, done := "", false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") {
-			section = strings.Trim(trimmed, "[] \t")
-			continue
-		}
-		key, _, ok := strings.Cut(trimmed, "=")
-		if !ok || section != "console" {
-			continue
-		}
-		switch strings.TrimSpace(key) {
-		case "password":
-			lines[i] = "password_hash = \"" + hash + "\""
-			done = true
-		case "password_hash":
-			lines[i] = "" // superseded by the new password
-		}
-	}
-	if !done {
-		return false
-	}
-	rewritten := []byte(strings.Join(lines, "\n"))
-	if err := writeFileAtomic(path, rewritten); err != nil {
-		errorf("console: cannot rewrite %s, THE PLAINTEXT PASSWORD IS STILL IN THE FILE: %v", path, err)
-		return false
-	}
-	cfg.sourceHash = fileHash(rewritten)
-	logf("console: replaced the plaintext password in %s with its hash", path)
-	return true
 }

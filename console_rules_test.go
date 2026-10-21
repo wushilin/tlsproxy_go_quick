@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,94 +15,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestFmtValueRoundTrips(t *testing.T) {
-	for _, v := range []string{"plain", "*.example.com", "${1}.internal", "a # b", "a\t#b", " lead", "trail ", `"quoted"`, "'single'", `back\slash`, "#hash", "15MiB/s", "x\ty", `Kafka (EU) <9092> "a" 'b' @#~[]`, "0.0.0.0, ::"} {
-		f, err := fmtValue(v)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, err := parseValue(f); err != nil || got != v {
-			t.Errorf("%q -> %q -> %q, %v", v, f, got, err)
-		}
-	}
-	if _, err := fmtValue("two\nlines"); err == nil {
-		t.Error("newline accepted")
-	}
-}
-
-const rulesFile = `# top
-[[listener]]
-name = default
-port = 443
-
-# the wildcard rule
-[[host]]
-listener = default
-pattern = *.example.com   # all of them
-target_host = ${1}.internal
-target_port = 443
-max_single_connection_speed = 1MB
-
-# the catch-all
-[[host]]
-listener = default
-pattern = ANY
-action = deny
-
-[console]
-port = 9443
-password = pw
-`
-
-func TestEditRulesKeepsTheRestOfTheFile(t *testing.T) {
-	line := strings.Index(rulesFile, "[[host]]")
-	line = strings.Count(rulesFile[:line], "\n") + 1
-
-	// Edit: one value changes, one is removed, one is added; the comment on
-	// the unchanged pattern line stays.
-	got, err := editRules(rulesFile, line, map[string]string{"pattern": "*.example.com", "target_host": "${1}.lan",
-		"max_single_connection_speed": "", "target_port": "8443"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := strings.Replace(rulesFile, "target_host = ${1}.internal\ntarget_port = 443\nmax_single_connection_speed = 1MB\n",
-		"target_host = ${1}.lan\ntarget_port = 8443\n", 1)
-	if got != want {
-		t.Fatalf("edit:\n%s\nwant:\n%s", got, want)
-	}
-	mustParse(t, got)
-
-	// Delete takes the rule's own comment and one blank line with it.
-	got, err = editRules(rulesFile, line, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(got, "wildcard") || strings.Contains(got, "example.com") || !strings.Contains(got, "# top\n[[listener]]\nname = default\nport = 443\n\n# the catch-all\n[[host]]\nlistener = default") {
-		t.Fatalf("delete:\n%s", got)
-	}
-
-	// Add goes after the last rule, before [console].
-	got, err = editRules(rulesFile, 0, map[string]string{"listener": "default", "pattern": "a.test", "target_host": "10.0.0.1", "target_port": "443", "proxy": "true", "max_aggregated_speed": "1Gbit"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "action = deny\n\n[[host]]\nlistener = default\npattern = a.test\ntarget_host = 10.0.0.1\ntarget_port = 443\nmax_aggregated_speed = 1Gbit\nproxy = true\n\n[console]") {
-		t.Fatalf("add:\n%s", got)
-	}
-	if c := mustParse(t, got); len(c.Rules) != 3 {
-		t.Fatal(len(c.Rules))
-	}
-
-	for name, err := range map[string]error{
-		"wrong line":  func() error { _, err := editRules(rulesFile, 2, nil, true); return err }(),
-		"unknown key": func() error { _, err := editRules(rulesFile, 0, map[string]string{"listen": "x"}, false); return err }(),
-	} {
-		if err == nil {
-			t.Errorf("%s accepted", name)
-		}
-	}
-}
 
 func mustURL(s string) *url.URL {
 	u, err := url.Parse(s)
@@ -121,7 +32,7 @@ func wsFrames(t *testing.T, c *consoleClient) func() map[string]any {
 
 func wsFramesAt(t *testing.T, c *consoleClient, path string) func() map[string]any {
 	t.Helper()
-	conn, err := net.Dial("tcp", c.hostPort())
+	conn, err := c.dial()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,15 +169,15 @@ func TestConsoleRuleManager(t *testing.T) {
 	// Edit through the file: point svc.rulemgr.test at B. A stale version is refused.
 	f := first["file"].(map[string]any)
 	line := r["line"].(float64)
-	vals := map[string]string{"target_port": strconv.Itoa(b)}
+	vals := map[string]any{"target": "127.0.0.1:" + strconv.Itoa(b)}
 	if code, _ := c.post("/api/rules/save", map[string]any{"line": line, "baseHash": "x", "baseMtime": f["mtime"], "values": vals}); code != 409 {
 		t.Fatal("stale save accepted", code)
 	}
-	if _, out := c.post("/api/rules/validate", map[string]any{"line": line, "values": map[string]string{"target_port": "70000"}}); out["ok"] != false || out["error"] == "" {
+	if _, out := c.post("/api/rules/validate", map[string]any{"line": line, "values": map[string]any{"target": "127.0.0.1:70000"}}); out["ok"] != false || out["error"] == "" {
 		t.Fatal("bad port validated", out)
 	}
 	_, out := c.post("/api/rules/validate", map[string]any{"line": line, "values": vals, "snis": []string{"svc.rulemgr.test", "x.rulemgr.test"}})
-	if out["ok"] != true || !strings.Contains(out["block"].(string), "target_port = "+strconv.Itoa(b)) {
+	if out["ok"] != true || !strings.Contains(out["block"].(string), "target: 127.0.0.1:"+strconv.Itoa(b)) {
 		t.Fatal(out)
 	}
 	if routes := out["routes"].([]any); routes[0].(map[string]any)["thisRule"] != true || routes[1].(map[string]any)["thisRule"] != false {
@@ -286,13 +197,13 @@ func TestConsoleRuleManager(t *testing.T) {
 		}
 	}
 	text, _ := os.ReadFile(path)
-	if !strings.Contains(string(text), "[console]\n# console comment") || len(backupFiles(path)) != 1 {
+	if !strings.Contains(string(text), "# top comment\n") || len(backupFiles(path)) != 1 {
 		t.Fatalf("file:\n%s", text)
 	}
 
 	// Delete it: svc.rulemgr.test goes to *.rulemgr.test for good.
 	st := next()
-	for ruleOf(t, st, "svc.rulemgr.test")["values"].(map[string]any)["target_port"] != strconv.Itoa(b) {
+	for ruleOf(t, st, "svc.rulemgr.test")["values"].(map[string]any)["target"] != "127.0.0.1:"+strconv.Itoa(b) {
 		st = next()
 	}
 	f = st["file"].(map[string]any)
@@ -332,9 +243,9 @@ func TestConsolePageAssets(t *testing.T) {
 
 	// Everything lives under consolePath: / and the bare path redirect there,
 	// nothing else is served.
-	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Timeout: T}
+	noFollow := &http.Client{Transport: c.http.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Timeout: T}
 	for path, want := range map[string]string{"/": consolePath + "/", consolePath: consolePath + "/", "/api/state": "", "/app.js": ""} {
-		resp, err := noFollow.Get("http://" + c.hostPort() + path)
+		resp, err := noFollow.Get("https://" + c.hostPort() + path)
 		if err != nil {
 			t.Fatal(err)
 		}

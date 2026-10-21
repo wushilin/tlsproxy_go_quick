@@ -73,7 +73,7 @@ jobs:
             CGO_ENABLED=0 go build -o tlsproxy .
             file tlsproxy
             ./tlsproxy --version
-            ./tlsproxy config.toml --test foo.wushilin.net evil.com
+            ./tlsproxy config.yaml --test foo.wushilin.net evil.com
 
   build:
     runs-on: ubuntu-latest
@@ -106,7 +106,7 @@ jobs:
           path: |
             tlsproxy-*
             SHA256SUMS
-            config.toml
+            config.yaml
 
   # The container image (Dockerfile). Every run builds it, so a change that
   # breaks the image fails here; a "v*" tag also pushes it, for linux/amd64
@@ -179,4 +179,4 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
-          gh release upload "$GITHUB_REF_NAME" tlsproxy-* SHA256SUMS config.toml --clobber
+          gh release upload "$GITHUB_REF_NAME" tlsproxy-* SHA256SUMS config.yaml --clobber

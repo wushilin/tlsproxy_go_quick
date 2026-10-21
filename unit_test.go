@@ -228,6 +228,10 @@ func route(t *testing.T, c *Config, sni string) string {
 	switch {
 	case d.Err != "":
 		return "ERROR"
+	case d.Allow && d.Rule != nil && d.Rule.Console:
+		return "CONSOLE"
+	case d.Allow && d.Rule != nil && d.Rule.Serves():
+		return "SERVED"
 	case d.Allow:
 		return net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 	}
@@ -236,7 +240,7 @@ func route(t *testing.T, c *Config, sni string) string {
 
 func mustParse(t *testing.T, text string) *Config {
 	t.Helper()
-	c, err := ParseConfig(text)
+	c, err := parseFixture(text)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, text)
 	}
@@ -315,7 +319,7 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 	// Any letter case, quoted or not; and it can deny ahead of a catch-all allow.
 	for _, form := range []string{"none", "None", `"NONE"`, "'none'"} {
 		c := mustParse(t, "[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern="+form+"\naction=deny\n[[host]]\nlistener=default\npattern=.*\ntarget_host=${host}\ntarget_port=443\n")
-		if d := c.Route(""); d.Allow || d.RuleLine != 4 {
+		if d := c.Route(""); d.Allow || d.RuleLine != 7 {
 			t.Errorf("%s: %+v", form, d)
 		}
 		if got := route(t, c, "x.com"); got != "x.com:443" {
@@ -331,7 +335,7 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 	if got := route(t, mustParse(t, "[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=NONE\ntarget_host=${host}\ntarget_port=443\n"), ""); got != "ERROR" {
 		t.Error(got)
 	}
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=NONE\ntarget_host=${1}.lan\ntarget_port=443\n"); err == nil {
+	if _, err := parseFixture("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=NONE\ntarget_host=${1}.lan\ntarget_port=443\n"); err == nil {
 		t.Error("${1} with pattern NONE must be rejected")
 	}
 }
@@ -365,7 +369,7 @@ func TestConfigErrors(t *testing.T) {
 		"[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=a\ncolor=red\n",
 		"[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=.*\ntarget_host=${3}\ntarget_port=443\n", // no such group
 	} {
-		if _, err := ParseConfig(text); err == nil {
+		if _, err := parseFixture(text); err == nil {
 			t.Errorf("should fail: %q", text)
 		}
 	}
@@ -375,15 +379,22 @@ func TestConfigErrors(t *testing.T) {
 // "#> sni => target" line in it must route as documented ("#> name: sni =>
 // target" on the listener called name).
 func TestSamplesRouteAsDocumented(t *testing.T) {
-	files, _ := filepath.Glob("samples/*.toml")
-	files = append(files, "config.toml")
+	files, _ := filepath.Glob("samples/*.yaml")
+	files = append(files, "config.yaml")
 	checked := 0
 	for _, path := range files {
 		text, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := ParseConfig(string(text))
+		// "#! console: <domain> <port>" runs the sample with the web console
+		// (as -console_domain and -console_port would).
+		var con *ConsoleConfig
+		if m := regexp.MustCompile(`(?m)^#! console: (\S+) (\d+)$`).FindStringSubmatch(string(text)); m != nil {
+			port, _ := strconv.Atoi(m[2])
+			con = &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: port, Domain: m[1], Cert: "auto", PasswordHash: "x"}
+		}
+		cfg, err := LoadConfig(string(text), con)
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
@@ -421,14 +432,17 @@ func TestSamplesRouteAsDocumented(t *testing.T) {
 // config.toml documents every default as a commented-out line; uncommenting
 // them all must not change the parsed configuration.
 func TestDocumentedDefaultsMatchCode(t *testing.T) {
-	text, err := os.ReadFile("config.toml")
+	text, err := os.ReadFile("config.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A documented default is a commented-out key, indented as it would be:
+	// "#   connect_timeout: 10   # (default: 10) ...".
+	key := regexp.MustCompile(`^\s+[a-z_]+: `)
 	var lines []string
 	uncommented := 0
 	for _, l := range strings.Split(string(text), "\n") {
-		if rest, ok := strings.CutPrefix(l, "# "); ok && strings.Contains(rest, " = ") && strings.Contains(rest, "(default:") {
+		if rest, ok := strings.CutPrefix(l, "# "); ok && key.MatchString(rest) && strings.Contains(rest, "(default:") {
 			uncommented++
 			l = rest
 		}
@@ -439,7 +453,10 @@ func TestDocumentedDefaultsMatchCode(t *testing.T) {
 	}
 	asIs, explicit := mustParse(t, string(text)), mustParse(t, strings.Join(lines, "\n"))
 	for _, c := range []*Config{asIs, explicit} {
-		c.sourceHash = "" // file bytes differ; this comparison is about parsed settings
+		c.sourceHash = ""              // file bytes differ; this comparison is about parsed settings
+		if c.CARoot == defaultCARoot { // tests move the default cert_root out of the source tree
+			c.CARoot, c.CertPath = "./certs", filepath.Join("./certs", acmeFolder)
+		}
 		for i := range c.Rules {
 			c.Rules[i].Pattern = nil // compiled regexps aren't comparable
 		}
@@ -595,15 +612,38 @@ func TestFormats(t *testing.T) {
 	}
 }
 
+// parserSource is the code that reads config.yaml's keys.
+func parserSource() ([]byte, error) {
+	var out []byte
+	for _, f := range []string{"config.go", "config_yaml.go", "serve_config.go"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b...)
+	}
+	return out, nil
+}
+
+// parserNotOptions are the strings in the parser's case clauses that are
+// sections, values or retired keys, not options.
+var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, "listeners": true, "routes": true, "rules": true, // sections
+	"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true, "auto": true, "none": true, "v1": true, "v2": true, "": true, // values
+	"proxy_protocol_from": true,                    // renamed: a load error that names proxy_trust_source
+	"ca_root":             true, "cert_path": true, // renamed cert_root, and gone: load errors that say so
+	// a rule's keys before config.yaml: refused, with the key to use
+	"pattern": true, "target_host": true, "target_port": true, "proxy_version": true,
+	// a user's keys, documented under users
+	"username": true, "password_plain": true, "password_hash": true, "disabled": true, "expires": true}
+
 // Every option the parser accepts must appear in the complete-reference sample,
 // in the commented config.toml and in the README, so documentation can't drift.
 func TestEveryOptionIsDocumented(t *testing.T) {
-	src, err := os.ReadFile("config.go")
+	src, err := parserSource()
 	if err != nil {
 		t.Fatal(err)
 	}
-	notOptions := map[string]bool{"global": true, "logging": true, "console": true, "host": true, // sections
-		"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true} // values
+	notOptions := parserNotOptions
 	keys := map[string]bool{}
 	for _, m := range regexp.MustCompile(`case ("[a-z_0-9]+"(?:, "[a-z_0-9]+")*):`).FindAllStringSubmatch(string(src), -1) {
 		for _, k := range strings.Split(m[1], ", ") {
@@ -615,7 +655,7 @@ func TestEveryOptionIsDocumented(t *testing.T) {
 	if len(keys) < 40 {
 		t.Fatalf("only %d options found in config.go; did the parser change shape?", len(keys))
 	}
-	for _, doc := range []string{"samples/12-everything.toml", "config.toml", "README.md"} {
+	for _, doc := range []string{"samples/12-everything.yaml", "config.yaml", "README.md"} {
 		text, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)
@@ -632,13 +672,20 @@ func TestEveryOptionIsDocumented(t *testing.T) {
 
 func TestPatternKinds(t *testing.T) {
 	for pattern, want := range map[string]ruleKind{
-		"NONE": kindNone, "none": kindNone,
+		"$no_sni":         kindNone,
 		"vq.wushilin.net": kindLiteral, `vq\.wushilin\.net`: kindLiteral, "^Archmange.wushilin.net$": kindLiteral, "^none$": kindLiteral, "^any$": kindLiteral, "localhost": kindLiteral,
 		"*.wushilin.net": kindWildcard, "api-*.x.com": kindWildcard, "a.*.com": kindWildcard, "*.*.net": kindWildcard, "*": kindWildcard, `*\.wushilin\.net`: kindWildcard, "a*b*c.x.com": kindWildcard,
-		"ANY": kindCatchAll, "any": kindCatchAll, ".*": kindCatchAll, "^.*$": kindCatchAll,
+		"$anything_else": kindCatchAll,
 	} {
 		if got, _, _, err := classify(pattern); err != nil || got != want {
 			t.Errorf("%q: got %v (%v), want %v", pattern, got, err, want)
+		}
+	}
+	// The spellings before v1.5.0 say what to write now.
+	for pattern, want := range map[string]string{"NONE": "now written $no_sni", "none": "now written $no_sni", "ANY": "now written $anything_else",
+		"any": "now written $anything_else", ".*": "now written $anything_else", "^.*$": "now written $anything_else", "$all": "the special domains are $no_sni and $anything_else"} {
+		if _, _, _, err := classify(pattern); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want %q", pattern, err, want)
 		}
 	}
 	// No regular expressions, no **: each is refused with a hint about what to write.
@@ -648,15 +695,15 @@ func TestPatternKinds(t *testing.T) {
 		`(www|blog)\.x\.com`:  "one rule per alternative",
 		`node(\d+)\.x\.com`:   "regular expressions are no longer supported",
 		"(.*)":                "regular expressions are no longer supported",
-		"^$":                  "NONE for clients without SNI",
+		"^$":                  "$no_sni for clients without SNI",
 		"**.wushilin.net":     "** is not supported",
 		"***.x.com":           "** is not supported",
 		"a..b.com":            "not a host name",
 		".x.com":              "not a host name",
 		"x.com.":              "not a host name",
 	} {
-		_, err := ParseConfig("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=" + pattern + "\ntarget_host=a\n")
-		if err == nil || !strings.Contains(err.Error(), hint) || !strings.Contains(err.Error(), "line 4") {
+		_, err := parseFixture("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=" + pattern + "\ntarget_host=a\n")
+		if err == nil || !strings.Contains(err.Error(), hint) || !strings.Contains(err.Error(), "line 7") {
 			t.Errorf("%q: %v", pattern, err)
 		}
 	}
@@ -686,10 +733,10 @@ func TestWildcardsStayWithinALabel(t *testing.T) {
 		}
 	}
 	// A reference to a * that is not there is a load error, as it always was for groups.
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=*.x.com\ntarget_host=${2}.lan\ntarget_port=443\n"); err == nil {
+	if _, err := parseFixture("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=*.x.com\ntarget_host=${2}.lan\ntarget_port=443\n"); err == nil {
 		t.Error("${2} with one * should be rejected")
 	}
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=${1}.lan\ntarget_port=443\n"); err == nil {
+	if _, err := parseFixture("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=${1}.lan\ntarget_port=443\n"); err == nil {
 		t.Error("${1} with ANY should be rejected: only ${host} exists")
 	}
 }
@@ -722,12 +769,20 @@ func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
 			t.Errorf("%q: got %s, want %s", sni, got, want)
 		}
 	}
-	if d := c.Route("vq.wushilin.net"); d.Rule.Kind != kindLiteral || d.RuleLine != 29 {
+	lineOf := func(pattern string) int {
+		for _, r := range c.Rules {
+			if r.Source == pattern {
+				return r.Line
+			}
+		}
+		return -1
+	}
+	if d := c.Route("vq.wushilin.net"); d.Rule.Kind != kindLiteral || d.RuleLine != lineOf("VQ.Wushilin.Net") {
 		t.Fatalf("%+v", d)
 	}
 	// Reading the file top to bottom would give other answers: say so, once.
 	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "evaluated by specificity, not file order") ||
-		!strings.Contains(c.Warnings[0], "line 29 (VQ.Wushilin.Net, literal) wins over line 4 (ANY, catch-all)") {
+		!strings.Contains(c.Warnings[0], fmt.Sprintf("line %d (VQ.Wushilin.Net, literal) wins over line %d ($anything_else, catch-all)", lineOf("VQ.Wushilin.Net"), lineOf("$anything_else"))) {
 		t.Fatalf("%q", c.Warnings)
 	}
 	// A file already written most specific first gets no such note.
@@ -747,7 +802,7 @@ func TestMostSpecificRuleWinsWhateverTheFileOrder(t *testing.T) {
 		"same wildcard":      "[[host]]\nlistener=default\npattern=*.x.com\ntarget_host=a\ntarget_port=443\n[[host]]\nlistener=default\npattern=^*\\.X.com$\naction=deny\n",
 		"two NONE rules":     "[[host]]\nlistener=default\npattern=NONE\ntarget_host=a\ntarget_port=443\n[[host]]\nlistener=default\npattern=none\naction=deny\n",
 	} {
-		if _, err := ParseConfig("[[listener]]\nname=default\nport=443\n" + text); err == nil {
+		if _, err := parseFixture("[[listener]]\nname=default\nport=443\n" + text); err == nil {
 			t.Errorf("%s: should be rejected", name)
 		}
 	}
@@ -784,7 +839,7 @@ func TestTargetReferences(t *testing.T) {
 		"${1|UPPER}": "unknown reference ${1|UPPER}",
 		"${3}.lan":   "${3} does not exist",
 	} {
-		_, err := ParseConfig("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=*.*.example.com\ntarget_host=" + target + "\ntarget_port=443\n")
+		_, err := parseFixture("[[listener]]\nname=default\nport=443\n[[host]]\nlistener=default\npattern=*.*.example.com\ntarget_host=" + target + "\ntarget_port=443\n")
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", target, err, want)
 		}
@@ -817,20 +872,37 @@ func TestConfigReference(t *testing.T) {
 	}
 	// Every documented key, tried alone in its section: the parser must not
 	// call it unknown (as it does a made-up key, checked first).
+	// Where each section's key goes in a file.
+	where := map[string]string{
+		"global":        "global:\n  %s: x\n",
+		"logging":       "logging:\n  %s: x\n",
+		"listeners":     "listeners:\n  - %s: x\n",
+		"routes":        "routes:\n  - %s: x\n",
+		"rules":         "routes:\n  - listener: a\n    rules:\n      - %s: x\n",
+		"serve entries": "listeners:\n  - {name: a, port: 1}\nroutes:\n  - listener: a\n    rules:\n      - {domain: x.test, cert: local-ca, serve: [{%s: x}]}\n",
+		"basic_auth":    "basic_auth:\n  - %s: x\n",
+	}
 	for _, sec := range configReference {
-		if _, err := ParseConfig(sec.Section + "\nno_such_key = x\n"); err == nil || !strings.Contains(err.Error(), "unknown key") {
+		form, ok := where[sec.Section]
+		if !ok {
+			if sec.Section != "console" { // start-up flags, not this file
+				t.Errorf("%s: where do its keys go?", sec.Section)
+			}
+			continue
+		}
+		parse := func(key string) error { _, err := ParseConfig(fmt.Sprintf(form, key)); return err }
+		if err := parse("no_such_key"); err == nil || !strings.Contains(err.Error(), "unknown key") {
 			t.Fatalf("%s: a made-up key gives %v; this test can't tell known keys from unknown", sec.Section, err)
 		}
 		for _, k := range sec.Keys {
-			if _, err := ParseConfig(sec.Section + "\n" + k.Key + " = x\n"); err != nil && strings.Contains(err.Error(), "unknown key") {
+			if err := parse(k.Key); err != nil && strings.Contains(err.Error(), "unknown key") {
 				t.Errorf("%s %s is documented but the parser does not know it: %v", sec.Section, k.Key, err)
 			}
 		}
 	}
 	// And the other way: every key the parser accepts is documented somewhere.
-	src, _ := os.ReadFile("config.go")
-	notOptions := map[string]bool{"global": true, "logging": true, "console": true, "host": true,
-		"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true}
+	src, _ := parserSource()
+	notOptions := parserNotOptions
 	for _, m := range regexp.MustCompile(`case ("[a-z_0-9]+"(?:, "[a-z_0-9]+")*):`).FindAllStringSubmatch(string(src), -1) {
 		for _, k := range strings.Split(m[1], ", ") {
 			k = strings.Trim(k, `"`)

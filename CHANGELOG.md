@@ -1,5 +1,107 @@
 # Changelog
 
+## v1.5.0 (unreleased)
+
+Breaking:
+- The configuration is YAML: `config.yaml` (the default path) with
+  `global`, `logging`, `listeners`, `routes` (each a `listener` and its
+  `rules`) and `basic_auth`. Lists are YAML lists. A rule's `pattern` is now
+  `domain`, `target_host` + `target_port` are one `target: host:port` (IPv6
+  in brackets), and `proxy` + `proxy_version` are `proxy: v1 | v2`. There is
+  no converter: see `config.yaml` and `samples/` for the new form. (A local
+  CA's own settings file, `<ca_root>/caNNN/config.toml`, is unchanged.)
+- The web console is no longer configured in the file, and is on by
+  default: `-console_domain <name>` (or `$CONSOLE_DOMAIN`) and
+  `$CONSOLE_PASSWORD` (the password, or a hash) are required, or the proxy
+  refuses to start and says so; `-noconsole` turns it off. It listens on
+  all addresses, port 443, with `cert: auto`; `-console_bind`,
+  `-console_port` and `-console_cert` (or `$CONSOLE_BIND`, `$CONSOLE_PORT`,
+  `$CONSOLE_CERT`) change that. It is always served over TLS, inside the
+  proxy, on a listener it owns, named `$console` on any port. That listener's name, bind and port, and the rule for the console's
+  domain, can't be changed from `config.yaml`, which may still list the
+  listener with other options (`proxy_trust_source`, `max_connections`,
+  timeouts, speed limits) and route more rules to it. Another listener with
+  exactly its bind and port is an error. The console can't stop its own rule
+  or listener. Without a console, nothing is reserved.
+- One folder for all certificates: `cert_root` (default `./certs`) holds the
+  CAs (`ca001`, `ca002`, ...) and `acme/` (the automatic certificates and the
+  ACME account). `ca_root` is renamed `cert_root` and `cert_path` is gone,
+  both load errors that say what to write. Certificates in an old
+  `cert_path` aren't read: each name is issued again, or move them into
+  `<cert_root>/acme`.
+- `proxy_protocol_from` is renamed `proxy_trust_source`. The old name is a
+  load error that shows what to write.
+- New password hashes (`tlsproxy --hash-password`) are argon2id. Existing
+  `pbkdf2-sha256$...` hashes keep working.
+
+New:
+- Serving HTTP here: a rule with `serve` entries answers HTTP itself, inside
+  the TLS connection it terminates, with no target and no second hop.
+  `{type: reverse_proxy, prefix: /api/, target: "http://h:p"}` (or
+  `https://`; `strip_prefix`, `force_host`, `tls_verify`) and
+  `{type: static_content, prefix: /assets/, base_dir: /folder}` (the prefix
+  stands for the folder; no listings, no hidden files except `.well-known`,
+  no symlinks out of it). The longest prefix wins; none is 404. The target
+  gets the client's own address in `X-Forwarded-For` / `X-Real-IP`,
+  `X-Forwarded-Proto: https`, `X-Forwarded-Host`, `X-Forwarded-Port`,
+  `X-Forwarded-Prefix` (with `strip_prefix`), `Forwarded` (RFC 7239),
+  `X-Forwarded-By: tlsproxy_go_quick/<version>` and `Via`; what the client
+  sent in those is replaced (`Via` is added to).
+  Clients get HTTP/2 if they ask. Each request is routed by its Host with the
+  running configuration (a reload applies to the next request; a Host
+  another rule serves gets 421).
+- `basic_auth`: users (`username` with `password_hash` (argon2id or
+  pbkdf2-sha256) or `password_plain`) that a serve entry asks for with
+  `basic_auth: <name>`. A matched password is remembered for 5 minutes.
+- `static_content` serves a folder's `index.html`, else its `index.htm`,
+  else, with `directory_listing: true`, a listing page (sortable,
+  filterable, light or dark; hidden files left out), else `403`. A
+  `base_dir` that is missing at load is tried again on request, so making
+  it later needs no reload.
+- What the proxy answers itself (the console, serve entries, the port-80
+  redirect) says `Server: tlsproxy_go_quick`; a reverse_proxy response's
+  `Server` header is replaced with it. The directory listing links to the
+  project on GitHub.
+- The config editor's *Save & apply* validates first, as *Validate* does:
+  an invalid file is not saved and the result points at its line; a valid
+  one is saved and its settings tree and warnings are shown under the
+  outcome.
+- The console lists each listener's rules in the order they are tried
+  (`$no_sni`, exact names, wildcards from the most specific, `$anything_else`
+  last), and a rule's serve entries as a request tries them: the longest
+  prefix first, `/` last; the editor saves them in that order.
+- The console's rule editor has *Serve it here*, one card per serve entry:
+  the prefix and target (or folder), the Host header on a row of its own,
+  *strip the prefix* and *verify the target's certificate* as checkboxes,
+  who may use it (anyone, or the users of a basic_auth group), and an example
+  of where a request goes. It saves through the
+  YAML tree: comments elsewhere in the file are kept. A **Basic auth** page
+  adds, renames (with the serve entries that use it) and deletes groups, and
+  adds, deletes, disables and sets the password and expiry of users;
+  passwords are hashed in the proxy and never sent back to the page.
+- A `basic_auth` user can have `disabled: true` and `expires:` (a date,
+  through the end of that day UTC, or an RFC 3339 time; default never).
+- `cert: local-ca` serves clients without SNI (`domain: NONE`, or `ANY`):
+  a certificate for the IP address they connected to, or with IP addresses
+  in `cert_domains`, one certificate for all of them (a `NONE` rule may add
+  host names). An IP address sent as SNI is routed as no SNI and refused
+  unless `cert_domains` lists it (it used to be a bad ClientHello).
+  `cert: auto` on `NONE` stays an error, now pointing at `local-ca`.
+- The console's Certificates and CAs pages are one **Certificates** page
+  with a sub-tab per issuer (ACME, then each CA): the issuer on top, the
+  certificates it issued in a table below; *+ New CA* and *Import CA…* sit
+  in the sub-tab bar. The address remembers the sub-tab (`#certs/ca002`).
+- `$console` in `listeners` and `routes` is the console's listener,
+  whatever its port, so moving the console needs no edit. No other listener
+  can be named so, and without a console it is an error; `https` is an
+  ordinary name.
+- What no rule takes is denied as before; the console now shows that as a
+  locked `$anything_else → deny (implicit)` rule on each listener without
+  one, with the connections it refused.
+- A listener whose exact addresses another takes over (a rename) keeps its
+  socket open instead of reopening the port.
+- Error messages no longer mention the removed `cert = <directory>`.
+
 ## v1.4.1
 
 Breaking:

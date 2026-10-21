@@ -194,7 +194,7 @@ func TestLoggingSection(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"max_size=0", "max_size=ten", "max_size=5T", "compress_after=x", "max_keep=-1", "file=a.log"} {
-		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[logging]\n" + bad + "\n"); err == nil {
+		if _, err := parseFixture("[[listener]]\nname=default\nport=1\n[logging]\n" + bad + "\n"); err == nil {
 			t.Errorf("should fail: %s", bad)
 		}
 	}
@@ -215,14 +215,14 @@ func TestBinaryLogsToRotatingFiles(t *testing.T) {
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
-	outLog, errLog, cfgPath := filepath.Join(dir, "stdout.log"), filepath.Join(dir, "stderr.log"), filepath.Join(dir, "config.toml")
+	outLog, errLog, cfgPath := filepath.Join(dir, "stdout.log"), filepath.Join(dir, "stderr.log"), filepath.Join(dir, "config.yaml")
 	config := func(rules string) []byte {
-		return []byte(fmt.Sprintf("[[listener]]\nname=default\nbind=127.0.0.1\nport=%d\n[global]\nreload_interval=5\nstats_interval=0\n\n[logging]\nstdout=%s\nstderr=%s\n"+
-			"max_keep=4\ncompress_after=1\nmax_size=3K\n\n%s", port, outLog, errLog, rules))
+		return []byte(yamlFixture(fmt.Sprintf("[[listener]]\nname=default\nbind=127.0.0.1\nport=%d\n[global]\nreload_interval=5\nstats_interval=0\nca_root=%s\n\n[logging]\nstdout=%s\nstderr=%s\n"+
+			"max_keep=4\ncompress_after=1\nmax_size=3K\n\n%s", port, filepath.Join(dir, "ca"), outLog, errLog, rules)))
 	}
 	os.WriteFile(cfgPath, config("[[host]]\nlistener=default\npattern=.*\naction=deny\n"), 0o644)
 	var termOut, termErr bytes.Buffer
-	cmd := exec.Command(bin, cfgPath)
+	cmd := exec.Command(bin, cfgPath, "-noconsole")
 	cmd.Stdout, cmd.Stderr = &termOut, &termErr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

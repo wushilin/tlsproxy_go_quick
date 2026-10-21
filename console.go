@@ -1,7 +1,8 @@
 package main
 
-// Web console on its own port: dashboard, connections, certificates, log and
-// a config editor. Plain HTTP by design (see ConsoleConfig). Defences:
+// Web console: dashboard, connections, certificates, log and a config
+// editor. Served over TLS by a rule of its listener when console.toml sets
+// cert, in plain HTTP on its own port otherwise (see ConsoleConfig). Defences:
 //
 //   - a password is always required; sessions are random, in memory, 12 h
 //   - login attempts are rate limited globally (through the proxy every
@@ -9,7 +10,7 @@ package main
 //   - every POST needs the session's CSRF token and a JSON content type
 //   - the Host header must be an IP literal, "localhost" or a configured
 //     name, which defeats DNS rebinding
-//   - the [console] section itself cannot be seen or changed from here
+//   - console.toml, its own settings, cannot be seen or changed from here
 
 import (
 	"crypto/rand"
@@ -17,7 +18,6 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -41,7 +41,6 @@ const (
 	consolePath     = "/tlsproxy_quick" // every page and API lives under it; / redirects there
 	sessionLifetime = 12 * time.Hour
 	maxBackups      = 10
-	consoleHidden   = "# [console] is managed outside this editor (hidden here, kept as it is on save)"
 )
 
 // configFileMu serialises every read-check-write of a config file by this
@@ -69,29 +68,24 @@ type session struct {
 }
 
 type Console struct {
-	srv  *Server
-	addr string // actual listen address
+	srv     *Server
+	addr    string       // where it is reached, for the log
+	handler http.Handler // every request, whether on its own port or through its rule
 
-	mu           sync.Mutex
-	verifyMu     sync.Mutex // serialises deliberately expensive password checks
-	hash         string
-	secureCookie bool
-	hostnames    map[string]bool
-	sessions     map[string]*session
-	failures     int
-	lockedUntil  time.Time
+	mu          sync.Mutex
+	verifyMu    sync.Mutex // serialises deliberately expensive password checks
+	hash        string
+	domain      string // the only name requests may carry
+	sessions    map[string]*session
+	failures    int
+	lockedUntil time.Time
 
 	rules *ruleState // live state pushed to the rules page
 }
 
 func (s *Server) startConsole(cfg *ConsoleConfig) error {
-	ln, err := net.Listen(listenNetwork(cfg.Listen), net.JoinHostPort(cfg.Listen, strconv.Itoa(cfg.Port)))
-	if err != nil {
-		return err
-	}
-	c := &Console{srv: s, addr: ln.Addr().String(), sessions: map[string]*session{}, rules: newRuleState()}
+	c := &Console{srv: s, sessions: map[string]*session{}, rules: newRuleState()}
 	c.update(cfg)
-	s.console = c
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(consoleFiles, "console")
 	files := http.FileServerFS(static)
@@ -107,6 +101,8 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("GET /api/certs", c.authed(c.certs))
 	mux.HandleFunc("POST /api/certs/retry", c.authed(c.certRetry))
 	mux.HandleFunc("POST /api/certs/remove", c.authed(c.certRemove))
+	mux.HandleFunc("GET /api/auth", c.authed(c.authList))
+	mux.HandleFunc("POST /api/auth/save", c.authed(c.authSave))
 	mux.HandleFunc("GET /api/cas", c.authed(c.caList))
 	mux.HandleFunc("GET /api/cas/cert", c.authed(c.caCert))
 	mux.HandleFunc("POST /api/cas/generate", c.authed(c.caGenerate))
@@ -141,18 +137,14 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	root.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, consolePath+"/", http.StatusFound)
 	})
-	server := &http.Server{Handler: c.guard(root), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
-	logf("console: listening on http://%s%s/ (plain HTTP; password required)", c.addr, consolePath)
-	go func() {
-		if err := server.Serve(ln); err != nil {
-			errorf("console: stopped: %v", err)
-		}
-	}()
+	c.handler = c.guard(root)
+	s.console = c
+	c.addr = "https://" + net.JoinHostPort(cfg.Domain, strconv.Itoa(cfg.Port))
+	logf("console: served at %s%s/ by listener %s on %s (cert: %s; password required)", c.addr, consolePath, cfg.ListenerName(), strings.Join(cfg.Addrs(), ", "), cfg.Cert)
 	return nil
 }
 
-// update applies the reloadable console settings. listen and port are not:
-// they need a restart.
+// update applies the console's settings: its password and domain.
 func (c *Console) update(cfg *ConsoleConfig) {
 	if cfg == nil {
 		return
@@ -169,15 +161,7 @@ func (c *Console) update(cfg *ConsoleConfig) {
 		c.hash = cfg.PasswordHash
 		c.sessions = map[string]*session{}
 	}
-	if c.secureCookie != cfg.SecureCookie {
-		// Existing browsers must sign in again to receive the new cookie policy.
-		c.sessions = map[string]*session{}
-	}
-	c.secureCookie = cfg.SecureCookie
-	c.hostnames = map[string]bool{"localhost": true}
-	for _, h := range cfg.Hostnames {
-		c.hostnames[h] = true
-	}
+	c.domain = cfg.Domain
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -200,11 +184,12 @@ func (c *Console) guard(next http.Handler) http.Handler {
 		}
 		host = strings.ToLower(strings.Trim(host, "[]"))
 		c.mu.Lock()
-		known := c.hostnames[host]
+		known := host == c.domain
 		c.mu.Unlock()
-		if !known && net.ParseIP(host) == nil {
-			// A DNS name we were not told about: possibly DNS rebinding.
-			http.Error(w, "unknown host name; add it to [console] hostnames", http.StatusForbidden)
+		if !known {
+			// Its rule only routes its domain here; anything else is not a
+			// browser that opened the console (DNS rebinding, a test).
+			http.Error(w, "the console answers to its domain only", http.StatusForbidden)
 			return
 		}
 		h := w.Header()
@@ -332,7 +317,7 @@ func (c *Console) login(w http.ResponseWriter, r *http.Request) {
 	}
 	s := &session{csrf: csrf, expires: time.Now().Add(sessionLifetime)}
 	c.sessions[id] = s
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: consolePath, HttpOnly: true, Secure: c.secureCookie || r.TLS != nil,
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: consolePath, HttpOnly: true, Secure: true,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionLifetime.Seconds())})
 	logf("console: sign-in from %s", r.RemoteAddr)
 	writeJSON(w, 200, map[string]any{"ok": true, "csrf": s.csrf})
@@ -463,128 +448,47 @@ func (c *Console) recentLog(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- config editor
 
-var (
-	consoleHeader = regexp.MustCompile(`(?i)^\s*\[\s*console\s*\]`)
-	anyHeader     = regexp.MustCompile(`^\s*\[`)
-	lineRef       = regexp.MustCompile(`\bline (\d+)`)
-)
-
-// hideConsole replaces the [console] section with a one-line placeholder. It
-// returns the editor text, the hidden lines, and the placeholder's index
-// (-1 if there is no such section).
-func hideConsole(text string) (visible string, block []string, at int) {
-	lines := strings.Split(text, "\n")
-	start, end := -1, len(lines)
-	for i, l := range lines {
-		if start < 0 && consoleHeader.MatchString(l) {
-			start = i
-		} else if start >= 0 && anyHeader.MatchString(l) {
-			end = i
-			break
-		}
-	}
-	if start < 0 {
-		return text, nil, -1
-	}
-	for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
-		end-- // blank lines before the next section stay visible
-	}
-	block = append(block, lines[start:end]...)
-	out := append(append(append([]string{}, lines[:start]...), consoleHidden), lines[end:]...)
-	return strings.Join(out, "\n"), block, start
-}
-
-// showConsole puts the hidden section back. It returns the full text and a
-// function translating line numbers of the full text to editor lines.
-func showConsole(visible string, block []string) (string, func(int) int, error) {
-	lines := strings.Split(visible, "\n")
-	at := -1
-	for i, l := range lines {
-		if consoleHeader.MatchString(l) {
-			return "", nil, fmt.Errorf("line %d: the [console] section cannot be edited here; change it in the file itself", i+1)
-		}
-		if at < 0 && strings.TrimSpace(l) == consoleHidden {
-			at = i
-		}
-	}
-	if len(block) == 0 {
-		return visible, func(n int) int { return n }, nil
-	}
-	if at < 0 { // placeholder deleted: keep the section anyway, at the end
-		full := strings.TrimRight(visible, "\n") + "\n\n" + strings.Join(block, "\n") + "\n"
-		return full, func(n int) int { return min(n, len(lines)) }, nil
-	}
-	out := append(append(append([]string{}, lines[:at]...), block...), lines[at+1:]...)
-	toEditor := func(n int) int {
-		switch {
-		case n <= at:
-			return n
-		case n <= at+len(block):
-			return at + 1
-		default:
-			return n - len(block) + 1
-		}
-	}
-	return strings.Join(out, "\n"), toEditor, nil
-}
+var lineRef = regexp.MustCompile(`\bline (\d+)`)
 
 func fileHash(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
 
-// check validates editor text as the proxy would load it. Errors refer to
-// editor line numbers.
-// toEditor maps a line of the full file to the line the editor shows; the
-// warnings in cfg already use editor lines.
-func (c *Console) check(visible string, block []string) (full string, cfg *Config, toEditor func(int) int, err error) {
-	full, toEditor, err = showConsole(visible, block)
-	if err != nil {
-		return "", nil, nil, err
+// check validates editor text as the proxy would load it, console.toml
+// merged in.
+func (c *Console) check(text string) (*Config, error) {
+	cfg, err := c.srv.loadConfig(text)
+	if err == nil {
+		err = c.srv.certs.Check(cfg)
 	}
-	translate := func(err error) error {
-		return fmt.Errorf("%s", lineRef.ReplaceAllStringFunc(err.Error(), func(m string) string {
-			n, _ := strconv.Atoi(m[5:])
-			return "line " + strconv.Itoa(toEditor(n))
-		}))
-	}
-	if cfg, err = ParseConfig(full); err != nil {
-		return "", nil, nil, translate(err)
-	}
-	if err = c.srv.certs.Check(cfg); err != nil {
-		return "", nil, nil, translate(err)
-	}
-	for i, w := range cfg.Warnings {
-		cfg.Warnings[i] = translate(errors.New(w)).Error()
-	}
-	return full, cfg, toEditor, nil
+	return cfg, err
 }
 
 // readConfig reads the file and its version. Callers that go on to write
 // must hold configFileMu across both.
-func (c *Console) readConfig() (data []byte, visible string, block []string, ver fileVersion, err error) {
+func (c *Console) readConfig() (data []byte, ver fileVersion, err error) {
 	if c.srv.configPath == "" {
-		return nil, "", nil, ver, fmt.Errorf("this proxy was not started from a config file")
+		return nil, ver, fmt.Errorf("this proxy was not started from a config file")
 	}
 	if data, err = os.ReadFile(c.srv.configPath); err != nil {
-		return nil, "", nil, ver, err
+		return nil, ver, err
 	}
 	if ver, err = versionOf(c.srv.configPath, data); err != nil {
-		return nil, "", nil, ver, err
+		return nil, ver, err
 	}
-	visible, block, _ = hideConsole(string(data))
-	return data, visible, block, ver, nil
+	return data, ver, nil
 }
 
 func (c *Console) configGet(w http.ResponseWriter, r *http.Request) {
 	configFileMu.Lock()
-	_, visible, _, ver, err := c.readConfig()
+	data, ver, err := c.readConfig()
 	configFileMu.Unlock()
 	if err != nil {
 		fail(w, 500, "%v", err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "text": visible, "hash": ver.Hash, "mtime": ver.Mtime, "path": c.srv.configPath})
+	writeJSON(w, 200, map[string]any{"ok": true, "text": string(data), "hash": ver.Hash, "mtime": ver.Mtime, "path": c.srv.configPath})
 }
 
 type configRequest struct {
@@ -596,18 +500,15 @@ type configRequest struct {
 
 func (c *Console) configValidate(w http.ResponseWriter, r *http.Request) {
 	var req configRequest
-	_, _, block, _, err := c.readConfig()
-	if err == nil && json.NewDecoder(r.Body).Decode(&req) != nil {
+	var err error
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		err = fmt.Errorf("bad request")
 	}
 	var cfg *Config
 	if err == nil {
-		var toEditor func(int) int
-		var full string
-		full, cfg, toEditor, err = c.check(req.Text, block)
-		if err == nil {
+		if cfg, err = c.check(req.Text); err == nil {
 			writeJSON(w, 200, map[string]any{"ok": true, "warnings": cfg.Warnings, "problems": problemsOf(cfg.Warnings), "summary": cfg.Describe(),
-				"autoDomains": cfg.AutoDomains(), "tree": configTree(cfg, full, toEditor)})
+				"autoDomains": cfg.AutoDomains(), "tree": configTree(cfg, req.Text, func(n int) int { return n })})
 			return
 		}
 	}
@@ -617,13 +518,13 @@ func (c *Console) configValidate(w http.ResponseWriter, r *http.Request) {
 // configTest routes SNIs through the text in the editor, saved or not.
 func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 	var req configRequest
-	_, _, block, _, err := c.readConfig()
-	if err == nil && json.NewDecoder(r.Body).Decode(&req) != nil {
+	var err error
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		err = fmt.Errorf("bad request")
 	}
 	var cfg *Config
 	if err == nil {
-		_, cfg, _, err = c.check(req.Text, block)
+		cfg, err = c.check(req.Text)
 	}
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
@@ -646,7 +547,7 @@ func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 				row["kind"], row["pattern"] = d.Rule.Kind.String(), d.Rule.Source
 			}
 			if d.Allow {
-				row["target"] = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+				row["target"] = routeTarget(d)
 				row["terminated"] = d.Rule.Terminates()
 			}
 			results = append(results, row)
@@ -667,7 +568,7 @@ func (c *Console) configSave(w http.ResponseWriter, r *http.Request) {
 	// in this process.
 	configFileMu.Lock()
 	defer configFileMu.Unlock()
-	onDisk, _, block, ver, err := c.readConfig()
+	onDisk, ver, err := c.readConfig()
 	if err != nil {
 		fail(w, 500, "%v", err)
 		return
@@ -677,12 +578,12 @@ func (c *Console) configSave(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "not saved: the config file was changed by someone else after you opened it. Copy your text if you need it, then use Discard & reload from disk")
 		return
 	}
-	full, cfg, _, err := c.check(req.Text, block)
+	cfg, err := c.check(req.Text)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	c.commit(w, r, onDisk, full, cfg, "config saved")
+	c.commit(w, r, onDisk, req.Text, cfg, "config saved")
 }
 
 func backupFiles(path string) []string {
@@ -718,8 +619,7 @@ func (c *Console) backupGet(w http.ResponseWriter, r *http.Request) {
 				fail(w, 500, "%v", err)
 				return
 			}
-			visible, _, _ := hideConsole(string(data))
-			writeJSON(w, 200, map[string]any{"ok": true, "text": visible})
+			writeJSON(w, 200, map[string]any{"ok": true, "text": string(data)})
 			return
 		}
 	}

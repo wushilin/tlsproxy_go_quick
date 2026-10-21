@@ -6,7 +6,7 @@ package main
 // connected to are sent to the target before anything else, the ClientHello
 // or our own upstream TLS handshake included.
 //
-// Inbound (from peers listed in proxy_protocol_from only): a header in front
+// Inbound (from peers listed in proxy_trust_source only): a header in front
 // of the ClientHello is consumed, and the addresses it states replace the
 // socket's. A connection from such a peer which does not start with either
 // complete signature is passed on byte-for-byte unchanged.

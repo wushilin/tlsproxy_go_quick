@@ -32,20 +32,32 @@ func startProxy(t *testing.T, global, rules string) *proxyUnderTest {
 
 func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 	t.Helper()
-	if !strings.Contains(text, "ca_root") { // the run's shared CAs (see testCA.localCA)
-		withRoot := strings.Replace(text, "[global]\n", "[global]\nca_root = "+testCARoot()+"\n", 1)
-		// The file must say what was parsed (reloads and the password
-		// rewrite compare the two), so it gets the same line.
-		if path != "" {
-			if onDisk, err := os.ReadFile(path); err == nil && string(onDisk) == text {
-				if err := os.WriteFile(path, []byte(withRoot), 0o600); err != nil {
-					t.Fatal(err)
-				}
+	return startProxyConsole(t, text, path, nil)
+}
+
+// startProxyConsole is startProxyText with a console (nil for none). The
+// text may be in the tests' compact form (see yamlFixture): the file at
+// path, if it holds that text, is rewritten as the YAML that is loaded.
+func startProxyConsole(t *testing.T, text, path string, con *ConsoleConfig) *proxyUnderTest {
+	t.Helper()
+	original := text
+	if !strings.Contains(text, "ca_root") && !strings.Contains(text, "cert_root") { // the run's shared CAs (see testCA.localCA)
+		if isFixture(text) {
+			text = strings.Replace(text, "[global]\n", "[global]\ncert_root = "+testCARoot()+"\n", 1)
+		} else {
+			text = strings.Replace(text, "global:\n", "global:\n  cert_root: "+strconv.Quote(testCARoot())+"\n", 1)
+		}
+	}
+	text = yamlFixture(text)
+	// The file must say what was parsed (reloads compare the two).
+	if path != "" {
+		if onDisk, err := os.ReadFile(path); err == nil && string(onDisk) == original {
+			if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+				t.Fatal(err)
 			}
 		}
-		text = withRoot
 	}
-	cfg, err := ParseConfig(text)
+	cfg, err := LoadConfig(text, con)
 	if err != nil {
 		t.Fatalf("bad test config: %v\n%s", err, text)
 	}
@@ -65,6 +77,7 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 			live.close()
 		}
 		srv.listenersMu.Unlock()
+		srv.stopServing()
 	})
 	return &proxyUnderTest{addr: l.Addr().String(), srv: srv}
 }
@@ -602,7 +615,7 @@ func TestConfigReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	write := func(body string, wait bool) string {
 		text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=5\n" + body
-		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(yamlFixture(text)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if wait {

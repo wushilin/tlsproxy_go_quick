@@ -81,9 +81,9 @@ func newPebble(t *testing.T, other map[string]string) *pebble {
 }
 
 // global is what a proxy's [global] needs to get certificates from it.
-func (pb *pebble) global(certPath string) string {
-	return fmt.Sprintf("cert_path=%s\nacme_agree_tos=true\nacme_email=admin@acme.test\n"+
-		"acme_directory=%s/dir\nacme_ca_file=%s\ndns_resolvers=%s\npublic_ip_address=127.0.0.1", certPath, pb.api.URL, pb.caFile, pb.dns)
+func (pb *pebble) global(certRoot string) string {
+	return fmt.Sprintf("cert_root=%s\nacme_agree_tos=true\nacme_email=admin@acme.test\n"+
+		"acme_directory=%s/dir\nacme_ca_file=%s\ndns_resolvers=%s\npublic_ip_address=127.0.0.1", certRoot, pb.api.URL, pb.caFile, pb.dns)
 }
 
 type lockedWriter struct {
@@ -146,8 +146,9 @@ func TestPebbleIssuesOverTLSALPN01(t *testing.T) {
 	pb := newPebble(t, map[string]string{"elsewhere.acme.test": "198.51.100.9"}) // one name points elsewhere
 
 	// The proxy under test, terminating TLS for two names with cert = auto.
-	certPath := t.TempDir()
-	p := startProxy(t, pb.global(certPath),
+	root := t.TempDir()
+	certPath := filepath.Join(root, "acme") // in cert_root
+	p := startProxy(t, pb.global(root),
 		fmt.Sprintf("[[host]]\nlistener=default\npattern=*.acme\\.test\ncert=auto\ncert_domains=www.acme.test, api.acme.test, elsewhere.acme.test\n"+
 			"upstream_tls=false\ntarget_host=127.0.0.1\ntarget_port=%d\n", echoBackend(t, "E")))
 	_, proxyPort, _ := net.SplitHostPort(p.addr)
