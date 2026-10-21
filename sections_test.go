@@ -152,3 +152,74 @@ func TestEditListeners(t *testing.T) {
 		t.Fatalf("delete: %v\n%s", err, got)
 	}
 }
+
+func TestEditBasicAuth(t *testing.T) {
+	text := `listeners:
+  - {name: a, port: 1}
+routes:
+  - listener: a
+    rules:
+      - domain: www.test
+        cert: local-ca
+        serve:
+          - {type: static_content, prefix: /, base_dir: /srv, basic_auth: team}
+basic_auth:
+  # the people
+  - name: team
+    users:
+      - {username: jack, password_plain: x} # old
+      - {username: jill, password_hash: "` + mustHash(t, "pw") + `"}
+`
+	fakeHash := func(p string) (string, error) { return "H(" + p + ")", nil }
+	realHash := func(p string) (string, error) { return hashPassword(p) }
+	edit := func(e authEdit, h func(string) (string, error)) (string, []string, error) {
+		return editBasicAuth(text, e, h)
+	}
+
+	got, _, err := edit(authEdit{Op: "set_password", Group: "team", User: "jack", Password: "new"}, realHash)
+	if err != nil || strings.Contains(got, "password_plain") || !strings.Contains(got, "# the people") || !strings.Contains(got, "# old") {
+		t.Fatalf("set_password replaces password_plain with a hash, comments kept: %v\n%s", err, got)
+	}
+	if c := mustParse(t, got); !checkPassword(c.BasicAuth["team"].Users["jack"].hash, "new") {
+		t.Fatal("the new hash checks the new password")
+	}
+	got, notes, err := edit(authEdit{Op: "rename_group", Group: "team", NewName: "crew"}, fakeHash)
+	if c := mustParse(t, got); err != nil || c.BasicAuth["crew"] == nil || c.Rules[0].Routes[0].BasicAuth != "crew" || len(notes) != 1 {
+		t.Fatalf("rename renames its serve entries: %v %v\n%s", err, notes, got)
+	}
+	got, _, err = edit(authEdit{Op: "add_user", Group: "team", User: "joe", Password: "p"}, fakeHash)
+	if err != nil || !strings.Contains(got, `{username: joe, password_hash: "H(p)"}`) {
+		t.Fatalf("add_user: %v\n%s", err, got)
+	}
+	got, _, err = edit(authEdit{Op: "delete_user", Group: "team", User: "jack"}, fakeHash)
+	if err != nil || strings.Contains(got, "jack") {
+		t.Fatalf("delete_user: %v\n%s", err, got)
+	}
+	got, _, err = edit(authEdit{Op: "add_group", Group: "ops", User: "root", Password: "p"}, realHash)
+	if c := mustParse(t, got); err != nil || len(c.BasicAuth["ops"].Users) != 1 {
+		t.Fatalf("add_group: %v\n%s", err, got)
+	}
+	unused := strings.Replace(text, ", basic_auth: team}", "}", 1)
+	if got, _, err := editBasicAuth(unused, authEdit{Op: "delete_group", Group: "team"}, fakeHash); err != nil || strings.Contains(got, "basic_auth") && strings.Contains(got, "team") {
+		t.Fatalf("delete_group: %v\n%s", err, got)
+	}
+	for name, e := range map[string]authEdit{
+		"group in use":       {Op: "delete_group", Group: "team"},
+		"no such group":      {Op: "add_user", Group: "nope", User: "a", Password: "p"},
+		"user exists":        {Op: "add_user", Group: "team", User: "jill", Password: "p"},
+		"group exists":       {Op: "add_group", Group: "team", User: "a", Password: "p"},
+		"rename to existing": {Op: "rename_group", Group: "team", NewName: "team"},
+		"empty password":     {Op: "set_password", Group: "team", User: "jill"},
+		"no such user":       {Op: "set_password", Group: "team", User: "nobody", Password: "p"},
+		"unknown":            {Op: "drop", Group: "team"},
+	} {
+		if _, _, err := edit(e, fakeHash); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	// A group's last user can't go.
+	one, _, _ := edit(authEdit{Op: "delete_user", Group: "team", User: "jack"}, fakeHash)
+	if _, _, err := editBasicAuth(one, authEdit{Op: "delete_user", Group: "team", User: "jill"}, fakeHash); err == nil || !strings.Contains(err.Error(), "only user") {
+		t.Fatalf("the last user: %v", err)
+	}
+}

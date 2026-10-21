@@ -840,3 +840,5 @@ textarea.pem:focus { outline: 2px solid var(--focus); outline-offset: 0; border-
 .serve-row .more { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 8px; }
 .serve-row select, .serve-row input[type=text] { height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--fg); font: 13px var(--font-mono); min-width: 0; }
 @media (max-width: 640px) { .serve-row, .serve-row .more { grid-template-columns: 1fr; } }
+.ca-line.auth-user { align-items: center; gap: 8px; }
+.ca-line.auth-user .act { height: 26px; padding: 0 8px; }

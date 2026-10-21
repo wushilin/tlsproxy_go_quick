@@ -45,8 +45,12 @@ New:
 - `basic_auth`: users (`username` with `password_hash` (argon2id or
   pbkdf2-sha256) or `password_plain`) that a serve entry asks for with
   `basic_auth: <name>`. A matched password is remembered for 5 minutes.
-- The console's rule editor has *Serve it here*, one row per serve entry,
-  and saves through the YAML tree: comments elsewhere in the file are kept.
+- The console's rule editor has *Serve it here*, one row per serve entry
+  (its basic auth chosen from the existing groups), and saves through the
+  YAML tree: comments elsewhere in the file are kept. A **Basic auth** page
+  adds, renames (with the serve entries that use it) and deletes groups, and
+  adds, deletes and sets the password of users; passwords are hashed in the
+  proxy and never sent back to the page.
 - `cert: local-ca` serves clients without SNI (`domain: NONE`, or `ANY`):
   a certificate for the IP address they connected to, or with IP addresses
   in `cert_domains`, one certificate for all of them (a `NONE` rule may add

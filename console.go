@@ -101,6 +101,8 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("GET /api/certs", c.authed(c.certs))
 	mux.HandleFunc("POST /api/certs/retry", c.authed(c.certRetry))
 	mux.HandleFunc("POST /api/certs/remove", c.authed(c.certRemove))
+	mux.HandleFunc("GET /api/auth", c.authed(c.authList))
+	mux.HandleFunc("POST /api/auth/save", c.authed(c.authSave))
 	mux.HandleFunc("GET /api/cas", c.authed(c.caList))
 	mux.HandleFunc("GET /api/cas/cert", c.authed(c.caCert))
 	mux.HandleFunc("POST /api/cas/generate", c.authed(c.caGenerate))

@@ -25,7 +25,7 @@ const RATE_MAX_SAMPLES = 64;
 const HISTORY_POINTS = 120; // two minutes at one sample per second
 const MAX_ROWS = 200;
 const ARM_MS = 3000;
-const TABS = ["rules", "flows", "certs", "ca", "log", "config"];
+const TABS = ["rules", "flows", "certs", "ca", "auth", "log", "config"];
 
 const ui = {
   state: null,
@@ -1487,8 +1487,17 @@ function serveRow(e) {
   const verify = el("select", "s-verify");
   for (const [v, t] of [["", "verify https:// (default)"], ["false", "don't verify"]]) { const o = el("option", "", t); o.value = v; verify.appendChild(o); }
   verify.value = String(e.tls_verify) === "false" ? "false" : "";
+  const auth = el("select", "s-auth");
+  const groups = (ui.state && ui.state.authGroups) || [];
+  for (const g of ["", ...groups, ...(e.basic_auth && !groups.includes(e.basic_auth) ? [e.basic_auth] : [])]) {
+    const o = el("option", "", g === "" ? "none" : groups.includes(g) ? g : `${g} (no such group)`);
+    o.value = g;
+    auth.appendChild(o);
+  }
+  auth.value = e.basic_auth || "";
+  auth.title = groups.length ? "Ask for a user of this basic_auth group" : "No basic_auth group yet: add one on the Basic auth page";
   more.append(field("Path sent on", strip), field("Host sent on", text("s-host", e.force_host, "the client's")),
-    field("Target certificate", verify), field("Basic auth", text("s-auth", e.basic_auth, "none")));
+    field("Target certificate", verify), field("Basic auth", auth));
   row.append(more);
   const sync = () => {
     const proxy = type.value === "reverse_proxy";
@@ -2138,7 +2147,7 @@ function selectTab(name, force) {
   clearInterval(ui.pageTimer);
   ui.pageTimer = 0;
   const every = { certs: 10000, log: 2000 }[name];
-  const load = { certs: loadCerts, ca: loadCAs, log: loadLog, config: loadConfigOnce }[name];
+  const load = { certs: loadCerts, ca: loadCAs, auth: loadAuth, log: loadLog, config: loadConfigOnce }[name];
   if (load) {
     const run = () => { if (!document.hidden) load().catch((e) => { if (e.status !== 401) pageError(name, e); }); };
     run();
@@ -2600,7 +2609,7 @@ function renderCAs(d) {
     const img = el("img");
     img.src = "logo-sleep.svg";
     img.alt = "";
-    empty.append(img, el("span", "", "No CA yet. Generate one, import yours, or save a rule with cert = local-ca (that makes ca001)."));
+    empty.append(img, el("span", "", "No CA yet. The default CA, ca001, is made when the proxy starts; generate or import more here."));
     list.appendChild(empty);
     return;
   }
@@ -2623,7 +2632,7 @@ function renderCAs(d) {
       const issues = el("div", "ca-line");
       issues.append(el("span", "ca-k", "issues"), el("span", "", ca.settings || "—"));
       main.appendChild(issues);
-      if (ca.configError) main.appendChild(el("div", "ca-line bad", `config.toml: ${ca.configError} (previous settings in use)`));
+      if (ca.configError) main.appendChild(el("div", "ca-line bad", `config.yaml: ${ca.configError} (previous settings in use)`));
       const facts = el("div", "ca-line ca-facts");
       facts.append(el("span", "ca-k", "issued"), el("span", "", `${ca.issued} certificate${ca.issued === 1 ? "" : "s"}`),
         el("span", "ca-k", "used by"), el("span", "", ca.rules.length ? ca.rules.map((l) => "line " + l).join(", ") : "no rule"));
@@ -2639,7 +2648,7 @@ function renderCAs(d) {
       dl.href = `api/cas/cert?id=${encodeURIComponent(ca.id)}`;
       dl.title = "The CA certificate, for clients to trust (the key is never offered)";
       const [set] = actionButton("Settings", "");
-      set.title = "Edit what this CA issues (its config.toml)";
+      set.title = "Edit what this CA issues (its config.yaml)";
       set.addEventListener("click", () => openCASettings(ca.id));
       act.append(dl, set);
     }
@@ -3208,4 +3217,153 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", red
 checkSession().then((ok) => {
   if (ok) connect();
   else if (ok === null) { showApp(); setStatus("down", "Reconnecting"); scheduleReconnect(); }
+});
+
+// ---------- basic auth ----------
+
+let authFile = null; // the config file version the page shows
+let authDlg = null;  // the change the dialog is making
+
+function loadAuth() {
+  return getJSON("api/auth").then(renderAuth);
+}
+
+// Each group is a card: its users, each with Set password and Delete, and
+// the serve entries that use it.
+function renderAuth(d) {
+  authFile = d.file;
+  const editable = !!(d.file && d.file.editable);
+  setText($("auth-meta"), editable ? `${d.groups.length} group${d.groups.length === 1 ? "" : "s"} in ${d.file.path}` : (d.file.error || "the config file can't be edited"));
+  $("auth-add-group").disabled = !editable;
+  const list = $("auth-groups");
+  list.replaceChildren();
+  if (!d.groups.length) {
+    const empty = el("div", "empty");
+    empty.append(el("span", "", "No basic_auth group yet. Add one, then choose it for a serve entry in the rule editor."));
+    list.appendChild(empty);
+    return;
+  }
+  for (const g of d.groups) {
+    const card = el("div", "ca-card");
+    const main = el("div", "ca-main");
+    const head = el("div", "ca-head");
+    head.append(el("span", "ca-name", g.name), el("span", "chip t-muted", `${g.users.length} user${g.users.length === 1 ? "" : "s"}`));
+    if (g.line) head.title = `basic_auth at line ${g.line} of the config file`;
+    main.appendChild(head);
+    for (const u of g.users) {
+      const line = el("div", "ca-line auth-user");
+      line.append(el("span", "mono", u.name));
+      if (u.plain) {
+        const c = el("span", "chip warn", "plain password");
+        c.title = "Written as password_plain in the file: setting a password here replaces it with a hash";
+        line.append(c);
+      }
+      const [pw] = actionButton("Set password", "");
+      pw.disabled = !editable;
+      pw.addEventListener("click", () => openAuthDialog({ op: "set_password", group: g.name, user: u.name }));
+      const del = armedButton("Delete", () => authChange({ op: "delete_user", group: g.name, user: u.name }, `Deleted ${u.name} from ${g.name}`));
+      del.disabled = !editable || g.users.length === 1;
+      del.title = g.users.length === 1 ? "A group needs a user: delete the group instead" : `Delete ${u.name}`;
+      line.append(pw, del);
+      main.appendChild(line);
+    }
+    const used = el("div", "ca-line ca-facts");
+    used.append(el("span", "ca-k", "used by"), el("span", "", g.usedBy.length
+      ? g.usedBy.map((x) => `${x.rule} ${x.prefix}` + (x.line ? ` (line ${x.line})` : "")).join(", ") : "no serve entry"));
+    main.appendChild(used);
+    const act = el("div", "ca-actions");
+    const [add] = actionButton("Add user", "");
+    add.disabled = !editable;
+    add.addEventListener("click", () => openAuthDialog({ op: "add_user", group: g.name }));
+    const [ren] = actionButton("Rename", "");
+    ren.disabled = !editable;
+    ren.title = "Its serve entries are renamed with it";
+    ren.addEventListener("click", () => openAuthDialog({ op: "rename_group", group: g.name }));
+    const del = armedButton("Delete", () => authChange({ op: "delete_group", group: g.name }, `Deleted ${g.name}`));
+    del.disabled = !editable || g.usedBy.length > 0;
+    del.title = g.usedBy.length ? "Used by a serve entry: change it first" : `Delete the group ${g.name}`;
+    act.append(add, ren, del);
+    card.append(main, act);
+    list.appendChild(card);
+  }
+}
+
+// armedButton is a delete that asks for a second click.
+function armedButton(label, run) {
+  const [b, text] = actionButton(label, "danger");
+  let armed = 0;
+  b.addEventListener("click", () => {
+    if (!armed) {
+      b.classList.add("armed");
+      setText(text, "Confirm");
+      armed = setTimeout(() => { armed = 0; b.classList.remove("armed"); setText(text, label); }, ARM_MS);
+      return;
+    }
+    clearTimeout(armed);
+    armed = 0;
+    b.disabled = true;
+    run();
+  });
+  return b;
+}
+
+// authChange saves one change and shows the result.
+function authChange(change, done) {
+  return api("api/auth/save", { ...change, baseHash: authFile.hash, baseMtime: authFile.mtime })
+    .then((d) => {
+      if (!d.ok) throw new Error(d.error || "not saved");
+      toast(done);
+      for (const p of d.problems || []) toast(p, true);
+      return loadAuth();
+    })
+    .catch((e) => { toast(e.message, true); loadAuth(); throw e; });
+}
+
+function openAuthDialog(change) {
+  authDlg = change;
+  const titles = { add_group: "Add a group", add_user: `Add a user to ${change.group}`, set_password: `Set ${change.user}'s password`, rename_group: `Rename ${change.group}` };
+  setText($("auth-dlg-title"), titles[change.op]);
+  setText($("auth-dlg-hint"), {
+    add_group: "A group needs its first user. The password is hashed in the proxy before it is written.",
+    add_user: "The password is hashed in the proxy before it is written.",
+    set_password: "The new password replaces the old one; a browser signed in with the old one is let in for up to 5 more minutes.",
+    rename_group: "The serve entries that use it are renamed with it.",
+  }[change.op]);
+  const needs = { add_group: ["group", "user", "pass"], add_user: ["user", "pass"], set_password: ["pass"], rename_group: ["group"] }[change.op];
+  $("auth-f-group").hidden = !needs.includes("group");
+  $("auth-f-user").hidden = !needs.includes("user");
+  $("auth-f-pass").hidden = $("auth-f-pass2").hidden = !needs.includes("pass");
+  $("auth-group").value = change.op === "rename_group" ? change.group : "";
+  for (const id of ["auth-user", "auth-pass", "auth-pass2"]) $(id).value = "";
+  setText($("auth-dlg-error"), "");
+  $("auth-dlg").showModal();
+  $(needs[0] === "group" ? "auth-group" : needs[0] === "user" ? "auth-user" : "auth-pass").focus();
+}
+
+$("auth-add-group").addEventListener("click", () => openAuthDialog({ op: "add_group" }));
+$("auth-dlg-cancel").addEventListener("click", () => $("auth-dlg").close());
+$("auth-dlg").addEventListener("close", () => { for (const id of ["auth-pass", "auth-pass2"]) $(id).value = ""; });
+$("auth-dlg-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const c = { ...authDlg };
+  const group = val("auth-group"), user = val("auth-user"), pass = $("auth-pass").value;
+  if (!$("auth-f-group").hidden) {
+    if (!group) return setText($("auth-dlg-error"), "The group needs a name.");
+    if (c.op === "rename_group") c.newName = group; else c.group = group;
+  }
+  if (!$("auth-f-user").hidden) {
+    if (!user || user.includes(":")) return setText($("auth-dlg-error"), "A username is required, without a colon.");
+    c.user = user;
+  }
+  if (!$("auth-f-pass").hidden) {
+    if (!pass) return setText($("auth-dlg-error"), "The password must not be empty.");
+    if (pass !== $("auth-pass2").value) return setText($("auth-dlg-error"), "The two passwords differ.");
+    c.password = pass;
+  }
+  $("auth-dlg-save").disabled = true;
+  const done = { add_group: `Added ${c.group}`, add_user: `Added ${c.user} to ${c.group}`, set_password: `Set ${c.user}'s password`, rename_group: `Renamed ${authDlg.group} to ${c.newName}` }[c.op];
+  authChange(c, done)
+    .then(() => $("auth-dlg").close())
+    .catch((e) => setText($("auth-dlg-error"), e.message))
+    .finally(() => { $("auth-dlg-save").disabled = false; });
 });

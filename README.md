@@ -568,7 +568,8 @@ basic_auth:
   item, is a load error; an item no serve entry uses is a warning.
 - **In the console**, the rule editor's *Serve it here* takes the serve
   entries as rows of a form, checked as you type, and saves them as the
-  rule's `serve` list. `basic_auth` is edited in the Config file tab.
+  rule's `serve` list; a row's basic auth is chosen from the existing groups.
+  The groups themselves are managed on the console's **Basic auth** page.
 
 ## The client's address (PROXY protocol)
 
@@ -1130,6 +1131,13 @@ written to it (and every change to the file shows up in the console).
   with **Show all closed** on, every closed connection the proxy still
   remembers (the last 2000) stays listed. Open connections can be stopped
   from here too.
+- **Basic auth**: one card per `basic_auth` group, with its users and the
+  serve entries that use it. Add or delete a group (one still used by a serve
+  entry can't be deleted), rename it (its serve entries are renamed with it),
+  add or delete a user (a group keeps at least one), and set a user's
+  password. A password typed here is hashed in the proxy (argon2id) before
+  it is written as `password_hash`, replacing a `password_plain`; no password
+  or hash is ever sent back to the page. Saved like every other edit.
 - **Certificates**: every certificate in use, both those the proxy manages
   (`cert: auto`) and those your CAs issued (`cert: local-ca`): status (`ok`,
   `expiring`, `expired`, `missing`, `failing`), issuer, validity, days left,

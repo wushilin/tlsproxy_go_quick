@@ -533,3 +533,164 @@ func valueText(v any) string {
 	}
 	return fmt.Sprint(v)
 }
+
+// authEdit is one change to the basic_auth groups, from the console.
+type authEdit struct {
+	Op       string // add_group, rename_group, delete_group, add_user, delete_user, set_password
+	Group    string
+	NewName  string // rename_group
+	User     string
+	Password string // add_group (its first user), add_user, set_password: hashed before it is written
+}
+
+// authGroup finds the basic_auth item called name.
+func (d *yamlDoc) authGroup(name string) *yaml.Node {
+	if ba := mapGet(d.root, "basic_auth"); ba != nil && ba.Kind == yaml.SequenceNode {
+		for _, g := range ba.Content {
+			if n := mapGet(g, "name"); n != nil && n.Value == name {
+				return g
+			}
+		}
+	}
+	return nil
+}
+
+// authUsers is a group's users list, made if missing.
+func authUsers(g *yaml.Node) *yaml.Node {
+	if u := mapGet(g, "users"); u != nil && u.Kind == yaml.SequenceNode {
+		return u
+	}
+	u := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	g.Content = append(g.Content, scalar("users"), u)
+	return u
+}
+
+// userNode is a user written with its hash, in one line.
+func userNode(user, hash string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Style: yaml.FlowStyle, Content: []*yaml.Node{
+		scalar("username"), scalar(user), scalar("password_hash"), {Kind: yaml.ScalarNode, Tag: "!!str", Value: hash, Style: yaml.DoubleQuotedStyle}}}
+}
+
+// authRefs is every serve entry's basic_auth value that names group.
+func (d *yamlDoc) authRefs(group string) []*yaml.Node {
+	var out []*yaml.Node
+	routes := mapGet(d.root, "routes")
+	if routes == nil {
+		return nil
+	}
+	for _, g := range routes.Content {
+		rs := mapGet(g, "rules")
+		if rs == nil {
+			continue
+		}
+		for _, r := range rs.Content {
+			serve := mapGet(r, "serve")
+			if serve == nil || serve.Kind != yaml.SequenceNode {
+				continue
+			}
+			for _, e := range serve.Content {
+				if v := mapGet(e, "basic_auth"); v != nil && v.Value == group {
+					out = append(out, v)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// editBasicAuth applies one change to the basic_auth groups; hash makes a
+// password's hash. It returns the new text and notes on what else changed.
+func editBasicAuth(text string, e authEdit, hash func(string) (string, error)) (string, []string, error) {
+	d, err := loadDoc(text)
+	if err != nil {
+		return "", nil, err
+	}
+	var notes []string
+	g := d.authGroup(e.Group)
+	if g == nil && e.Op != "add_group" {
+		return "", nil, fmt.Errorf("there is no basic_auth group %s any more; reload and try again", e.Group)
+	}
+	newHash := func() (string, error) {
+		if e.Password == "" {
+			return "", fmt.Errorf("the password must not be empty")
+		}
+		return hash(e.Password)
+	}
+	findUser := func() (*yaml.Node, int) {
+		users := authUsers(g)
+		for i, u := range users.Content {
+			if n := mapGet(u, "username"); n != nil && n.Value == e.User {
+				return users, i
+			}
+		}
+		return users, -1
+	}
+	switch e.Op {
+	case "add_group":
+		if g != nil {
+			return "", nil, fmt.Errorf("there is already a basic_auth group %s", e.Group)
+		}
+		h, err := newHash()
+		if err != nil {
+			return "", nil, err
+		}
+		group := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{scalar("name"), scalar(e.Group)}}
+		authUsers(group).Content = append(authUsers(group).Content, userNode(e.User, h))
+		ba := d.section("basic_auth")
+		ba.Content = append(ba.Content, group)
+	case "rename_group":
+		if e.NewName == "" || e.NewName == e.Group {
+			return "", nil, fmt.Errorf("give the group a new name")
+		}
+		if d.authGroup(e.NewName) != nil {
+			return "", nil, fmt.Errorf("there is already a basic_auth group %s", e.NewName)
+		}
+		mapGet(g, "name").Value = e.NewName
+		if refs := d.authRefs(e.Group); len(refs) > 0 {
+			for _, r := range refs {
+				r.Value = e.NewName
+			}
+			notes = append(notes, fmt.Sprintf("Renames it in %d serve entr%s: basic_auth: %s becomes basic_auth: %s", len(refs), map[bool]string{true: "y", false: "ies"}[len(refs) == 1], e.Group, e.NewName))
+		}
+	case "delete_group":
+		if refs := d.authRefs(e.Group); len(refs) > 0 {
+			return "", nil, fmt.Errorf("basic_auth %s is used by %d serve entr%s: change them first", e.Group, len(refs), map[bool]string{true: "y", false: "ies"}[len(refs) == 1])
+		}
+		ba := mapGet(d.root, "basic_auth")
+		ba.Content = slices.DeleteFunc(ba.Content, func(n *yaml.Node) bool { return n == g })
+	case "add_user":
+		if _, i := findUser(); i >= 0 {
+			return "", nil, fmt.Errorf("%s already has a user %s", e.Group, e.User)
+		}
+		h, err := newHash()
+		if err != nil {
+			return "", nil, err
+		}
+		authUsers(g).Content = append(authUsers(g).Content, userNode(e.User, h))
+	case "delete_user":
+		users, i := findUser()
+		switch {
+		case i < 0:
+			return "", nil, fmt.Errorf("%s has no user %s any more; reload and try again", e.Group, e.User)
+		case len(users.Content) == 1:
+			return "", nil, fmt.Errorf("%s is %s's only user: a group needs one; delete the group instead", e.User, e.Group)
+		}
+		users.Content = slices.Delete(users.Content, i, i+1)
+	case "set_password":
+		users, i := findUser()
+		if i < 0 {
+			return "", nil, fmt.Errorf("%s has no user %s any more; reload and try again", e.Group, e.User)
+		}
+		h, err := newHash()
+		if err != nil {
+			return "", nil, err
+		}
+		old := users.Content[i]
+		u := userNode(e.User, h)
+		u.LineComment, u.HeadComment = old.LineComment, old.HeadComment
+		users.Content[i] = u // password_plain, if it was one, is gone
+	default:
+		return "", nil, fmt.Errorf("unknown change %q", e.Op)
+	}
+	return d.String(), notes, nil
+}

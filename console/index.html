@@ -21,6 +21,7 @@
       <button class="tab" type="button" role="tab" data-tab="flows" aria-selected="false" aria-controls="tab-flows">Flow log</button>
       <button class="tab" type="button" role="tab" data-tab="certs" aria-selected="false" aria-controls="tab-certs">Certificates</button>
       <button class="tab" type="button" role="tab" data-tab="ca" aria-selected="false" aria-controls="tab-ca">CAs</button>
+      <button class="tab" type="button" role="tab" data-tab="auth" aria-selected="false" aria-controls="tab-auth">Basic auth</button>
       <button class="tab" type="button" role="tab" data-tab="log" aria-selected="false" aria-controls="tab-log">Log</button>
       <button class="tab" type="button" role="tab" data-tab="config" aria-selected="false" aria-controls="tab-config">Config file</button>
     </nav>
@@ -130,7 +131,22 @@
         </div>
         <div class="ca-list" id="cas"></div>
       </div>
-      <p class="page-note">A rule terminates TLS with one of these by <code>cert = local-ca:ca002</code> (plain <code>cert = local-ca</code> is ca001). Certificates are issued the first time a client asks for a name, kept in the CA's folder, and renewed automatically; anything in a folder that the CA did not issue is moved to its <code>_archive</code> and deleted after 14 days. A self-signed CA is renewed with the same key, so what it issued stays valid. Clients must trust the CA: download its certificate here. Private keys never leave the proxy.</p>
+      <p class="page-note">A rule terminates TLS with one of these by <code>cert: local-ca:ca002</code> (plain <code>cert: local-ca</code> is ca001, the default CA, made at start-up when there is none). Certificates are issued the first time a client asks for a name, kept in the CA's folder, and renewed automatically; anything in a folder that the CA did not issue is moved to its <code>_archive</code> and deleted after 14 days. A self-signed CA is renewed with the same key, so what it issued stays valid. Clients must trust the CA: download its certificate here. Private keys never leave the proxy.</p>
+    </section>
+
+    <!-- ================= Basic auth ================= -->
+    <section id="tab-auth" class="page" role="tabpanel" aria-label="Basic auth" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Basic auth</h2>
+          <span class="sub" id="auth-meta"></span>
+          <div class="toolbar-actions">
+            <button class="btn btn-add" type="button" id="auth-add-group"><span aria-hidden="true">+</span> Add group</button>
+          </div>
+        </div>
+        <div class="ca-list" id="auth-groups"></div>
+      </div>
+      <p class="page-note">A serve entry asks for a user of one of these groups with <code>basic_auth: &lt;group&gt;</code> (choose it in the rule editor). A password typed here is hashed in the proxy (argon2id) before it is written to the config file; it is never shown again. A browser that signed in is remembered for 5 minutes, so a new password applies within that time. Each change is saved like any other edit: checked first, the previous file kept as a backup, applied at once.</p>
     </section>
 
     <!-- ================= Log ================= -->
@@ -176,6 +192,24 @@
   </div>
 </main>
 
+<dialog id="auth-dlg" class="wizard" aria-labelledby="auth-dlg-title">
+  <form id="auth-dlg-form" method="dialog" class="editor" autocomplete="off">
+    <h2 id="auth-dlg-title"></h2>
+    <p class="editor-hint" id="auth-dlg-hint"></p>
+    <div class="fields">
+      <label class="field wide" id="auth-f-group"><span>Group name</span><input id="auth-group" spellcheck="false" maxlength="64" placeholder="e.g. team"></label>
+      <label class="field wide" id="auth-f-user"><span>Username</span><input id="auth-user" spellcheck="false" maxlength="64" autocomplete="off"></label>
+      <label class="field wide" id="auth-f-pass"><span>Password</span><input id="auth-pass" type="password" autocomplete="new-password"></label>
+      <label class="field wide" id="auth-f-pass2"><span>Password again</span><input id="auth-pass2" type="password" autocomplete="new-password"></label>
+    </div>
+    <p class="editor-error" id="auth-dlg-error" role="alert"></p>
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="auth-dlg-cancel">Cancel</button>
+      <button class="btn btn-primary" type="submit" id="auth-dlg-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="ca-gen" class="wizard" aria-labelledby="ca-gen-title">
   <form id="ca-gen-form" method="dialog" class="editor" autocomplete="off">
     <h2 id="ca-gen-title">Generate a CA</h2>
@@ -190,7 +224,7 @@
       <label class="field"><span>Signature hash</span><select id="ca-gen-hash"><option value="sha256">SHA-256 (default)</option><option value="sha384">SHA-384</option><option value="sha512">SHA-512</option></select></label>
       <label class="field"><span>Valid for <em>years</em></span><input id="ca-gen-years" type="number" min="1" max="100" value="10"></label>
     </div>
-    <p class="editor-note">These are fixed once the CA exists (they are written to its config.toml, whose [ca] section can't change them). It is renewed with the same key before it expires. What it issues is set in [certificates], editable later with Settings.</p>
+    <p class="editor-note">These are fixed once the CA exists (they are written to its config.yaml, whose ca section can't change them). It is renewed with the same key before it expires. What it issues is set in certificates, editable later with Settings.</p>
     <p class="editor-error" id="ca-gen-error" role="alert"></p>
     <div class="editor-actions">
       <button class="btn btn-quiet" type="button" id="ca-gen-cancel">Cancel</button>

@@ -132,6 +132,8 @@ type consoleState struct {
 	Status    statusView     `json:"status"`
 	File      fileView       `json:"file"`
 	Listeners []listenerView `json:"listeners"`
+	// AuthGroups are the basic_auth group names, for the rule editor's serve rows.
+	AuthGroups []string `json:"authGroups"`
 }
 
 // parsedFile is the config file as last read, re-read only when it changes.
@@ -365,7 +367,7 @@ func (c *Console) state() consoleState {
 	}
 	host, _ := os.Hostname()
 	return consoleState{
-		Host: host, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners,
+		Host: host, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, AuthGroups: authGroupNames(shown),
 		Status: statusView{Active: st.Active.Load(), Accepted: st.Accepted.Load(),
 			Completed: st.Completed.Load(), Denied: st.Denied.Load(), Failed: st.Failed.Load(), Rejected: st.Rejected.Load(),
 			MaxConnections: rt.cfg.MaxConnections, BytesUp: st.BytesUp.Load(), BytesDown: st.BytesDown.Load()},
@@ -847,4 +849,13 @@ func routeTarget(d Decision) string {
 		return "served here"
 	}
 	return net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+}
+
+// authGroupNames is cfg's basic_auth group names, sorted.
+func authGroupNames(cfg *Config) []string {
+	out := []string{}
+	for _, g := range authGroupViews(cfg) {
+		out = append(out, g.Name)
+	}
+	return out
 }

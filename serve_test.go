@@ -346,3 +346,55 @@ func TestNoSNIServeEndToEnd(t *testing.T) {
 		t.Fatalf("%s\nwant %s", body, want)
 	}
 }
+
+// The console's Basic auth page: a password set there is the one a served
+// page asks for, at once.
+func TestConsoleBasicAuthPage(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	a := httpEcho(t)
+	p, c, _ := startConsoleProxy(t, "password = pw", fmt.Sprintf("[[host]]\nlistener=default\npattern=www.test\ncert=%s\n"+
+		"service_rule1 = type=reverse_proxy; prefix=/; target=http://127.0.0.1:%d; basic_auth=team\n"+
+		"[[basic_auth]]\nname=team\nuser1=username=jack; password_plain=old\n", ca.localCA(t), a))
+	if c.login("pw") != 200 {
+		t.Fatal("sign-in")
+	}
+	_, list := c.get("/api/auth")
+	g := list["groups"].([]any)[0].(map[string]any)
+	if g["name"] != "team" || g["users"].([]any)[0].(map[string]any)["plain"] != true || len(g["usedBy"].([]any)) != 1 {
+		t.Fatalf("groups: %v", list)
+	}
+	if strings.Contains(fmt.Sprint(list), "old") {
+		t.Fatal("no password is sent to the page")
+	}
+	f := list["file"].(map[string]any)
+	if _, out := c.post("/api/auth/save", map[string]any{"op": "set_password", "group": "team", "user": "jack", "password": "n3w pass", "baseHash": f["hash"], "baseMtime": f["mtime"]}); out["ok"] != true {
+		t.Fatalf("set_password: %v", out)
+	}
+	if code, _ := c.post("/api/auth/save", map[string]any{"op": "add_user", "group": "team", "user": "x", "password": "p", "baseHash": f["hash"], "baseMtime": f["mtime"]}); code != 409 {
+		t.Fatalf("a stale version is refused: %d", code)
+	}
+	web := serveClient(p, ca, false)
+	try := func(pw string) int {
+		for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+			resp, _ := httpsGet(t, web, "https://www.test/", "Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("jack:"+pw)))
+			if resp.StatusCode == 200 || time.Now().After(deadline) {
+				return resp.StatusCode
+			}
+		}
+	}
+	if code := try("n3w pass"); code != 200 {
+		t.Fatalf("the new password: %d", code)
+	}
+	if resp, _ := httpsGet(t, web, "https://www.test/", "Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("jack:old"))); resp.StatusCode != 401 {
+		t.Fatalf("the old password: %d", resp.StatusCode)
+	}
+	_, list = c.get("/api/auth")
+	if list["groups"].([]any)[0].(map[string]any)["users"].([]any)[0].(map[string]any)["plain"] != false {
+		t.Fatal("now a hash")
+	}
+	_, st := c.get("/api/state")
+	if fmt.Sprint(st["authGroups"]) != "[team]" {
+		t.Fatalf("the rule editor's groups: %v", st["authGroups"])
+	}
+}
