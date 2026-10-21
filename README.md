@@ -800,7 +800,10 @@ routes:
   (`renew_before_days`, by default when a third of its lifetime is left)
   and that a rule still issues for, so a name nobody asked for in a while
   doesn't expire. A handshake that finds its certificate due renews it too.
-  Names no rule issues for any more are left to expire. A handshake finds its certificate in memory (a lock-free table),
+  Names no rule issues for any more are left to expire. A pass runs on its
+  own, so automatic certificates are not held up, and has 5 hours: what it
+  doesn't get to by then waits for the next pass (or a handshake), so two
+  passes never overlap. A handshake finds its certificate in memory (a lock-free table),
   never by searching files.
 - **Only what the CA issued is used.** A certificate in a name's folder is
   checked first: it must be signed by this CA's key, for exactly that name,

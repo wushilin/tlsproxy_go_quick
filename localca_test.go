@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -726,7 +727,7 @@ func TestLocalCARenewsInTheBackground(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m.renewLocalCAs() // the worker's renewal pass
+	m.renewLocalCAs(context.Background()) // the worker's renewal pass
 	if s := diskSerial(t, l, "used.bg.test"); s.Cmp(big.NewInt(99)) == 0 {
 		t.Fatal("a due certificate a rule issues for must be renewed in the background")
 	}

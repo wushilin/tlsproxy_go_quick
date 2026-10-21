@@ -37,6 +37,8 @@ package main
 // one, and the first to publish wins.
 
 import (
+	"bytes"
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/sha1"
@@ -365,6 +367,11 @@ func (l *localCA) renewCA() error {
 			chain = append(chain, c.Raw)
 		}
 	}
+	// Unchanged (the usual pass): keep the state, so what the CA issued is
+	// not checked against it again at its next handshake.
+	if cur := l.ca.Load(); cur != nil && cur.cert.Equal(ca) && slices.EqualFunc(cur.chain, chain, bytes.Equal) && publicKeyMatches(cur.cert, key) {
+		return nil
+	}
 	l.ca.Store(&caState{cert: ca, chain: chain, key: key})
 	return nil
 }
@@ -559,7 +566,8 @@ func (l *localCA) remove(name string) error {
 // a rule still issues for (issues says which). The certificate worker runs
 // it at start and every 6 hours; renewing at a handshake is only the fallback.
 // Certificates found that this CA did not issue are archived on the way.
-func (l *localCA) renewAll(issues func(name string) bool) {
+// It stops when ctx is done.
+func (l *localCA) renewAll(ctx context.Context, issues func(name string) bool) {
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
 		return
@@ -568,6 +576,12 @@ func (l *localCA) renewAll(issues func(name string) bool) {
 		name, ok := localCAName(e.Name())
 		if !e.IsDir() || !ok || !issues(name) {
 			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if beforeLocalRenew != nil {
+			beforeLocalRenew(l.id, name)
 		}
 		if _, err := l.certificate(name); err != nil {
 			errorf("cert: CA %s: %s: could not renew: %v; tried again in 6 hours, or when a client asks for it", l.id, name, err)
