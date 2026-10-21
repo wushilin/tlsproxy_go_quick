@@ -126,13 +126,15 @@ logging:
 # start-up, so no change made from the console can change its password or take
 # it off the network. It is ON by default:
 #
-#   -console_domain <name>  or $CONSOLE_DOMAIN   (required) the name it is served under
+#   -console_domain <name>  or $CONSOLE_DOMAIN   the name it is served under. Unset or none: clients
+#                                                without SNI (by IP address) on its listener; an IP
+#                                                address: those, by that address. Both use local-ca
 #   $CONSOLE_PASSWORD                            (required) the password, or an $argon2id$... hash
 #                                                from `tlsproxy --hash-password`
 #   -console_bind <addr>    or $CONSOLE_BIND     all addresses (0.0.0.0) unless set
 #   -console_port <n>       or $CONSOLE_PORT     443 unless set
-#   -console_cert <c>       or $CONSOLE_CERT     auto unless set (needs acme_agree_tos: true),
-#                                                or local-ca / local-ca:ca002
+#   -console_cert <c>       or $CONSOLE_CERT     auto unless set (needs acme_agree_tos: true and a
+#                                                host name), or local-ca / local-ca:ca002
 #   -noconsole                                   no console at all
 #
 # Without a domain and a password the proxy refuses to start (a --test dry run

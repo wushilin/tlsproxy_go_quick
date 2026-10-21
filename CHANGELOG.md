@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The console's domain is optional. Unset, or `-console_domain none`, the
+  console is its listener's `$no_sni` rule: clients reaching it by IP
+  address, with a certificate from a local CA for the address they
+  connected to (the default cert is `local-ca` then; `auto` is an error).
+  An IP address as the domain is the same rule, its certificate for that
+  address only. `config.yaml` can't have a `$no_sni` rule on the console's
+  listener then; the console accepts any IP address in Host (or that one),
+  never a host name. Useful for a console on a listener of its own, by IP.
+
 ## v1.5.0
 
 Breaking:

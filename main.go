@@ -22,9 +22,11 @@ const usage = `usage: %[1]s [config.yaml] [-noconsole] [-console_domain <name>] 
        %[1]s --hash-password    (reads a password from stdin, prints an argon2id hash for $CONSOLE_PASSWORD or basic_auth)
        %[1]s --version
 
-The web console is on unless -noconsole: it needs -console_domain (or
-$CONSOLE_DOMAIN) and $CONSOLE_PASSWORD. It listens on all addresses, port
-443 (on its own listener, $console), with cert auto.
+The web console is on unless -noconsole: it needs $CONSOLE_PASSWORD, and
+-console_domain (or $CONSOLE_DOMAIN) for a host name; without one (or with
+none, or an IP address) it answers clients without SNI, with cert local-ca.
+It listens on all addresses, port 443 (on its own listener, $console), with
+cert auto.
 -console_bind, -console_port and -console_cert (or $CONSOLE_BIND,
 $CONSOLE_PORT, $CONSOLE_CERT) change that. Flags take one dash or two, and
 -flag value or -flag=value.
