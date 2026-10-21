@@ -712,7 +712,7 @@ func TestConsoleOverTLS(t *testing.T) {
 		t.Fatalf("its options: %v", out)
 	}
 	written, _ := os.ReadFile(path)
-	if !strings.Contains(string(written), "- name: console_http\n    max_connections: 77\n") {
+	if !strings.Contains(string(written), "- name: $console\n    max_connections: 77\n") {
 		t.Fatalf("written as:\n%s", written)
 	}
 	if l := p.srv.runtime.Load().cfg.Listener("console_http"); l == nil || l.MaxConnections != 77 || !l.Console {
@@ -729,5 +729,63 @@ func TestConsoleOverTLS(t *testing.T) {
 	if _, out := c.post("/api/listeners/delete", map[string]any{"line": line, "baseHash": cfg["hash"], "baseMtime": cfg["mtime"]}); out["ok"] == true ||
 		!strings.Contains(out["error"].(string), "can't be deleted") {
 		t.Fatalf("deleting the console's listener: %v", out)
+	}
+}
+
+// $console is the console's listener, whatever its port: moving the
+// console doesn't break the file.
+func TestConsoleAlias(t *testing.T) {
+	t.Parallel()
+	text := "global:\n  acme_agree_tos: true\nlisteners:\n  - {name: $console, max_connections: 9}\nroutes:\n  - listener: $console\n    rules:\n      - {domain: www.test, action: deny}\n"
+	for port, want := range map[int]string{443: "https", 8443: "console_http"} {
+		con := &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: port, Domain: "admin.test", Cert: "auto"}
+		c, err := LoadConfig(text, con)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l := c.Listener(want); l == nil || !l.Console || l.MaxConnections != 9 || c.Rules[0].Listener != want {
+			t.Fatalf("port %d: %+v", port, c.Listeners)
+		}
+	}
+	if _, err := LoadConfig(text, nil); err == nil || !strings.Contains(err.Error(), "no console") {
+		t.Fatalf("without a console: %v", err)
+	}
+	both := strings.Replace(text, "  - {name: $console, max_connections: 9}\n", "  - {name: $console}\n  - {name: https}\n", 1)
+	if _, err := LoadConfig(both, &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: 443, Domain: "admin.test", Cert: "auto"}); err == nil || !strings.Contains(err.Error(), "listed twice") {
+		t.Fatalf("$console and https both: %v", err)
+	}
+}
+
+// A listener without $anything_else shows its implicit deny as a locked
+// rule, with the connections no rule took.
+func TestConsoleImplicitDeny(t *testing.T) {
+	t.Parallel()
+	p, c, _ := startConsoleProxy(t, "password = pw", "[[host]]\nlistener=default\npattern=a.test\naction=deny\n")
+	c.login("pw")
+	expectDenied(t, p, clientHello("nobody.test"))
+	var implicit map[string]any
+	for deadline := time.Now().Add(T); implicit == nil || implicit["total"].(float64) < 1; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("implicit deny: %v", implicit)
+		}
+		_, st := c.get("/api/state")
+		implicit = nil
+		for _, l := range st["listeners"].([]any) {
+			if l.(map[string]any)["name"] != "default" {
+				continue
+			}
+			for _, r := range l.(map[string]any)["rules"].([]any) {
+				if r.(map[string]any)["implicit"] == true {
+					implicit = r.(map[string]any)
+				}
+			}
+		}
+	}
+	if implicit["pattern"] != "$anything_else" || implicit["target"] != "deny (implicit)" || implicit["line"].(float64) != 0 {
+		t.Fatalf("implicit deny: %v", implicit)
+	}
+	cfg, err := LoadConfig(yamlFixture("[[listener]]\nname=x\nport=1\n[[host]]\nlistener=x\npattern=ANY\naction=deny\n"), nil)
+	if err != nil || cfg.Rules[0].Key() != implicitDenyKey("x") {
+		t.Fatalf("an explicit $anything_else has the implicit one's key, so its counts carry on: %v", err)
 	}
 }

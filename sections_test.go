@@ -29,7 +29,7 @@ logging:
 // and so does a key's comment when only its value changes.
 func TestEditRules(t *testing.T) {
 	got, block, at, err := editRules(editFile, 11, map[string]any{"listener": "default", "domain": "*.example.com",
-		"target": "${1}.lan:8443", "max_single_connection_speed": ""}, false)
+		"target": "${1}.lan:8443", "max_single_connection_speed": ""}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,14 +51,14 @@ func TestEditRules(t *testing.T) {
 	}
 
 	// Delete: the rule goes, the comments of the others stay.
-	got, _, _, err = editRules(editFile, 11, nil, true)
+	got, _, _, err = editRules(editFile, 11, nil, true, "")
 	if err != nil || strings.Contains(got, "example.com") || !strings.Contains(got, "domain: $anything_else") {
 		t.Fatalf("delete: %v\n%s", err, got)
 	}
 
 	// Add: on a listener with rules, after them; on another, in a new routes item.
 	got, _, at, err = editRules(editFile, 0, map[string]any{"listener": "default", "domain": "a.test", "target": "10.0.0.1:443",
-		"proxy": "v2", "max_aggregated_speed": "1Gbit", "cert_domains": []any{}}, false)
+		"proxy": "v2", "max_aggregated_speed": "1Gbit", "cert_domains": []any{}}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestEditRules(t *testing.T) {
 
 	// Moving a rule to another listener moves it to that listener's routes item.
 	two := strings.Replace(editFile, "    port: 443\n", "    port: 443\n  - name: lan\n    port: 8443\n", 1)
-	got, _, at, err = editRules(two, 13, map[string]any{"listener": "lan"}, false)
+	got, _, at, err = editRules(two, 13, map[string]any{"listener": "lan"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestEditRules(t *testing.T) {
 	got, _, _, err = editRules(editFile, 11, map[string]any{"target": "", "cert": "local-ca", "serve": []any{
 		map[string]any{"type": "reverse_proxy", "prefix": "/api/", "target": "http://h:1", "strip_prefix": "true"},
 		map[string]any{"type": "static_content", "prefix": "/", "base_dir": "/srv/www"},
-	}}, false)
+	}}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,20 +94,20 @@ func TestEditRules(t *testing.T) {
 
 	for name, err := range map[string]error{
 		"no such rule": func() error {
-			_, _, _, err := editRules(editFile, 99, map[string]any{"domain": "x"}, false)
+			_, _, _, err := editRules(editFile, 99, map[string]any{"domain": "x"}, false, "")
 			return err
 		}(),
 		"unknown key": func() error {
-			_, _, _, err := editRules(editFile, 0, map[string]any{"listener": "default", "pattern": "x"}, false)
+			_, _, _, err := editRules(editFile, 0, map[string]any{"listener": "default", "pattern": "x"}, false, "")
 			return err
 		}(),
-		"no listener": func() error { _, _, _, err := editRules(editFile, 0, map[string]any{"domain": "x"}, false); return err }(),
+		"no listener": func() error { _, _, _, err := editRules(editFile, 0, map[string]any{"domain": "x"}, false, ""); return err }(),
 		"newline": func() error {
-			_, _, _, err := editRules(editFile, 11, map[string]any{"target": "a\nb"}, false)
+			_, _, _, err := editRules(editFile, 11, map[string]any{"target": "a\nb"}, false, "")
 			return err
 		}(),
 		"serve not list": func() error {
-			_, _, _, err := editRules(editFile, 11, map[string]any{"serve": []any{"x"}}, false)
+			_, _, _, err := editRules(editFile, 11, map[string]any{"serve": []any{"x"}}, false, "")
 			return err
 		}(),
 	} {
@@ -278,5 +278,25 @@ func TestBasicAuthDisableAndExpiry(t *testing.T) {
 		if (want == "") != (err == nil) || err != nil && !strings.Contains(err.Error(), want) {
 			t.Errorf("expires %s: %v", v, err)
 		}
+	}
+}
+
+// A rule for the console's listener joins the routes item for it, named
+// either way; a new item is written $console.
+func TestEditRulesConsoleListener(t *testing.T) {
+	text := "routes:\n  - listener: https\n    rules:\n      - {domain: a.test, action: deny}\n"
+	got, _, _, err := editRules(text, 0, map[string]any{"listener": "https", "domain": "b.test", "action": "deny"}, false, "https")
+	if err != nil || strings.Count(got, "- listener:") != 1 {
+		t.Fatalf("joins its item: %v\n%s", err, got)
+	}
+	got, _, _, err = editRules("listeners:\n  - {name: lan, port: 1}\n", 0, map[string]any{"listener": "https", "domain": "b.test", "action": "deny"}, false, "https")
+	if err != nil || !strings.Contains(got, "listener: $console") {
+		t.Fatalf("a new item is $console: %v\n%s", err, got)
+	}
+	// Saving a rule of the $console item with its real name doesn't move it.
+	alias := "routes:\n  - listener: $console\n    rules:\n      - {domain: a.test, action: deny}\n"
+	got, _, _, err = editRules(alias, 4, map[string]any{"listener": "console_http", "action": "allow", "target": "h:1"}, false, "console_http")
+	if err != nil || strings.Count(got, "- listener:") != 1 || !strings.Contains(got, "listener: $console") {
+		t.Fatalf("stays: %v\n%s", err, got)
 	}
 }

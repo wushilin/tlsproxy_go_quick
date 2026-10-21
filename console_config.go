@@ -133,6 +133,39 @@ func ConsoleFromSettings(flags map[string]string) (*ConsoleConfig, error) {
 	return c, nil
 }
 
+// consoleAlias names the console's listener in config.yaml whatever its
+// port (https or console_http), so moving the console breaks nothing.
+const consoleAlias = "$console"
+
+// resolveConsoleAlias turns $console in listeners and routes into the
+// console's listener name. Without a console, $console is an error.
+func (cfg *Config) resolveConsoleAlias(con *ConsoleConfig, raws []rawRule) error {
+	name := ""
+	if con != nil {
+		name = con.ListenerName()
+	}
+	none := func(line int) error {
+		return fmt.Errorf("line %d: %s names the web console's listener, and this proxy has no console (-noconsole)", line, consoleAlias)
+	}
+	for i := range cfg.Listeners {
+		if l := &cfg.Listeners[i]; l.Name == consoleAlias {
+			if con == nil {
+				return none(l.Line)
+			}
+			l.Name = name
+		}
+	}
+	for i := range raws {
+		if r := &raws[i]; r.listener != nil && *r.listener == consoleAlias {
+			if con == nil {
+				return none(r.line)
+			}
+			r.listener = &name
+		}
+	}
+	return nil
+}
+
 // placeConsoleListener gives the console its listener, before the
 // listeners are checked: the one config.yaml lists by that name (with no
 // bind or port of its own), or a new one.
@@ -142,15 +175,22 @@ func (cfg *Config) placeConsoleListener(con *ConsoleConfig) error {
 	}
 	cfg.Console = con
 	name := con.ListenerName()
+	placed := false
 	for i := range cfg.Listeners {
 		l := &cfg.Listeners[i]
 		if !strings.EqualFold(l.Name, name) {
 			continue
 		}
+		if placed {
+			return fmt.Errorf("line %d: the web console's listener (%s, or %s) is listed twice", l.Line, name, consoleAlias)
+		}
 		if l.bindSet || l.portSet {
 			return fmt.Errorf("line %d: listener %s is the web console's: its bind and port come from the console's settings (%s), so leave them out here; its other options apply", l.Line, name, strings.Join(con.Addrs(), ", "))
 		}
 		l.Name, l.Bind, l.Binds, l.Port, l.Console = name, con.Bind, con.Binds, con.Port, true
+		placed = true
+	}
+	if placed {
 		return nil
 	}
 	cfg.Listeners = append(cfg.Listeners, Listener{Name: name, Bind: con.Bind, Binds: con.Binds, Port: con.Port, Console: true})

@@ -66,8 +66,9 @@ type ruleView struct {
 	Kind         string         `json:"kind"`
 	Allow        bool           `json:"allow"`
 	Target       string         `json:"target"`
-	Routes       []string       `json:"routes,omitempty"`  // service rules: "/prefix → where"
-	Console      bool           `json:"console,omitempty"` // the console's own rule (console.toml): not in the file, can't be stopped
+	Routes       []string       `json:"routes,omitempty"`   // service rules: "/prefix → where"
+	Console      bool           `json:"console,omitempty"`  // the console's own rule: not in the file, can't be stopped
+	Implicit     bool           `json:"implicit,omitempty"` // the deny a listener without $anything_else acts as if it had
 	Terminates   bool           `json:"terminates"`
 	Cert         string         `json:"cert"`
 	Proxy        bool           `json:"proxy"`
@@ -339,6 +340,20 @@ func (c *Console) state() consoleState {
 		lv := &listeners[index[r.Listener]]
 		lv.Rules = append(lv.Rules, view(v))
 	}
+	// A listener without $anything_else denies what no rule takes: shown as
+	// that rule, locked.
+	for i := range shown.Listeners {
+		l := &shown.Listeners[i]
+		has := false
+		for _, r := range shown.Rules {
+			has = has || r.Listener == l.Name && r.Kind == kindCatchAll
+		}
+		if !has {
+			lv := &listeners[index[l.Name]]
+			lv.Rules = append(lv.Rules, view(ruleView{Listener: l.Name, Key: implicitDenyKey(l.Name), Pattern: anythingElse, Kind: kindCatchAll.String(),
+				Target: "deny (implicit)", Implicit: true, Running: true, Values: map[string]any{}}))
+		}
+	}
 	// The redirect listener's connections, shown as one pseudo-rule.
 	if shown.Redirect != nil {
 		lv := &listeners[index[shown.Redirect.Name]]
@@ -588,7 +603,7 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{"ok": false, "stale": req.Line > 0 && (req.BaseMtime != ver.Mtime || req.BaseHash != ver.Hash)}
-	full, block, at, err := editRules(string(onDisk), req.Line, req.Values, false)
+	full, block, at, err := editRules(string(onDisk), req.Line, req.Values, false, c.srv.consoleListener())
 	if err != nil {
 		resp["error"] = err.Error()
 		writeJSON(w, 200, resp)
@@ -648,7 +663,7 @@ func (c *Console) ruleEdit(w http.ResponseWriter, r *http.Request, del bool) {
 		fail(w, http.StatusConflict, "not saved: the config file changed after this page loaded it. The rules shown are now up to date; try again")
 		return
 	}
-	full, _, _, err := editRules(string(onDisk), req.Line, req.Values, del)
+	full, _, _, err := editRules(string(onDisk), req.Line, req.Values, del, c.srv.consoleListener())
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -709,6 +724,9 @@ func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []by
 				}
 			}
 		}
+	}
+	if name, _ := req.Values["name"].(string); req.Line == 0 && name != "" && name == c.srv.consoleListener() {
+		req.Values["name"] = consoleAlias // its options, under a name that survives the console moving
 	}
 	if full, block, _, notes, err = editListeners(string(onDisk), req.Line, req.Values, del); err != nil {
 		return
@@ -862,4 +880,12 @@ func authGroupNames(cfg *Config) []string {
 		out = append(out, g.Name)
 	}
 	return out
+}
+
+// consoleListener is the console's listener name, "" without a console.
+func (s *Server) consoleListener() string {
+	if s.consoleCfg == nil {
+		return ""
+	}
+	return s.consoleCfg.ListenerName()
 }

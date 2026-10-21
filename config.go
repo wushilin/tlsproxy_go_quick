@@ -175,6 +175,10 @@ func (c *Config) PortListeners() []*Listener {
 	return out
 }
 
+// implicitDenyKey is the Key the rule would have that a listener without
+// $anything_else acts as if it had: deny.
+func implicitDenyKey(listener string) string { return listener + "\x00" + anythingElse }
+
 // The special domains: clients that send no name, and every name no other
 // rule takes. A host name can't have a $, so neither is ever one.
 const (
@@ -852,6 +856,9 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 		return nil, err
 	}
 	cfg.CertPath = filepath.Join(cfg.CARoot, acmeFolder)
+	if err := cfg.resolveConsoleAlias(console, raws); err != nil {
+		return nil, err
+	}
 	if err := cfg.placeConsoleListener(console); err != nil {
 		return nil, err
 	}
@@ -1087,7 +1094,7 @@ func listenerOption(l *Listener, key, value string) error {
 	var err error
 	switch key {
 	case "name":
-		if !listenerName.MatchString(value) {
+		if value != consoleAlias && !listenerName.MatchString(value) {
 			return fmt.Errorf("name must be 1-64 letters, digits, spaces or -_@#~()[]<>\"' (no space at either end), got %q", value)
 		}
 		l.Name = value

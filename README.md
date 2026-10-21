@@ -270,6 +270,11 @@ file then lists no bind or port for it.)
   `access_denied` alert. An allow rule needs a `target` (or `serve`).
 - Every rule belongs to a listener: the `listener` of its `routes` item, even
   when there is only one.
+- **What no rule takes is denied**, as if the listener ended with
+  `domain: $anything_else` and `action: deny`; you only write that rule to
+  say so, or to do something else instead. The console shows the implicit
+  deny as the last rule of a listener without one (locked), with the
+  connections it refused.
 - `domain: $no_sni` is explicit: it matches only clients that
   send no SNI, for example to send them to a default target; its `target`
   must be a literal. Without such a rule only `$anything_else` takes them; a wildcard
@@ -395,7 +400,9 @@ routes:
 - Two listeners cannot share a port on the same (or a wildcard) address.
 - **The web console's listener** (`https` when the console is on port 443,
   `console_http` on any other) is the console's: list it by name with its
-  other options only, no `bind` or `port`, and route rules to it. See
+  other options only, no `bind` or `port`, and route rules to it. Name it
+  `$console` to keep the file working when the console's port changes (the
+  console's editors write it so). See
   [Web console](#web-console). Without a console nothing is reserved.
 - **Listeners follow hot reload.** A new listener opens its port, a changed
   `bind` or `port` moves it, and a removed one closes its port, all without a
@@ -1044,18 +1051,20 @@ Session cookies are always `Secure`.
   domain, are fixed. `config.yaml` may list the listener by name with its
   other options only (`proxy_trust_source`, `max_connections`, the timeouts,
   the speed limits; a `bind` or `port` there is an error), and `routes` may
-  add rules to it, so the console and your sites share port 443:
+  add rules to it, so the console and your sites share port 443. `$console`
+  names it whatever its port, so `-console_port` can change without
+  editing the file:
 
   ```yaml
   global:
     acme_agree_tos: true            # for the console's cert: auto
 
   listeners:
-    - name: https                   # the console's (port 443): no bind, no port
+    - name: $console                # the console's (https on 443): no bind, no port
       max_connections: 512
 
   routes:
-    - listener: https
+    - listener: $console
       rules:
         - domain: www.example.com
           target: "10.0.0.10:443"

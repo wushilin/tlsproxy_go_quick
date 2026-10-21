@@ -787,8 +787,16 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		c.SNI, c.routed = sni, true
 		if d.Rule != nil {
 			c.RuleKey, c.rulePattern = d.Rule.Key(), d.Rule.Source
+		} else if d.Err == "" {
+			// No rule: the implicit $anything_else deny, counted as a rule of
+			// its own so the console can show it.
+			c.RuleKey, c.rulePattern = implicitDenyKey(cfg.listener.Name), anythingElse
+			c.rule = s.stats.rule(c.RuleKey)
 		}
 		c.mu.Unlock()
+		if c.rule != nil {
+			c.rule.Total.Add(1)
+		}
 		switch {
 		case d.Err != "":
 			c.setEnd(flowDenied, "error: "+d.Err)

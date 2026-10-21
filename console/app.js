@@ -907,7 +907,9 @@ function paint() {
     rr.pattern.title = r.line ? `The rule at line ${r.line} of the config file` : "";
     setText(rr.target, removed ? "removed" : r.allow ? r.target : "deny");
     rr.target.classList.toggle("deny", !removed && !r.allow);
-    rr.target.title = r.console ? "The web console, set at start-up: it can't be stopped or edited here" : r.routes ? r.routes.join("\n") : "";
+    rr.target.title = r.console ? "The web console, set at start-up: it can't be stopped or edited here"
+      : r.implicit ? "No rule matches: denied, as if the listener had $anything_else with action: deny. Add an $anything_else rule to change it."
+      : r.routes ? r.routes.join("\n") : "";
     rr.card.classList.toggle("stopped", out);
 
     rr.status.hidden = !out;
@@ -1198,9 +1200,10 @@ function paintRuleActions(rr, r, file) {
   const editable = !!(file && file.editable && r.line > 0);
   const busy = pendingRules.has(r.key);
   // The console's own rule is set at start-up: nothing here may stop or change it.
-  rr.toggleBtn.hidden = removed || !!r.console;
-  rr.editBtn.hidden = removed || !!r.console;
-  rr.delBtn.hidden = removed || !!r.console;
+  const locked = removed || !!r.console || !!r.implicit;
+  rr.toggleBtn.hidden = locked;
+  rr.editBtn.hidden = locked;
+  rr.delBtn.hidden = locked;
   rr.toggleBtn.disabled = busy || (!r.running && !r.stopped);
   if (!busy) setText(rr.toggleLabel, r.stopped ? "Start" : "Stop");
   rr.toggleBtn.className = r.stopped ? "act start" : "act";

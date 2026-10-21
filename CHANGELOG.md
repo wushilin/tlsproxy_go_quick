@@ -65,6 +65,12 @@ New:
   host names). An IP address sent as SNI is routed as no SNI and refused
   unless `cert_domains` lists it (it used to be a bad ClientHello).
   `cert: auto` on `NONE` stays an error, now pointing at `local-ca`.
+- `$console` in `listeners` and `routes` names the console's listener
+  whatever its port (`https` or `console_http`), so moving the console
+  needs no edit; the console writes it so. Without a console it is an error.
+- What no rule takes is denied as before; the console now shows that as a
+  locked `$anything_else → deny (implicit)` rule on each listener without
+  one, with the connections it refused.
 - A listener whose exact addresses another takes over (a rename) keeps its
   socket open instead of reopening the port.
 - Error messages no longer mention the removed `cert = <directory>`.
