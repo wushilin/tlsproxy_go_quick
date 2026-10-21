@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.5.1
 
 - The console's domain is optional. Unset, or `-console_domain none`, the
   console is its listener's `$no_sni` rule: clients reaching it by IP
