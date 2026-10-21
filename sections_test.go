@@ -80,12 +80,12 @@ func TestEditRules(t *testing.T) {
 	// Serve entries are a list of objects; editing them replaces the list.
 	got, _, _, err = editRules(editFile, 11, map[string]any{"target": "", "cert": "local-ca", "serve": []any{
 		map[string]any{"type": "reverse_proxy", "prefix": "/api/", "target": "http://h:1", "strip_prefix": "true"},
-		map[string]any{"type": "static_content", "prefix": "/", "base_dir": "/srv/www"},
+		map[string]any{"type": "static_content", "prefix": "/", "base_dir": "/srv/www", "directory_listing": "true"},
 	}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := mustParse(t, got); len(c.Rules[0].Routes) != 2 || c.Rules[0].Routes[0].Prefix != "/api/" {
+	if c := mustParse(t, got); len(c.Rules[0].Routes) != 2 || c.Rules[0].Routes[0].Prefix != "/api/" || !c.Rules[0].Routes[1].Listing {
 		t.Fatalf("serve:\n%s", got)
 	}
 	if v := nodeValueOf(t, got, 11)["serve"].([]any); len(v) != 2 || v[0].(map[string]any)["strip_prefix"] != "true" {

@@ -1514,6 +1514,11 @@ function serveRow(e) {
   const [verifyL, verify] = check("s-verify", "Verify the target's certificate (https:// targets)", String(e.tls_verify) !== "false");
   opts.append(hostField, stripL, verifyL);
 
+  // Static options.
+  const sopts = el("div", "serve-opts");
+  const [listL] = check("s-list", "Directory listing: list a folder that has no index.html or index.htm (otherwise 403)", String(e.directory_listing) === "true");
+  sopts.appendChild(listL);
+
   // Access.
   const auth = el("select", "s-auth");
   const groups = (ui.state && ui.state.authGroups) || [];
@@ -1525,12 +1530,13 @@ function serveRow(e) {
   auth.value = e.basic_auth || "";
   const authField = field("Who may use it", auth, "", groups.length ? "" : "no basic_auth group yet: add one on the Basic auth page");
 
-  row.append(head, main, opts, authField);
+  row.append(head, main, opts, sopts, authField);
   const sync = () => {
     const proxy = type.value === "reverse_proxy";
     whereField.firstChild.textContent = proxy ? "Target URL" : "Folder";
     where.placeholder = proxy ? "http://127.0.0.1:8080" : "/opt/www/site";
     opts.hidden = !proxy;
+    sopts.hidden = proxy;
     verifyL.hidden = !/^https:/i.test(where.value.trim());
     // An example request and where it goes: a static folder, like a proxy
     // with strip_prefix, gets the path after the prefix.
@@ -1548,7 +1554,10 @@ function readServe() {
   return [...document.querySelectorAll("#f-serve-rows .serve-row")].map((row) => {
     const q = (c) => row.querySelector(c).value.trim();
     const e = { type: q(".s-type"), prefix: q(".s-prefix") };
-    if (e.type === "static_content") e.base_dir = q(".s-where");
+    if (e.type === "static_content") {
+      e.base_dir = q(".s-where");
+      if (row.querySelector(".s-list").checked) e.directory_listing = "true";
+    }
     else {
       e.target = q(".s-where");
       if (row.querySelector(".s-strip").checked) e.strip_prefix = "true";
