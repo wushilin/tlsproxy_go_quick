@@ -93,7 +93,7 @@ type Server struct {
 	certs   *CertManager
 	nextID  atomic.Uint64
 
-	configPath string               // "" when the config did not come from a file
+	configPath string // "" when the config did not come from a file
 
 	// retiring are serve states a reload replaced, still open for the
 	// requests using them; stopServing closes them at once.
