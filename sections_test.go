@@ -101,7 +101,10 @@ func TestEditRules(t *testing.T) {
 			_, _, _, err := editRules(editFile, 0, map[string]any{"listener": "default", "pattern": "x"}, false, "")
 			return err
 		}(),
-		"no listener": func() error { _, _, _, err := editRules(editFile, 0, map[string]any{"domain": "x"}, false, ""); return err }(),
+		"no listener": func() error {
+			_, _, _, err := editRules(editFile, 0, map[string]any{"domain": "x"}, false, "")
+			return err
+		}(),
 		"newline": func() error {
 			_, _, _, err := editRules(editFile, 11, map[string]any{"target": "a\nb"}, false, "")
 			return err
