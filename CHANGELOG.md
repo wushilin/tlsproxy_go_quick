@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.5.0 (unreleased)
+## v1.5.0
 
 Breaking:
 - The configuration is YAML: `config.yaml` (the default path) with
