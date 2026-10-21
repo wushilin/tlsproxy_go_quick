@@ -3054,9 +3054,9 @@ function treeNodeEl(n, depth) {
 
 // showValidation renders the Validate answer: green with the settings tree
 // when the file is valid, its warnings in yellow; red with the exact line
-// when it is not.
-function showValidation(d) {
-  $("cfg-msg").hidden = true;
+// when it is not. keepMessage leaves a message above it (Save's outcome).
+function showValidation(d, keepMessage) {
+  if (!keepMessage) $("cfg-msg").hidden = true;
   const box = $("cfg-result");
   box.hidden = false;
   box.classList.remove("stale");
@@ -3163,19 +3163,30 @@ $("cfg-test").addEventListener("click", () => {
     })
     .catch((e) => cfgMessage("bad", e.message));
 });
+// Save validates first, as Validate does: an invalid text shows why and is
+// not saved; a valid one is saved, its outcome shown above its tree.
 $("cfg-save").addEventListener("click", () => {
   const text = $("cfg").value;
-  cfgPost("api/config/save", { text, baseHash: cfg.hash, baseMtime: cfg.mtime })
+  let checked = null;
+  cfgPost("api/config/validate", { text })
+    .then((v) => {
+      checked = v;
+      if (!v.ok) { showValidation(v); return null; }
+      return cfgPost("api/config/save", { text, baseHash: cfg.hash, baseMtime: cfg.mtime });
+    })
     .then((d) => {
-      if (!d.ok) return cfgMessage("bad", d.error);
+      if (!d) return;
+      const tree = () => showValidation(checked, true);
+      if (!d.ok) { cfgMessage("bad", d.error); return; }
       cfg.hash = d.hash; cfg.mtime = d.mtime; cfg.loaded = text;
       gutter();
-      if (d.unchanged) return cfgMessage("ok", "Nothing to save: the text matches the file.");
+      if (d.unchanged) { cfgMessage("ok", "Nothing to save: the text matches the file."); tree(); return; }
       const problems = d.problems || [];
-      cfgMessage(problems.length ? "bad" : d.restartNeeded || (d.warnings || []).length ? "warn" : "ok",
+      cfgMessage(problems.length ? "bad" : d.restartNeeded ? "warn" : "ok",
         (problems.length ? `Saved, but not everything could be applied. Previous version kept as ${d.backup}.` : `Saved and applied. Previous version kept as ${d.backup}.`) +
         problems.map((p) => "\n" + p).join("") +
-        (d.restartNeeded ? "\nbind/port changed: that part needs a restart." : "") + (d.warnings || []).map((w) => "\nWarning: " + w).join(""));
+        (d.restartNeeded ? "\nbind/port changed: that part needs a restart." : ""));
+      tree(); // with the warnings
       return listBackups();
     })
     .catch((e) => cfgMessage("bad", e.message));
