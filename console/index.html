@@ -36,7 +36,7 @@
     <form id="login-form" class="login-card" autocomplete="off">
       <img class="login-mark" src="logo.svg" alt="" width="72" height="72">
       <h1>Sign in to the console</h1>
-      <p>Enter the console password from the <code>[console]</code> section of the config file.</p>
+      <p>Enter the console password (<code>$CONSOLE_PASSWORD</code> when the proxy started).</p>
       <label class="field-label" for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" required>
       <button class="btn btn-primary" type="submit" id="login-submit">Sign in</button>
@@ -171,7 +171,7 @@
         <p class="msg" id="cfg-msg" role="status" hidden></p>
         <div class="vresult" id="cfg-result" role="status" hidden></div>
       </div>
-      <p class="page-note">The <code>[console]</code> section is hidden and cannot be changed here. Saving validates first, refuses if the file was changed by anyone else since you opened it, keeps the previous file as a backup (last 10) and applies at once: listeners open, move and close to match, rules apply to new connections. Only <code>[console]</code> <code>listen</code> and <code>port</code> need a restart.</p>
+      <p class="page-note">The console itself is not in this file: it is set at start-up, and nothing saved here can change it. Saving validates first, refuses if the file was changed by anyone else since you opened it, keeps the previous file as a backup (last 10) and applies at once: listeners open, move and close to match, rules apply to new connections.</p>
     </section>
   </div>
 </main>
@@ -260,15 +260,15 @@
     <div class="step" data-step="0">
       <div class="fields">
         <label class="field wide"><span>Listener</span><select id="f-listener"></select></label>
-        <label class="field wide"><span>Pattern</span><input id="f-pattern" required spellcheck="false" placeholder="www.example.com, *.example.com, ANY or NONE"></label>
+        <label class="field wide"><span>Domain</span><input id="f-pattern" required spellcheck="false" placeholder="www.example.com, *.example.com, $anything_else or $no_sni"></label>
       </div>
       <div class="examples" id="pattern-examples">
         <span class="examples-label">Examples</span>
         <button type="button" class="chip pick" data-example="www.example.com">www.example.com</button>
         <button type="button" class="chip pick" data-example="*.example.com">*.example.com</button>
         <button type="button" class="chip pick" data-example="api-*.example.com">api-*.example.com</button>
-        <button type="button" class="chip pick" data-example="ANY">ANY</button>
-        <button type="button" class="chip pick" data-example="NONE">NONE</button>
+        <button type="button" class="chip pick" data-example="$anything_else">$anything_else</button>
+        <button type="button" class="chip pick" data-example="$no_sni">$no_sni</button>
       </div>
       <p class="field-help" id="pattern-help"><span class="chip" id="pattern-kind" hidden></span><span id="pattern-text"></span></p>
     </div>
@@ -285,12 +285,11 @@
         <label class="field"><span>Target port</span><input id="f-target-port" inputmode="numeric" placeholder="443"></label>
       </div>
       <div id="routes-fields" hidden>
-        <label class="field wide"><span>Service rules <em>one per line; the longest prefix serves a request</em></span>
-          <textarea id="f-routes" class="pem routes" rows="5" spellcheck="false" wrap="off" placeholder="type=reverse_proxy; prefix=/api/; target=http://127.0.0.1:8080; strip_prefix=true&#10;type=static_content; prefix=/; base_dir=/opt/www/site"></textarea></label>
-        <p class="field-help">Each line is <code>type=reverse_proxy; prefix=/api/; target=http://host:port</code> (or https://), with optional <code>strip_prefix=true</code>, <code>force_host=name</code>, <code>tls_verify=false</code>;
-          or <code>type=static_content; prefix=/assets/; base_dir=/opt/www/assets</code>, where the prefix stands for the folder (/assets/a.css is base_dir/a.css).
-          Add <code>basic_auth=name</code> to ask for a [[basic_auth]] user from the config file. Lines starting # are left out.
-          Checked as you type; saved as service_rule1, service_rule2, ….</p>
+        <p class="field-help">The rule answers HTTP itself: each entry takes the requests under its prefix, the longest prefix first; a path no entry takes gets 404.
+          <b>Reverse proxy</b> sends them to <code>http://host:port</code> (or https://); <b>static files</b> serves them from a folder the prefix stands for (/assets/a.css is &lt;folder&gt;/a.css).
+          Basic auth names a <code>basic_auth</code> item of the config file.</p>
+        <div id="f-serve-rows" class="serve-rows"></div>
+        <button class="btn btn-quiet" type="button" id="f-serve-add">Add an entry</button>
       </div>
       <p class="field-help" id="capture-help" hidden></p>
       <p class="field-help" id="deny-help" hidden>Clients asking for a matching name are disconnected during the handshake. Nothing else to set.</p>
@@ -316,7 +315,7 @@
               <label class="field wide" id="cert-ca-field" hidden><span>Certificate authority <em>certificates are issued on first use, one per name</em></span><select id="f-cert-ca"></select></label>
               <label class="field wide names-field"><span>Certificate names <em id="cert-names-hint">optional</em></span><input id="f-cert-domains" spellcheck="false" placeholder="default: the literal pattern; e.g. www.example.com, blog.example.com"></label>
               <label class="field wide auto-only"><span>Validate script <em>optional, for names not known in advance</em></span><input id="f-cert-script" spellcheck="false" placeholder="/usr/local/etc/tlsproxy/domains.sh"></label>
-              <label class="field wide auto-only"><span>Script arguments <em>optional, a TOML array; default ["${host}"]</em></span><input id="f-cert-args" spellcheck="false" placeholder='["${host}"]  or  ["--customer", "aaa-${1}", "${host}"]'></label>
+              <label class="field wide auto-only"><span>Script arguments <em>optional, a list; default ["${host}"]</em></span><input id="f-cert-args" spellcheck="false" placeholder='["${host}"]  or  ["--customer", "aaa-${1}", "${host}"]'></label>
               <label class="field"><span>Upstream speaks TLS <em>optional</em></span><select id="f-upstream-tls"><option value="">default (yes)</option><option value="true">yes</option><option value="false">no, plaintext</option></select></label>
               <label class="field upstream-tls-only"><span>Verify upstream certificate <em>optional</em></span><select id="f-upstream-verify"><option value="">default (yes)</option><option value="true">yes</option><option value="false">no</option></select></label>
               <label class="field wide upstream-tls-only"><span>Upstream SNI <em>optional</em></span><input id="f-upstream-sni" spellcheck="false" placeholder="default: the name the client asked for"></label>
@@ -388,7 +387,7 @@
     </div>
 
     <div class="step" data-step="1" hidden>
-      <p class="field-help">Each one is optional: leave it empty to use the value from <code>[global]</code>.</p>
+      <p class="field-help">Each one is optional: leave it empty to use the value from <code>global</code>.</p>
       <div class="fields">
         <label class="field wide"><span>Accept PROXY headers from <em>proxy_trust_source</em></span><input id="l-ppf" spellcheck="false" placeholder="global; e.g. 10.0.0.0/8, 192.168.1.5"></label>
         <label class="field"><span>Max connections</span><input id="l-maxconn" inputmode="numeric" placeholder="global"></label>

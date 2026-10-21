@@ -240,7 +240,7 @@ func (c *Console) caFor(id string) (*localCA, error) {
 	return openLocalCA(id, filepath.Join(cfg.CARoot, id), false)
 }
 
-// caConfigGet is a CA's config.toml, as on disk.
+// caConfigGet is a CA's config.yaml, as on disk.
 func (c *Console) caConfigGet(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if !caIDPattern.MatchString(id) {
@@ -253,16 +253,16 @@ func (c *Console) caConfigGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	l.loadConfig()
-	data, err := os.ReadFile(filepath.Join(l.dir, "config.toml"))
+	data, err := os.ReadFile(filepath.Join(l.dir, caConfigFile))
 	if err != nil {
 		fail(w, 500, "%v", err)
 		return
 	}
 	st := l.conf.Load()
-	writeJSON(w, 200, map[string]any{"text": string(data), "path": filepath.Join(l.dir, "config.toml"), "error": st.err, "settings": st.c.summary()})
+	writeJSON(w, 200, map[string]any{"text": string(data), "path": filepath.Join(l.dir, caConfigFile), "error": st.err, "settings": st.c.summary()})
 }
 
-// caConfigSave checks and writes a CA's config.toml. Only [certificates]
+// caConfigSave checks and writes a CA's config.yaml. Only certificates
 // may differ from what the CA was made with.
 func (c *Console) caConfigSave(w http.ResponseWriter, r *http.Request) {
 	var req struct{ ID, Text string }
@@ -280,7 +280,7 @@ func (c *Console) caConfigSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "line": lineOf(err.Error())})
 		return
 	}
-	path := filepath.Join(l.dir, "config.toml")
+	path := filepath.Join(l.dir, caConfigFile)
 	unlock := lockCA(l.dir)
 	err = writeFileAtomic0600(path, []byte(req.Text))
 	unlock()

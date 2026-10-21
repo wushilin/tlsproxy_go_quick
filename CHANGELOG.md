@@ -3,50 +3,58 @@
 ## v1.5.0 (unreleased)
 
 Breaking:
-- `proxy_protocol_from` is renamed `proxy_trust_source`, in `[global]` and
-  `[[listener]]`. The old name is a load error that shows the line to write.
-- The web console's settings move out of `config.toml` into a file of their
-  own, given with `--console console.toml`; without it there is no console.
-  The console can edit `config.toml` but never that file, so no edit made
-  from it can change its password or take it off the network. A `[console]`
-  section in `config.toml` is a load error saying so, and `listen` is now
-  `bind` (also a load error that says so).
-- New password hashes (`tlsproxy --hash-password`, and the plaintext
-  console `password` the proxy replaces) are argon2id. Existing
+- The configuration is YAML: `config.yaml` (the default path) with
+  `global`, `logging`, `listeners`, `routes` (each a `listener` and its
+  `rules`) and `basic_auth`. Lists are YAML lists. A rule's `pattern` is now
+  `domain`, `target_host` + `target_port` are one `target: host:port` (IPv6
+  in brackets), and `proxy` + `proxy_version` are `proxy: v1 | v2`. There is
+  no converter: see `config.yaml` and `samples/` for the new form. (A local
+  CA's own settings file, `<ca_root>/caNNN/config.toml`, is unchanged.)
+- The web console is no longer configured in the file, and is on by
+  default: `-console_domain <name>` (or `$CONSOLE_DOMAIN`) and
+  `$CONSOLE_PASSWORD` (the password, or a hash) are required, or the proxy
+  refuses to start and says so; `-noconsole` turns it off. It listens on
+  all addresses, port 443, with `cert: auto`; `-console_bind`,
+  `-console_port` and `-console_cert` (or `$CONSOLE_BIND`, `$CONSOLE_PORT`,
+  `$CONSOLE_CERT`) change that. It is always served over TLS, inside the
+  proxy, on a listener it owns: `https` on port 443, `console_http` on any
+  other. That listener's name, bind and port, and the rule for the console's
+  domain, can't be changed from `config.yaml`, which may still list the
+  listener with other options (`proxy_trust_source`, `max_connections`,
+  timeouts, speed limits) and route more rules to it. Another listener with
+  exactly its bind and port is an error. The console can't stop its own rule
+  or listener. Without a console, nothing is reserved.
+- `proxy_protocol_from` is renamed `proxy_trust_source`. The old name is a
+  load error that shows what to write.
+- New password hashes (`tlsproxy --hash-password`) are argon2id. Existing
   `pbkdf2-sha256$...` hashes keep working.
 
 New:
-- Service rules: a `[[host]]` rule with `service_rule` keys serves HTTP
-  itself, inside the TLS connection it terminates, with no target and no
-  second hop. `type=reverse_proxy; prefix=/api/; target=http://h:p` (or
+- Serving HTTP here: a rule with `serve` entries answers HTTP itself, inside
+  the TLS connection it terminates, with no target and no second hop.
+  `{type: reverse_proxy, prefix: /api/, target: "http://h:p"}` (or
   `https://`; `strip_prefix`, `force_host`, `tls_verify`) and
-  `type=static_content; prefix=/assets/; base_dir=/folder` (the prefix
+  `{type: static_content, prefix: /assets/, base_dir: /folder}` (the prefix
   stands for the folder; no listings, no hidden files except `.well-known`,
   no symlinks out of it). The longest prefix wins; none is 404. The target
   gets the client's own address in `X-Forwarded-For` / `X-Real-IP`, and
   `X-Forwarded-Proto: https`; what the client sent in those is replaced.
   Clients get HTTP/2 if they ask. Each request is routed by its Host with the
-  running configuration (a reload applies to the next request; a Host another
-  rule serves gets 421). The console's rule editor has *Serve it here*, with
-  the service rules in one box, checked as you type.
-- The console over TLS: with `cert` and `hostname` in `console.toml`, it is
-  served like a rule with service rules, on the `[[listener]]` with exactly
-  its `bind` and `port` (one more rule there, which `config.toml` can't
-  override), or on a listener of its own. The console can't stop its rule or
-  listener; deleting that listener moves it to one of its own, handing the
-  open socket over. Every load of `config.toml` (start-up, reload, each check
-  and save in the console) merges `console.toml` in, which is read again on
-  every reload. A listener whose addresses another takes over (a rename, the
-  console moving) keeps its socket open instead of reopening it.
-- `[[basic_auth]]`: users (`username` with `password_hash` (argon2id or
-  pbkdf2-sha256) or `password_plain`) that a service rule asks for with
-  `basic_auth=<name>`. A matched password is remembered for 5 minutes.
-- `cert = local-ca` serves clients without SNI (`pattern = NONE`, or `ANY`):
+  running configuration (a reload applies to the next request; a Host
+  another rule serves gets 421).
+- `basic_auth`: users (`username` with `password_hash` (argon2id or
+  pbkdf2-sha256) or `password_plain`) that a serve entry asks for with
+  `basic_auth: <name>`. A matched password is remembered for 5 minutes.
+- The console's rule editor has *Serve it here*, one row per serve entry,
+  and saves through the YAML tree: comments elsewhere in the file are kept.
+- `cert: local-ca` serves clients without SNI (`domain: NONE`, or `ANY`):
   a certificate for the IP address they connected to, or with IP addresses
   in `cert_domains`, one certificate for all of them (a `NONE` rule may add
   host names). An IP address sent as SNI is routed as no SNI and refused
   unless `cert_domains` lists it (it used to be a bad ClientHello).
-  `cert = auto` on `NONE` stays an error, now pointing at `local-ca`.
+  `cert: auto` on `NONE` stays an error, now pointing at `local-ca`.
+- A listener whose exact addresses another takes over (a rename) keeps its
+  socket open instead of reopening the port.
 - Error messages no longer mention the removed `cert = <directory>`.
 
 ## v1.4.1

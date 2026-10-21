@@ -20,91 +20,90 @@ import (
 
 const serveHead = "[[listener]]\nname=default\nport=1\n[global]\nacme_agree_tos=true\n"
 
-func TestServiceRuleConfig(t *testing.T) {
+func TestServeConfig(t *testing.T) {
 	t.Parallel()
-	cfg := mustParse(t, serveHead+`
-[[host]]
-listener = default
-pattern = www.test
-cert = auto
-service_rule1 = type=reverse_proxy; prefix=/; target=http://127.0.0.1:8080
-service_rule_api = type=reverse_proxy;prefix=/api/;target=https://api.lan;strip_prefix=true;force_host=x.lan;tls_verify=false;basic_auth=team;
-service_rule3 = type=static_content; prefix=/assets/; base_dir=/opt/www/assets
-service_rule3 = type=static_content; prefix=/static/; base_dir=/opt/www/static
-
-[[basic_auth]]
-name = team
-user1 = username=jack; password_plain=secret
-user2 = username=jill; password_hash=`+mustHash(t, "pw")+`
-user1 = username=joe; password_plain=other
+	head := "global:\n  acme_agree_tos: true\nlisteners:\n  - {name: default, port: 1}\n"
+	cfg := mustParse(t, head+`routes:
+  - listener: default
+    rules:
+      - domain: www.test
+        cert: auto
+        serve:
+          - {type: reverse_proxy, prefix: /, target: "http://127.0.0.1:8080"}
+          - type: reverse_proxy
+            prefix: /api/
+            target: https://api.lan
+            strip_prefix: true
+            force_host: x.lan
+            tls_verify: false
+            basic_auth: team
+          - {type: static_content, prefix: /static/, base_dir: /opt/www/static}
+basic_auth:
+  - name: team
+    users:
+      - {username: jack, password_plain: secret}
+      - {username: jill, password_hash: "`+mustHash(t, "pw")+`"}
 `)
 	r := &cfg.Rules[0]
 	if !r.Serves() || r.UpstreamTLS || len(r.Routes) != 3 {
 		t.Fatalf("rule: serves=%v upstream_tls=%v routes=%d", r.Serves(), r.UpstreamTLS, len(r.Routes))
 	}
-	if got := r.RouteFor("/api/x"); got == nil || got.Key != "service_rule_api" || !got.StripPrefix || got.ForceHost != "x.lan" || got.TLSVerify || got.TargetAddr() != "api.lan:443" || got.auth == nil {
+	if got := r.RouteFor("/api/x"); got == nil || got.Key != "serve 2" || !got.StripPrefix || got.ForceHost != "x.lan" || got.TLSVerify || got.TargetAddr() != "api.lan:443" || got.auth == nil {
 		t.Fatalf("the longest prefix wins, with its options: %+v", got)
 	}
 	if got := r.RouteFor("/static/a.css"); got == nil || got.BaseDir != "/opt/www/static" {
-		t.Fatalf("a repeated key keeps its last value: %+v", got)
-	}
-	if r.RouteFor("/assets/a.css").Prefix != "/" {
-		t.Fatal("the replaced service_rule3 is gone")
+		t.Fatalf("static: %+v", got)
 	}
 	if got := r.RouteFor("/other"); got == nil || got.TargetAddr() != "127.0.0.1:8080" {
 		t.Fatalf("/ catches the rest: %+v", got)
 	}
-	if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "service_rule3 is also set") {
-		t.Errorf("a repeated key is a warning: %v", cfg.Warnings)
-	}
 	team := cfg.BasicAuth["team"]
-	if _, ok := team.Users["jack"]; ok || team.Users["joe"].plain != "other" || team.Users["jill"].hash == "" {
-		t.Fatalf("user keys, the last value of user1 winning: %+v", team.Users)
+	if team.Users["jack"].plain != "secret" || team.Users["jill"].hash == "" {
+		t.Fatalf("users: %+v", team.Users)
 	}
 	if d := cfg.Route("www.test"); !d.Allow || d.Rule != r || d.Host != "" {
 		t.Fatalf("a serving rule routes without a target: %+v", d)
 	}
 
-	rule := "[[host]]\nlistener=default\npattern=www.test\ncert=auto\n"
+	rule := "routes:\n  - listener: default\n    rules:\n      - domain: www.test\n        cert: auto\n"
+	serve := func(entries ...string) string { return rule + "        serve: [" + strings.Join(entries, ", ") + "]\n" }
+	auth := func(users string) string { return "basic_auth:\n  - name: a\n    users: [" + users + "]\n" }
 	for text, want := range map[string]string{
-		rule + "service_rule1=type=ftp;prefix=/":                                                                                "type must be",
-		rule + "service_rule1=prefix=/":                                                                                         "type is required",
-		rule + "service_rule1=type=reverse_proxy;target=http://h":                                                               "prefix is required",
-		rule + "service_rule1=type=reverse_proxy;prefix=/":                                                                      "needs target=",
-		rule + "service_rule1=type=reverse_proxy;prefix=/;target=ftp://h":                                                       "http:// or https://",
-		rule + "service_rule1=type=reverse_proxy;prefix=/;target=http://h/base":                                                 "scheme://host:port only",
-		rule + "service_rule1=type=reverse_proxy;prefix=/;target=http://h;tls_verify=false":                                     "only applies to an https:// target",
-		rule + "service_rule1=type=reverse_proxy;prefix=/;target=http://h;base_dir=/x":                                          "base_dir only applies to type=static_content",
-		rule + "service_rule1=type=static_content;prefix=/":                                                                     "needs base_dir",
-		rule + "service_rule1=type=static_content;prefix=/x;base_dir=/x":                                                        "ends with /",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x;strip_prefix=true":                                       "strip_prefix only applies to type=reverse_proxy",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x;colour=red":                                              `unknown option "colour"`,
-		rule + "service_rule1=type=static_content;prefix=/;prefix=/a/;base_dir=/x":                                              "prefix is given twice",
-		rule + "service_rule1=type=static_content;prefix=x;base_dir=/x":                                                         "starting with /",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x;basic_auth=nope":                                         "no [[basic_auth]] named nope",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x\nservice_rule2=type=static_content;prefix=/;base_dir=/y": "already served by service_rule1",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x\ntarget_host=h":                                          "target_host does not apply",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x\nupstream_tls=false":                                     "upstream_tls does not apply",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x\nproxy=true":                                             "proxy does not apply",
-		rule + "service_rule1=type=static_content;prefix=/;base_dir=/x\naction=deny":                                            "action = allow",
-		"[[host]]\nlistener=default\npattern=www.test\nservice_rule1=type=static_content;prefix=/;base_dir=/x":                  "need cert = auto or cert = local-ca",
-		"[[basic_auth]]\nuser1=username=a;password_plain=b":                                                                     "name is required",
-		"[[basic_auth]]\nname=a":                                                                       "no users",
-		"[[basic_auth]]\nname=a\nuser1=password_plain=b":                                               "username= is required",
-		"[[basic_auth]]\nname=a\nuser1=username=a":                                                     "password_plain= or password_hash= is required",
-		"[[basic_auth]]\nname=a\nuser1=username=a;password_plain=b;password_hash=c":                    "not both",
-		"[[basic_auth]]\nname=a\nuser1=username=a;password_hash=nope":                                  "not an argon2id",
-		"[[basic_auth]]\nname=a\nuser1=username=a:b;password_plain=x":                                  "without a colon",
-		"[[basic_auth]]\nname=a\nuser1=username=a;password_plain=x\nuser2=username=a;password_plain=y": "already listed",
-		"[[basic_auth]]\nname=a\npassword=x":                                                           `unknown key "password"`,
+		serve("{type: ftp, prefix: /}"):                                                                             "type must be",
+		serve("{prefix: /}"):                                                                                        "type is required",
+		serve("{type: reverse_proxy, target: \"http://h\"}"):                                                        "prefix is required",
+		serve("{type: reverse_proxy, prefix: /}"):                                                                   "needs target: http://host:port",
+		serve("{type: reverse_proxy, prefix: /, target: \"ftp://h\"}"):                                              "http:// or https://",
+		serve("{type: reverse_proxy, prefix: /, target: \"http://h/base\"}"):                                        "scheme://host:port only",
+		serve("{type: reverse_proxy, prefix: /, target: \"http://h\", tls_verify: false}"):                          "only applies to an https:// target",
+		serve("{type: reverse_proxy, prefix: /, target: \"http://h\", base_dir: /x}"):                               "base_dir only applies to type: static_content",
+		serve("{type: static_content, prefix: /}"):                                                                  "needs base_dir",
+		serve("{type: static_content, prefix: /x, base_dir: /x}"):                                                   "ends with /",
+		serve("{type: static_content, prefix: /, base_dir: /x, strip_prefix: true}"):                                "strip_prefix only applies to type: reverse_proxy",
+		serve("{type: static_content, prefix: /, base_dir: /x, colour: red}"):                                       `unknown key "colour" in a serve entry`,
+		serve("{type: static_content, prefix: x, base_dir: /x}"):                                                    "starting with /",
+		serve("{type: static_content, prefix: /, base_dir: /x, basic_auth: nope}"):                                  "no basic_auth named nope",
+		serve("{type: static_content, prefix: /, base_dir: /x}", "{type: static_content, prefix: /, base_dir: /y}"): "already served by serve 1",
+		serve("{type: static_content, prefix: /, base_dir: /x}") + "        target: \"h:1\"\n":                      "target does not apply",
+		serve("{type: static_content, prefix: /, base_dir: /x}") + "        upstream_tls: false\n":                  "upstream_tls does not apply",
+		serve("{type: static_content, prefix: /, base_dir: /x}") + "        proxy: v2\n":                            "proxy does not apply",
+		serve("{type: static_content, prefix: /, base_dir: /x}") + "        action: deny\n":                         "action: allow",
+		strings.Replace(serve("{type: static_content, prefix: /, base_dir: /x}"), "        cert: auto\n", "", 1):    "serve needs cert: auto or cert: local-ca",
+		serve("x"): "a serve entry must be a mapping",
+		"basic_auth:\n  - users: [{username: a, password_plain: b}]\n":             "name is required",
+		"basic_auth:\n  - name: a\n":                                               "no users",
+		auth("{password_plain: b}"):                                                "username is required",
+		auth("{username: a}"):                                                      "password_plain or password_hash is required",
+		auth("{username: a, password_plain: b, password_hash: c}"):                 "not both",
+		auth("{username: a, password_hash: nope}"):                                 "not an argon2id",
+		auth("{username: \"a:b\", password_plain: x}"):                             "without a colon",
+		auth("{username: a, password_plain: x}, {username: a, password_plain: y}"): "listed twice",
+		auth("{username: a, password: x}"):                                         `unknown key "password" in a user`,
+		"basic_auth:\n  - {name: a, users: [{username: a, password_plain: x}]}\n  - {name: a, users: [{username: b, password_plain: x}]}\n": "already used",
 	} {
-		if _, err := ParseConfig(serveHead + text + "\n"); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := ParseConfig(head + text); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s:\n  %v, want %q", text, err, want)
 		}
-	}
-	// The old sections are gone.
-	if _, err := ParseConfig(serveHead + "[[local_services]]\nname=a\n"); err == nil || !strings.Contains(err.Error(), "unknown section [[local_services]]") {
-		t.Errorf("[[local_services]]: %v", err)
 	}
 }
 
@@ -283,7 +282,7 @@ user2=username=jill;password_plain=open sesame
 	if resp, err := c.Post("https://www.test/api/p", "text/plain", strings.NewReader("x")); err != nil || resp.StatusCode != 200 {
 		t.Errorf("POST through the proxy: %v %v", resp, err)
 	}
-	if !strings.Contains(testLog.String(), "GET www.test/files/a.txt -> 200 via service_rule3") {
+	if !strings.Contains(testLog.String(), "GET www.test/files/a.txt -> 200 via serve 3") {
 		t.Error("each request is logged with the service rule that served it")
 	}
 }
@@ -303,7 +302,7 @@ func TestServeRulesReloadOnOpenConnection(t *testing.T) {
 	if _, body := httpsGet(t, c, "https://www.test/"); !strings.Contains(body, "host=first") {
 		t.Fatal(body)
 	}
-	os.WriteFile(path, []byte(head+fmt.Sprintf(rules, ca.localCA(t), b, "second")), 0o600)
+	os.WriteFile(path, []byte(yamlFixture(head+fmt.Sprintf(rules, ca.localCA(t), b, "second"))), 0o600)
 	var hash string
 	have := false
 	if problems := p.srv.reload(path, &hash, &have); problems != nil {
@@ -345,40 +344,5 @@ func TestNoSNIServeEndToEnd(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if want := "path=/hello host=127.0.0.1 xff=127.0.0.2 proto=https fwd= auth="; string(body) != want {
 		t.Fatalf("%s\nwant %s", body, want)
-	}
-}
-
-// The rule editor's one text box becomes service_rule1, 2, ... and back.
-func TestEditServiceRules(t *testing.T) {
-	t.Parallel()
-	text := serveHead + "[[host]]\nlistener = default\npattern = www.test\ncert = auto\nservice_rule_a = type=static_content; prefix=/; base_dir=/x  # old\n# keep me\nmax_aggregated_speed = 1MB\n"
-	out, err := editRules(text, 6, map[string]string{serviceRulesValue: "type=reverse_proxy; prefix=/api/; target=http://h:1\n\n# a note\ntype=static_content; prefix=/; base_dir=/srv/www\n"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := serveHead + "[[host]]\nlistener = default\npattern = www.test\ncert = auto\n" +
-		`service_rule1 = "type=reverse_proxy; prefix=/api/; target=http://h:1"` + "\n" +
-		`service_rule2 = "type=static_content; prefix=/; base_dir=/srv/www"` + "\n# keep me\nmax_aggregated_speed = 1MB\n"
-	if out != want {
-		t.Fatalf("got\n%s\nwant\n%s", out, want)
-	}
-	cfg := mustParse(t, out)
-	if len(cfg.Rules[0].Routes) != 2 {
-		t.Fatal("the written rules load")
-	}
-	lines := strings.Split(out, "\n")
-	if v := hostValues(lines, hostBlocks(lines)[0])[serviceRulesValue]; v != "type=reverse_proxy; prefix=/api/; target=http://h:1\ntype=static_content; prefix=/; base_dir=/srv/www" {
-		t.Fatalf("read back for the editor: %q", v)
-	}
-	if _, err := editRules(text, 6, map[string]string{serviceRulesValue: "type=static_content; prefix=/"}, false); err == nil || !strings.Contains(err.Error(), "service rule on line 1: type=static_content needs base_dir") {
-		t.Fatalf("checked as typed: %v", err)
-	}
-	out, err = editRules(text, 6, map[string]string{serviceRulesValue: "", "target_host": "h", "target_port": "1"}, false)
-	if err != nil || strings.Contains(out, "service_rule") || !strings.Contains(out, "target_host = h") {
-		t.Fatalf("emptied: %v\n%s", err, out)
-	}
-	out, err = editRules(serveHead, 0, map[string]string{"listener": "default", "pattern": "new.test", "cert": "auto", serviceRulesValue: "type=static_content; prefix=/; base_dir=/srv"}, false)
-	if err != nil || !strings.HasSuffix(strings.TrimSpace(out), `cert = auto`+"\n"+`service_rule1 = "type=static_content; prefix=/; base_dir=/srv"`) {
-		t.Fatalf("a new rule: %v\n%s", err, out)
 	}
 }

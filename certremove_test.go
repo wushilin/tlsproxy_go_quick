@@ -168,7 +168,7 @@ func TestDNSResolversRequiredAndChecked(t *testing.T) {
 		{"public_ip_address=203.0.113.7\ndns_resolvers=1.1.1.1; 2606:4700:4700::1111; [2001:4860:4860::8888]:53, 8.8.8.8:53", ""},
 		{"", ""}, // no public_ip_address: no pre-check, nothing to ask
 	} {
-		cfg, err := ParseConfig(fmt.Sprintf(base, tc.global))
+		cfg, err := parseFixture(fmt.Sprintf(base, tc.global))
 		switch {
 		case tc.err == "" && err != nil:
 			t.Errorf("%q: %v", tc.global, err)
@@ -179,7 +179,7 @@ func TestDNSResolversRequiredAndChecked(t *testing.T) {
 		}
 	}
 	// Without cert = auto it isn't needed either.
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=443\n[global]\npublic_ip_address=203.0.113.7\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n"); err != nil {
+	if _, err := parseFixture("[[listener]]\nname=default\nport=443\n[global]\npublic_ip_address=203.0.113.7\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n"); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -34,19 +34,19 @@ func TestRedirectConfig(t *testing.T) {
 	}
 
 	for text, want := range map[string]string{
-		"[[listener]]\nname=default\nport=80\n[global]\nhttp_to_https_redirect=true\n":                                                                                    "port 80, which [[listener]] default at line 1 also uses",
-		"[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nport=443\n[[listener]]\nname=b\nbind=10.0.0.1\nport=80\n":                                           "port 80, which [[listener]] b at line 6 also uses",
+		"[[listener]]\nname=default\nport=80\n[global]\nhttp_to_https_redirect=true\n":                                                                                    "port 80, which listener default at line 4 also uses",
+		"[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nport=443\n[[listener]]\nname=b\nbind=10.0.0.1\nport=80\n":                                           "port 80, which listener b at line 6 also uses",
 		"[[listener]]\nname=HTTP-to-HTTPS-redirect\nport=1\n":                                                                                                             "reserved for http_to_https_redirect",
 		"[[listener]]\nname=default\nport=443\n[global]\nhttp_to_https_redirect=maybe\n":                                                                                  "http_to_https_redirect",
-		"[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nport=443\n[[host]]\nlistener=http-to-https-redirect\npattern=ANY\ntarget_host=x\ntarget_port=443\n": "there is no [[listener]] named http-to-https-redirect",
+		"[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nport=443\n[[host]]\nlistener=http-to-https-redirect\npattern=ANY\ntarget_host=x\ntarget_port=443\n": "there is no listener named http-to-https-redirect",
 	} {
-		_, err := ParseConfig(text)
+		_, err := parseFixture(text)
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", text, err, want)
 		}
 	}
 	// A listener on port 80 at an address the redirect also binds.
-	if _, err := ParseConfig("[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nbind=10.0.0.1\nport=443\n[[listener]]\nname=b\nbind=10.0.0.2\nport=80\n"); err == nil {
+	if _, err := parseFixture("[global]\nhttp_to_https_redirect=true\n[[listener]]\nname=a\nbind=10.0.0.1\nport=443\n[[listener]]\nname=b\nbind=10.0.0.2\nport=80\n"); err == nil {
 		t.Error("a listener on port 80 at an address the redirect binds must be refused")
 	}
 }

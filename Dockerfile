@@ -1,15 +1,16 @@
 # tlsproxy in a container: a static binary on a minimal base (distroless:
 # CA certificates and nothing else, running as a non-root user).
 #
-#   docker run -d --name tlsproxy -p 443:443 -p 127.0.0.1:9443:9443 \
+#   docker run -d --name tlsproxy -p 443:443 \
+#     -e CONSOLE_DOMAIN=admin.example.com -e CONSOLE_PASSWORD='...' \
 #     -v /srv/tlsproxy/etc:/etc/tlsproxy -v /srv/tlsproxy/data:/var/lib/tlsproxy \
-#     docker.io/wushilin/tlsproxy_go_quick:latest \
-#     /etc/tlsproxy/config.toml --console /etc/tlsproxy/console.toml
+#     docker.io/wushilin/tlsproxy_go_quick:latest
 #
-# /etc/tlsproxy/config.toml is the configuration and console.toml the web
-# console's (without --console there is none). The folder must be writable:
-# the proxy replaces a plain password with its hash, and the console saves
-# edits. /var/lib/tlsproxy is the working directory, so the default
+# /etc/tlsproxy/config.yaml is the configuration. The web console is on by
+# default, on port 443 with its own domain: CONSOLE_DOMAIN and
+# CONSOLE_PASSWORD are required (or pass /etc/tlsproxy/config.yaml
+# -noconsole as the command). The folder must be writable: the console saves
+# edits there. /var/lib/tlsproxy is the working directory, so the default
 # cert_path (./certs) and ca_root (./ca) are kept there. Both mounts must be
 # writable by uid 65532.
 #
@@ -30,9 +31,9 @@ LABEL org.opencontainers.image.source="https://github.com/wushilin/tlsproxy_go_q
 COPY --from=build /out/tlsproxy /usr/local/bin/tlsproxy
 COPY --from=build --chown=65532:65532 /out/etc /etc/tlsproxy
 COPY --from=build --chown=65532:65532 /out/data /var/lib/tlsproxy
-COPY --from=build --chown=65532:65532 /src/config.toml /etc/tlsproxy/config.toml.example
+COPY --from=build --chown=65532:65532 /src/config.yaml /etc/tlsproxy/config.yaml.example
 WORKDIR /var/lib/tlsproxy
 VOLUME ["/etc/tlsproxy", "/var/lib/tlsproxy"]
-EXPOSE 443 9443
+EXPOSE 443
 ENTRYPOINT ["/usr/local/bin/tlsproxy"]
-CMD ["/etc/tlsproxy/config.toml"]
+CMD ["/etc/tlsproxy/config.yaml"]

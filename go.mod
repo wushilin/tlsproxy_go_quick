@@ -6,6 +6,8 @@ require golang.org/x/crypto v0.57.0
 
 require github.com/wushilin/go-named-queue v0.1.0
 
+require go.yaml.in/yaml/v3 v3.0.4
+
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/letsencrypt/challtestsrv v1.4.2 // indirect

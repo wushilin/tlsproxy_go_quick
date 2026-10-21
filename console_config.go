@@ -1,52 +1,51 @@
 package main
 
-// console.toml: the web console's own file, given with --console. The
-// console can edit config.toml but never this file, so no edit made from
-// the console can change its password or take it off the network.
+// The web console's settings: given at start-up, never in config.yaml, so
+// nothing saved from the console can change them or lock it out.
 //
-//	[console]
-//	bind = 127.0.0.1              default 127.0.0.1; addresses separated by ;
-//	port = 443
-//	hostname = admin.example.com  the name it is served under
-//	cert = auto                   auto | local-ca[:caNNN]; none: plain HTTP
-//	password_hash = $argon2id$...
+//	-console_domain admin.example.com   or $CONSOLE_DOMAIN   (required)
+//	$CONSOLE_PASSWORD                    the password, or its $argon2id$ hash (required)
+//	-console_bind 0.0.0.0                or $CONSOLE_BIND     (default: all addresses)
+//	-console_port 443                    or $CONSOLE_PORT     (default 443)
+//	-console_cert auto                   or $CONSOLE_CERT     (auto | local-ca[:caNNN])
+//	-noconsole                           no console at all
 //
-// With cert, the console is served over TLS like a rule with service_rule
-// keys: on the [[listener]] of config.toml with exactly this bind and port
-// (it gets one more rule there, for hostname, that config.toml cannot
-// override), or on a listener of its own when there is none. Without cert,
-// it listens on bind:port in plain HTTP, as older versions did.
+// The console owns a listener: https on port 443, console_http on any
+// other. Its name, bind, port and the rule for the console's domain are
+// fixed; config.yaml may list it with other options (proxy_trust_source,
+// max_connections, timeouts, speed limits, no bind or port) and route more
+// rules to it. Another listener may not have exactly its bind and port.
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
-	"slices"
+	"os"
 	"strconv"
 	"strings"
 )
 
-// consoleListener is the name of the listener the console gets when no
-// [[listener]] has its address.
-const consoleListener = "(console)"
-
-// ConsoleConfig is console.toml's [console] section.
+// ConsoleConfig is how the console is served.
 type ConsoleConfig struct {
 	Bind         string   // normalised, as a listener's
 	Binds        []string // its addresses
 	Port         int
-	Hostname     string   // TLS: the name it is served under; plain HTTP: one more name the Host check accepts
-	Cert         string   // "" = plain HTTP; auto | local-ca[:caNNN]
-	Password     string   // plaintext, only until the proxy replaces it with PasswordHash
-	PasswordHash string   // argon2id or pbkdf2-sha256
-	Hostnames    []string // plain HTTP: extra names the console may be addressed by (Host header check)
-	SecureCookie bool     // plain HTTP published through TLS termination elsewhere: HTTPS-only cookies
+	Domain       string // the name it is served under
+	Cert         string // auto | local-ca[:caNNN]
+	PasswordHash string // what sign-ins are checked against
 
-	sourceHash string // exact bytes parsed, for the password rewrite and reload change detection
-	Warnings   []string
+	// certificate, when set, is served instead of one from Cert. Only
+	// tests set it, for a console in a test whose CAs are its own.
+	certificate *tls.Certificate
 }
 
-// TLS reports whether the console is served over TLS by this proxy.
-func (c *ConsoleConfig) TLS() bool { return c.Cert != "" }
+// ListenerName is the name of the listener the console owns.
+func (c *ConsoleConfig) ListenerName() string {
+	if c.Port == 443 {
+		return "https"
+	}
+	return "console_http"
+}
 
 // Addrs is every address the console is reached on.
 func (c *ConsoleConfig) Addrs() []string {
@@ -57,109 +56,157 @@ func (c *ConsoleConfig) Addrs() []string {
 	return out
 }
 
-// ParseConsole reads console.toml.
-func ParseConsole(text string) (*ConsoleConfig, error) {
-	c := &ConsoleConfig{Bind: "127.0.0.1", Binds: []string{"127.0.0.1"}, sourceHash: fileHash([]byte(text))}
-	section := ""
-	seen := false
-	for idx, line := range strings.Split(text, "\n") {
-		lineno := idx + 1
-		fail := func(format string, a ...any) error {
-			return fmt.Errorf("line %d: %s", lineno, fmt.Sprintf(format, a...))
-		}
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			if section = strings.TrimSpace(strings.Trim(line, "[]")); section != "console" || !strings.HasSuffix(line, "]") || strings.HasPrefix(line, "[[") {
-				return nil, fail("%s: this file holds only the [console] section; everything else belongs in config.toml", line)
-			}
-			seen = true
-			continue
-		}
-		if section != "console" {
-			return nil, fail("key outside of [console]")
-		}
-		key, raw, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, fail("expected key = value")
-		}
-		key = strings.TrimSpace(key)
-		value, err := parseValue(raw)
-		if err != nil {
-			return nil, fail("%v", err)
-		}
-		switch key {
-		case "bind":
-			if c.Binds, err = parseBinds(value); err != nil {
-				return nil, fail("%v", err)
-			}
-			c.Bind = strings.Join(c.Binds, "; ")
-		case "listen":
-			return nil, fail("listen is now called bind, as in [[listener]]: write bind = %s", value)
-		case "port":
-			if c.Port, err = parsePort(value); err != nil {
-				return nil, fail("%v", err)
-			}
-		case "hostname":
-			if c.Hostname = strings.ToLower(value); !isHostName(c.Hostname) {
-				return nil, fail("hostname must be a host name like admin.example.com (no * and no IP address), got %q", value)
-			}
-		case "cert":
-			_, local := localCARef(value)
-			if !local && !strings.EqualFold(value, "auto") {
-				return nil, fail("cert must be auto or local-ca (local-ca:ca002), got %q; leave it out for plain HTTP", value)
-			}
-			c.Cert = value
-			if strings.EqualFold(value, "auto") {
-				c.Cert = "auto"
-			}
-		case "password":
-			c.Password = value
-		case "password_hash":
-			if herr := validHash(value); herr != nil {
-				return nil, fail("password_hash: %v", herr)
-			}
-			c.PasswordHash = value
-		case "secure_cookie":
-			if c.SecureCookie, err = parseBool(value); err != nil {
-				return nil, fail("secure_cookie: %v", err)
-			}
-		case "hostnames":
-			c.Hostnames = splitList(strings.ToLower(value))
-		default:
-			return nil, fail("unknown key %q in [console]", key)
-		}
+// consoleSetting is one of the console's settings as given: a flag wins
+// over its environment variable.
+type consoleSetting struct{ flag, env string }
+
+func (s consoleSetting) value(flags map[string]string) string {
+	if v, ok := flags[s.flag]; ok {
+		return v
 	}
+	return os.Getenv(s.env)
+}
+
+var (
+	consoleDomainSetting = consoleSetting{"console_domain", "CONSOLE_DOMAIN"}
+	consoleBindSetting   = consoleSetting{"console_bind", "CONSOLE_BIND"}
+	consolePortSetting   = consoleSetting{"console_port", "CONSOLE_PORT"}
+	consoleCertSetting   = consoleSetting{"console_cert", "CONSOLE_CERT"}
+)
+
+// consoleMissing is what to tell someone who started without them.
+const consoleMissing = "the web console needs its domain and password: set -console_domain <name> (or $CONSOLE_DOMAIN) and $CONSOLE_PASSWORD, or run with -noconsole"
+
+// ConsoleFromSettings reads the console's settings from flags (by name,
+// without the dash) and the environment. The password is hashed here,
+// unless it is already a hash.
+func ConsoleFromSettings(flags map[string]string) (*ConsoleConfig, error) {
+	c := &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: 443, Cert: "auto"}
+	c.Domain = strings.ToLower(strings.TrimSpace(consoleDomainSetting.value(flags)))
+	password := os.Getenv("CONSOLE_PASSWORD")
 	switch {
-	case !seen:
-		return nil, fmt.Errorf("no [console] section")
-	case c.Port == 0:
-		return nil, fmt.Errorf("[console] port is required")
-	case c.Password == "" && c.PasswordHash == "":
-		return nil, fmt.Errorf("[console] needs a password: set password = <text> (the proxy replaces it with a hash) or password_hash")
-	case c.TLS() && c.Hostname == "":
-		return nil, fmt.Errorf("[console] cert = %s needs hostname = <the name you open the console by>: it is served by that name, as a rule of its listener", c.Cert)
-	case c.TLS() && len(c.Hostnames) > 0:
-		return nil, fmt.Errorf("[console] hostnames only applies without cert (plain HTTP); with cert, the console answers to hostname")
-	case c.TLS() && c.SecureCookie:
-		return nil, fmt.Errorf("[console] secure_cookie only applies without cert: served over TLS, cookies are HTTPS-only anyway")
+	case c.Domain == "" && password == "":
+		return nil, fmt.Errorf("%s", consoleMissing)
+	case c.Domain == "":
+		return nil, fmt.Errorf("the web console needs its domain: set -console_domain <name> (or $CONSOLE_DOMAIN), or run with -noconsole")
+	case password == "":
+		return nil, fmt.Errorf("the web console needs a password: set $CONSOLE_PASSWORD (the password, or a hash from tlsproxy --hash-password), or run with -noconsole")
+	case !isHostName(c.Domain):
+		return nil, fmt.Errorf("console domain %q is not a host name like admin.example.com (no * and no IP address)", c.Domain)
 	}
-	if !c.TLS() {
-		for _, b := range c.Binds {
-			if ip := net.ParseIP(b); ip == nil || !ip.IsLoopback() {
-				c.Warnings = append(c.Warnings, fmt.Sprintf("[console] listens on %s over plain HTTP: the password crosses the network unencrypted. Set cert and hostname to serve it over TLS, or keep bind = 127.0.0.1", b))
-				break
-			}
+	if v := consoleBindSetting.value(flags); v != "" {
+		binds, err := parseBinds(v)
+		if err != nil {
+			return nil, fmt.Errorf("console bind: %v", err)
 		}
+		c.Binds, c.Bind = binds, strings.Join(binds, "; ")
+	}
+	if v := consolePortSetting.value(flags); v != "" {
+		port, err := parsePort(v)
+		if err != nil {
+			return nil, fmt.Errorf("console port: %v", err)
+		}
+		c.Port = port
+	}
+	if v := consoleCertSetting.value(flags); v != "" {
+		_, local := localCARef(v)
+		if !local && !strings.EqualFold(v, "auto") {
+			return nil, fmt.Errorf("console cert must be auto or local-ca (local-ca:ca002), got %q", v)
+		}
+		c.Cert = v
+		if strings.EqualFold(v, "auto") {
+			c.Cert = "auto"
+		}
+	}
+	if strings.HasPrefix(password, "$argon2id$") || strings.HasPrefix(password, hashPrefix+"$") {
+		if err := validHash(password); err != nil {
+			return nil, fmt.Errorf("$CONSOLE_PASSWORD looks like a hash, but: %v", err)
+		}
+		c.PasswordHash = password
+	} else {
+		hash, err := hashPassword(password)
+		if err != nil {
+			return nil, err
+		}
+		c.PasswordHash = hash
 	}
 	return c, nil
 }
 
+// placeConsoleListener gives the console its listener, before the
+// listeners are checked: the one config.yaml lists by that name (with no
+// bind or port of its own), or a new one.
+func (cfg *Config) placeConsoleListener(con *ConsoleConfig) error {
+	if con == nil {
+		return nil
+	}
+	cfg.Console = con
+	name := con.ListenerName()
+	for i := range cfg.Listeners {
+		l := &cfg.Listeners[i]
+		if !strings.EqualFold(l.Name, name) {
+			continue
+		}
+		if l.bindSet || l.portSet {
+			return fmt.Errorf("line %d: listener %s is the web console's: its bind and port come from the console's settings (%s), so leave them out here; its other options apply", l.Line, name, strings.Join(con.Addrs(), ", "))
+		}
+		l.Name, l.Bind, l.Binds, l.Port, l.Console = name, con.Bind, con.Binds, con.Port, true
+		return nil
+	}
+	cfg.Listeners = append(cfg.Listeners, Listener{Name: name, Bind: con.Bind, Binds: con.Binds, Port: con.Port, Console: true})
+	return nil
+}
+
+// addConsoleRule adds the console's rule to its listener once config.yaml's
+// rules are built. A rule there for the console's exact domain is an error.
+func (cfg *Config) addConsoleRule(con *ConsoleConfig) error {
+	if con == nil {
+		return nil
+	}
+	name := con.ListenerName()
+	for _, r := range cfg.Rules {
+		if r.Listener == name && r.Kind == kindLiteral && literalName(r.Source) == con.Domain {
+			return fmt.Errorf("rule at line %d: %s is the web console's domain on listener %s, so it can't have a rule of its own there. Use another name, or start the console with another -console_domain", r.Line, con.Domain, name)
+		}
+	}
+	pattern, cert := con.Domain, con.Cert
+	if con.certificate != nil {
+		cert = "local-ca" // passes the checks; the certificate is con's own
+	}
+	rule, err := buildRule(cfg, rawRule{listener: &name, pattern: &pattern, cert: &cert, console: true})
+	if err != nil {
+		return fmt.Errorf("the web console (%s): %v", con.Domain, err)
+	}
+	rule.fixedCert = con.certificate
+	cfg.Rules = append(cfg.Rules, rule)
+	return nil
+}
+
+// ConsoleRule is the console's rule, nil without a console.
+func (c *Config) ConsoleRule() *Rule {
+	for i := range c.Rules {
+		if c.Rules[i].Console {
+			return &c.Rules[i]
+		}
+	}
+	return nil
+}
+
 // sameBinds reports whether two bind lists name the same addresses.
 func sameBinds(a, b []string) bool {
-	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
+	if len(a) != len(b) {
+		return false
+	}
+	for _, x := range a {
+		found := false
+		for _, y := range b {
+			found = found || x == y
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // bindsOverlap reports whether two bind lists share an address (a wildcard
@@ -173,71 +220,4 @@ func bindsOverlap(a, b []string) (string, string, bool) {
 		}
 	}
 	return "", "", false
-}
-
-// applyConsole merges con into cfg once config.toml's rules are built.
-// With TLS, the console's rule joins the [[listener]] with exactly its
-// bind and port, or a listener of its own; a [[listener]] that only
-// partly overlaps it, or a [[host]] for its hostname there, is an error.
-// Plain HTTP, it only must not clash with a listener.
-func (cfg *Config) applyConsole(con *ConsoleConfig) error {
-	if con == nil {
-		return nil
-	}
-	cfg.Console = con
-	cfg.Warnings = append(cfg.Warnings, con.Warnings...)
-	fail := func(format string, a ...any) error {
-		return fmt.Errorf("console.toml: %s", fmt.Sprintf(format, a...))
-	}
-	var on *Listener
-	for _, l := range cfg.PortListeners() {
-		if l.Port != con.Port {
-			continue
-		}
-		what := fmt.Sprintf("[[listener]] %s at line %d", l.Name, l.Line)
-		if l.IsRedirect {
-			what = "the http_to_https_redirect listener"
-		}
-		a, b, overlap := bindsOverlap(con.Binds, l.Binds)
-		switch {
-		case !overlap:
-			continue
-		case !con.TLS():
-			return fail("the console (plain HTTP) on %s port %d overlaps %s on %s. Serve the console through that listener instead: set cert and hostname in console.toml, with bind = %s", a, con.Port, what, b, l.Bind)
-		case l.IsRedirect || !sameBinds(con.Binds, l.Binds):
-			return fail("the console on %s port %d overlaps %s on %s. It joins a listener only with exactly the same addresses: bind = %s", con.Bind, con.Port, what, l.Bind, l.Bind)
-		}
-		on = l
-	}
-	if !con.TLS() {
-		return nil
-	}
-	if on == nil {
-		cfg.Listeners = append(cfg.Listeners, Listener{Name: consoleListener, Bind: con.Bind, Binds: con.Binds, Port: con.Port})
-		on = &cfg.Listeners[len(cfg.Listeners)-1]
-	}
-	on.Console = true
-	for _, r := range cfg.Rules {
-		if r.Listener == on.Name && r.Kind == kindLiteral && literalName(r.Source) == con.Hostname {
-			return fmt.Errorf("[[host]] at line %d: %s is the console's hostname (console.toml) on listener %s, so it has no rule of its own there. Use another name, or another hostname for the console", r.Line, con.Hostname, on.Name)
-		}
-	}
-	name, pattern, cert := on.Name, con.Hostname, con.Cert
-	rule, err := buildRule(cfg, rawRule{listener: &name, pattern: &pattern, cert: &cert, console: true})
-	if err != nil {
-		return fail("%v", err)
-	}
-	cfg.Rules = append(cfg.Rules, rule)
-	return nil
-}
-
-// ConsoleRule is the console's rule, nil if it has none (no console, or
-// plain HTTP).
-func (c *Config) ConsoleRule() *Rule {
-	for i := range c.Rules {
-		if c.Rules[i].Console {
-			return &c.Rules[i]
-		}
-	}
-	return nil
 }

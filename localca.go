@@ -24,8 +24,9 @@ package main
 //	                                   not issue (or that are broken): moved aside,
 //	                                   never used, deleted after 14 days
 //
-// A CA is made on the console's CAs page only (generated, or an existing one
-// pasted in); a rule naming one that doesn't exist is a config error. A self-signed CA's
+// The default CA, ca001, is made at start-up when ca_root has none; others
+// are made on the console's CAs page (generated, or an existing one pasted
+// in), and a rule naming one that doesn't exist is a config error. A self-signed CA's
 // certificate is renewed before it expires, with the same key and subject, so
 // what it issued stays valid. A host name has no "_", so neither the CA files
 // nor _archive nor ip_ can clash with a host name's folder.
@@ -39,6 +40,7 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -74,7 +76,7 @@ type localCA struct {
 	id   string // caNNN
 	dir  string
 	ca   atomic.Pointer[caState]       // replaced whole when the CA certificate is renewed
-	conf atomic.Pointer[caConfigState] // its config.toml, as in use
+	conf atomic.Pointer[caConfigState] // its config.yaml, as in use
 	seed maphash.Seed
 	slot [localTableSize]atomic.Pointer[localLeaf]
 	n    atomic.Int64
@@ -109,7 +111,7 @@ func (e *localLeaf) current() *tls.Certificate {
 }
 
 // caLocks serialises the operations on one CA (by its folder): making it,
-// renewing it, deleting it, saving its config.toml. caRootLocks does the same
+// renewing it, deleting it, saving its config.yaml. caRootLocks does the same
 // for a ca_root, so two new CAs never take the same id.
 var caLocks, caRootLocks syncMap[string, *sync.Mutex]
 
@@ -132,29 +134,46 @@ var caIDPattern = regexp.MustCompile(`^ca[0-9]{3}$`)
 
 // openLocalCA loads the CA in dir. With create, a CA that is not there is
 // made (a rule refers to it); otherwise its absence is an error.
+// defaultCAID is the CA every proxy has: made at start-up when ca_root has
+// none, and kept renewed like any CA. cert: local-ca names it.
+const defaultCAID = "ca001"
+
 func openLocalCA(id, dir string, create bool) (*localCA, error) {
 	l := &localCA{id: id, dir: dir, seed: maphash.MakeSeed()}
 	if create {
 		defer lockCARoot(filepath.Dir(dir))() // the console may be making a CA with this id right now
 	}
+	made := false
 	if _, err := os.Stat(filepath.Join(dir, "ca_key.pem")); errors.Is(err, os.ErrNotExist) {
 		if !create {
 			return nil, fmt.Errorf("no CA in %s", dir)
 		}
-		if err := generateCA(dir, defaultCAConfig(id)); err != nil {
+		conf := defaultCAConfig(id)
+		if id == defaultCAID {
+			conf.CommonName, conf.ValidityDays = "Local CA", 20*365
+		}
+		if err := generateCA(dir, conf); err != nil {
 			return nil, err
 		}
-		logf("cert: CA %s: made a new CA in %s (a rule uses it)", id, dir)
+		made = true
 	}
 	if err := l.renewCA(); err != nil {
 		return nil, err
+	}
+	switch {
+	case made && id == defaultCAID:
+		sum := sha256.Sum256(l.ca.Load().cert.Raw)
+		logf("cert: made the default CA %s, \"Local CA\", in %s: valid 20 years, renewed with the same key before it expires. Clients that should trust what cert: local-ca issues install %s (SHA-256 %X)",
+			id, dir, filepath.Join(dir, "ca_cert.pem"), sum[:])
+	case made:
+		logf("cert: CA %s: made a new CA in %s (a rule uses it)", id, dir)
 	}
 	l.loadConfig()
 	return l, nil
 }
 
 // generateCA makes a new CA in dir, which must not hold one yet, as conf's
-// [ca] says, and writes conf as its config.toml.
+// ca says, and writes conf as its config.yaml.
 func generateCA(dir string, conf *caConfig) error {
 	if err := conf.check(); err != nil {
 		return err
@@ -184,16 +203,16 @@ func generateCA(dir string, conf *caConfig) error {
 	return writeConfigFor(dir, conf, cert)
 }
 
-// writeConfigFor writes a new CA's config.toml, its [ca] section as the
+// writeConfigFor writes a new CA's config.yaml, its ca section as the
 // certificate has it.
 func writeConfigFor(dir string, conf *caConfig, cert *x509.Certificate) error {
 	c := *conf
 	setCAFromCert(&c, cert)
-	return writeFileAtomic0600(filepath.Join(dir, "config.toml"), []byte(c.text()))
+	return writeFileAtomic0600(filepath.Join(dir, caConfigFile), []byte(c.text()))
 }
 
-// setCAFromCert fills [ca] from the CA certificate: what it was made with.
-// These are fixed once the CA exists; config.toml can't change them.
+// setCAFromCert fills ca from the CA certificate: what it was made with.
+// These are fixed once the CA exists; config.yaml can't change them.
 func setCAFromCert(c *caConfig, cert *x509.Certificate) {
 	c.CommonName, c.Organization = cert.Subject.CommonName, ""
 	if len(cert.Subject.Organization) > 0 {
@@ -323,7 +342,7 @@ func (l *localCA) renewCA() error {
 	selfSigned := ca.CheckSignatureFrom(ca) == nil
 	if selfSigned && !time.Now().Before(renewDue(ca)) {
 		// Same key, name, lifetime and hash as before: from the certificate,
-		// not config.toml, whose [ca] can't change them.
+		// not config.yaml, whose ca can't change them.
 		fixed := defaultCAConfig(l.id)
 		setCAFromCert(fixed, ca)
 		der, err := signCA(ca.Subject, key, time.Duration(fixed.ValidityDays)*24*time.Hour, fixed.HashAlgorithm)

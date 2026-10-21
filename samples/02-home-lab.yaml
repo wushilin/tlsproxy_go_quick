@@ -1,0 +1,48 @@
+# Home lab: one public IP on :443, several internal services by name.
+#
+#> nas.home.example.com      => 192.168.1.10:5001
+#> photos.home.example.com   => 192.168.1.10:2342
+#> ha.home.example.com       => 192.168.1.20:8123
+#> vpn.home.example.com      => 192.168.1.1:4443
+#> www.home.example.com      => 192.168.1.30:443
+#> home.example.com          => 192.168.1.30:443
+#> admin.home.example.com    => DENY
+#> random.com                => DENY
+
+global:
+  idle_timeout: 3600          # long-lived sessions (NAS, Home Assistant websockets)
+
+listeners:
+  - name: https
+    bind: [0.0.0.0]
+    port: 443
+
+routes:
+  - listener: https
+    rules:
+      - domain: nas.home.example.com
+        target: "192.168.1.10:5001"
+
+      - domain: photos.home.example.com
+        target: "192.168.1.10:2342"
+
+      - domain: ha.home.example.com
+        target: "192.168.1.20:8123"
+
+      - domain: vpn.home.example.com
+        target: "192.168.1.1:4443"
+
+      # Never expose the admin UI. A literal name always wins, so this holds wherever
+      # the rule stands and whatever broader allow rules are added later.
+      - domain: admin.home.example.com
+        action: deny
+
+      # The site itself, with and without www: one rule per name.
+      - domain: home.example.com
+        target: "192.168.1.30:443"
+
+      - domain: www.home.example.com
+        target: "192.168.1.30:443"
+
+      - domain: $anything_else
+        action: deny

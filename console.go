@@ -71,29 +71,20 @@ type Console struct {
 	srv     *Server
 	addr    string       // where it is reached, for the log
 	handler http.Handler // every request, whether on its own port or through its rule
-	served  string       // what it was started with: plain HTTP addresses, or "tls"
 
-	mu           sync.Mutex
-	verifyMu     sync.Mutex // serialises deliberately expensive password checks
-	hash         string
-	secureCookie bool
-	hostnames    map[string]bool
-	sessions     map[string]*session
-	failures     int
-	lockedUntil  time.Time
+	mu          sync.Mutex
+	verifyMu    sync.Mutex // serialises deliberately expensive password checks
+	hash        string
+	domain      string // the only name requests may carry
+	sessions    map[string]*session
+	failures    int
+	lockedUntil time.Time
 
 	rules *ruleState // live state pushed to the rules page
 }
 
 func (s *Server) startConsole(cfg *ConsoleConfig) error {
-	var lns []net.Listener
-	if !cfg.TLS() {
-		var err error
-		if lns, err = bindListener(&Listener{Binds: cfg.Binds, Port: cfg.Port}); err != nil {
-			return err
-		}
-	}
-	c := &Console{srv: s, sessions: map[string]*session{}, rules: newRuleState(), served: consoleServed(cfg)}
+	c := &Console{srv: s, sessions: map[string]*session{}, rules: newRuleState()}
 	c.update(cfg)
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(consoleFiles, "console")
@@ -146,36 +137,12 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	})
 	c.handler = c.guard(root)
 	s.console = c
-	if cfg.TLS() {
-		rule := s.runtime.Load().cfg.ConsoleRule()
-		c.addr = "https://" + net.JoinHostPort(cfg.Hostname, strconv.Itoa(cfg.Port))
-		logf("console: served at %s%s/ by listener %s (TLS, cert = %s; password required)", c.addr, consolePath, rule.Listener, cfg.Cert)
-		return nil
-	}
-	server := &http.Server{Handler: c.handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
-	for _, ln := range lns {
-		logf("console: listening on http://%s%s/ (plain HTTP; password required)", ln.Addr(), consolePath)
-		go func() {
-			if err := server.Serve(ln); err != nil {
-				errorf("console: stopped: %v", err)
-			}
-		}()
-	}
-	c.addr = "http://" + lns[0].Addr().String()
+	c.addr = "https://" + net.JoinHostPort(cfg.Domain, strconv.Itoa(cfg.Port))
+	logf("console: served at %s%s/ by listener %s on %s (cert: %s; password required)", c.addr, consolePath, cfg.ListenerName(), strings.Join(cfg.Addrs(), ", "), cfg.Cert)
 	return nil
 }
 
-// consoleServed is what of cfg needs a restart to change: the plain HTTP
-// sockets. Served over TLS, the console follows its listener on reload.
-func consoleServed(cfg *ConsoleConfig) string {
-	if cfg.TLS() {
-		return "tls"
-	}
-	return strings.Join(cfg.Addrs(), ", ")
-}
-
-// update applies the reloadable console settings. Its plain HTTP bind and
-// port are not: they need a restart (see consoleServed).
+// update applies the console's settings: its password and domain.
 func (c *Console) update(cfg *ConsoleConfig) {
 	if cfg == nil {
 		return
@@ -192,19 +159,7 @@ func (c *Console) update(cfg *ConsoleConfig) {
 		c.hash = cfg.PasswordHash
 		c.sessions = map[string]*session{}
 	}
-	secure := cfg.SecureCookie || cfg.TLS()
-	if c.secureCookie != secure {
-		// Existing browsers must sign in again to receive the new cookie policy.
-		c.sessions = map[string]*session{}
-	}
-	c.secureCookie = secure
-	c.hostnames = map[string]bool{"localhost": true}
-	for _, h := range cfg.Hostnames {
-		c.hostnames[h] = true
-	}
-	if cfg.Hostname != "" {
-		c.hostnames[cfg.Hostname] = true
-	}
+	c.domain = cfg.Domain
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -227,11 +182,12 @@ func (c *Console) guard(next http.Handler) http.Handler {
 		}
 		host = strings.ToLower(strings.Trim(host, "[]"))
 		c.mu.Lock()
-		known := c.hostnames[host]
+		known := host == c.domain
 		c.mu.Unlock()
-		if !known && net.ParseIP(host) == nil {
-			// A DNS name we were not told about: possibly DNS rebinding.
-			http.Error(w, "unknown host name; add it to hostnames in console.toml", http.StatusForbidden)
+		if !known {
+			// Its rule only routes its domain here; anything else is not a
+			// browser that opened the console (DNS rebinding, a test).
+			http.Error(w, "the console answers to its domain only", http.StatusForbidden)
 			return
 		}
 		h := w.Header()
@@ -359,7 +315,7 @@ func (c *Console) login(w http.ResponseWriter, r *http.Request) {
 	}
 	s := &session{csrf: csrf, expires: time.Now().Add(sessionLifetime)}
 	c.sessions[id] = s
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: consolePath, HttpOnly: true, Secure: c.secureCookie || r.TLS != nil,
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: consolePath, HttpOnly: true, Secure: true,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionLifetime.Seconds())})
 	logf("console: sign-in from %s", r.RemoteAddr)
 	writeJSON(w, 200, map[string]any{"ok": true, "csrf": s.csrf})
@@ -589,7 +545,7 @@ func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 				row["kind"], row["pattern"] = d.Rule.Kind.String(), d.Rule.Source
 			}
 			if d.Allow {
-				row["target"] = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+				row["target"] = routeTarget(d)
 				row["terminated"] = d.Rule.Terminates()
 			}
 			results = append(results, row)

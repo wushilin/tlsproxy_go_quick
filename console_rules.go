@@ -59,58 +59,58 @@ type connView struct {
 }
 
 type ruleView struct {
-	Listener     string            `json:"listener"`
-	Line         int               `json:"line"` // 0: not in the file (deleted while connections remain)
-	Key          string            `json:"key"`
-	Pattern      string            `json:"pattern"`
-	Kind         string            `json:"kind"`
-	Allow        bool              `json:"allow"`
-	Target       string            `json:"target"`
-	Routes       []string          `json:"routes,omitempty"`  // service rules: "/prefix → where"
-	Console      bool              `json:"console,omitempty"` // the console's own rule (console.toml): not in the file, can't be stopped
-	Terminates   bool              `json:"terminates"`
-	Cert         string            `json:"cert"`
-	Proxy        bool              `json:"proxy"`
-	ProxyVersion int               `json:"proxyVersion"`
-	AggSpeed     float64           `json:"aggSpeed"`
-	ConnSpeed    float64           `json:"connSpeed"`
-	Stopped      bool              `json:"stopped"`
-	Running      bool              `json:"running"` // in the configuration the proxy is running
-	Values       map[string]string `json:"values"`
-	Active       int64             `json:"active"`
-	Total        int64             `json:"total"`
-	BytesUp      int64             `json:"bytesUp"`
-	BytesDown    int64             `json:"bytesDown"`
-	ConnCount    int               `json:"connCount"`
-	Connections  []connView        `json:"connections"`
+	Listener     string         `json:"listener"`
+	Line         int            `json:"line"` // 0: not in the file (deleted while connections remain)
+	Key          string         `json:"key"`
+	Pattern      string         `json:"pattern"`
+	Kind         string         `json:"kind"`
+	Allow        bool           `json:"allow"`
+	Target       string         `json:"target"`
+	Routes       []string       `json:"routes,omitempty"`  // service rules: "/prefix → where"
+	Console      bool           `json:"console,omitempty"` // the console's own rule (console.toml): not in the file, can't be stopped
+	Terminates   bool           `json:"terminates"`
+	Cert         string         `json:"cert"`
+	Proxy        bool           `json:"proxy"`
+	ProxyVersion int            `json:"proxyVersion"`
+	AggSpeed     float64        `json:"aggSpeed"`
+	ConnSpeed    float64        `json:"connSpeed"`
+	Stopped      bool           `json:"stopped"`
+	Running      bool           `json:"running"` // in the configuration the proxy is running
+	Values       map[string]any `json:"values"`
+	Active       int64          `json:"active"`
+	Total        int64          `json:"total"`
+	BytesUp      int64          `json:"bytesUp"`
+	BytesDown    int64          `json:"bytesDown"`
+	ConnCount    int            `json:"connCount"`
+	Connections  []connView     `json:"connections"`
 }
 
 type listenerView struct {
-	Name             string            `json:"name"`
-	Line             int               `json:"line"`
-	Removed          bool              `json:"removed,omitempty"`  // gone from the file; its connections remain
-	Redirect         bool              `json:"redirect,omitempty"` // the http_to_https_redirect listener: Start/Stop only
-	Console          bool              `json:"console,omitempty"`  // the console is served here: can't be stopped (line 0: its own listener)
-	Bind             string            `json:"bind"`
-	Port             int               `json:"port"`
-	Addrs            []string          `json:"addrs"` // actually open
-	Running          bool              `json:"running"`
-	Stopped          bool              `json:"stopped"`
-	Error            string            `json:"error,omitempty"`
-	Values           map[string]string `json:"values"`
-	ProxyTrustSource string            `json:"proxyTrustSource"`
-	MaxConnections   int               `json:"maxConnections"`
-	HandshakeTimeout *int              `json:"handshakeTimeout"` // seconds; null = [global]
-	IdleTimeout      *int              `json:"idleTimeout"`
-	HalfCloseTimeout *int              `json:"halfCloseTimeout"`
-	AggSpeed         float64           `json:"aggSpeed"`
-	ConnSpeed        float64           `json:"connSpeed"`
-	Active           int64             `json:"active"`
-	Accepted         int64             `json:"accepted"`
-	Rejected         int64             `json:"rejected"`
-	BytesUp          int64             `json:"bytesUp"`
-	BytesDown        int64             `json:"bytesDown"`
-	Rules            []ruleView        `json:"rules"`
+	Name             string         `json:"name"`
+	Line             int            `json:"line"`
+	Removed          bool           `json:"removed,omitempty"`  // gone from the file; its connections remain
+	Redirect         bool           `json:"redirect,omitempty"` // the http_to_https_redirect listener: Start/Stop only
+	Console          bool           `json:"console,omitempty"`  // the console is served here: can't be stopped (line 0: its own listener)
+	Bind             string         `json:"bind"`
+	Port             int            `json:"port"`
+	Addrs            []string       `json:"addrs"` // actually open
+	Running          bool           `json:"running"`
+	Stopped          bool           `json:"stopped"`
+	Error            string         `json:"error,omitempty"`
+	Values           map[string]any `json:"values"`
+	ProxyTrustSource string         `json:"proxyTrustSource"`
+	MaxConnections   int            `json:"maxConnections"`
+	HandshakeTimeout *int           `json:"handshakeTimeout"` // seconds; null = [global]
+	IdleTimeout      *int           `json:"idleTimeout"`
+	HalfCloseTimeout *int           `json:"halfCloseTimeout"`
+	AggSpeed         float64        `json:"aggSpeed"`
+	ConnSpeed        float64        `json:"connSpeed"`
+	Active           int64          `json:"active"`
+	Accepted         int64          `json:"accepted"`
+	Rejected         int64          `json:"rejected"`
+	BytesUp          int64          `json:"bytesUp"`
+	BytesDown        int64          `json:"bytesDown"`
+	Rules            []ruleView     `json:"rules"`
 }
 
 type statusView struct {
@@ -136,13 +136,14 @@ type consoleState struct {
 
 // parsedFile is the config file as last read, re-read only when it changes.
 type parsedFile struct {
-	mtime  time.Time
-	size   int64
-	view   fileView
-	text   string
-	cfg    *Config // nil when the file does not parse
-	lines  []string
-	blocks map[int]block // header line -> [[host]] or [[listener]] block
+	mtime time.Time
+	size  int64
+	view  fileView
+	text  string
+	cfg   *Config // nil when the file does not parse
+	// What the file says of each rule and listener, by the line its
+	// mapping starts on.
+	rules, listeners map[int]map[string]any
 }
 
 type ruleState struct {
@@ -198,12 +199,8 @@ func (c *Console) configFile() *parsedFile {
 		pf.view.Error = "the config file does not load (" + err.Error() + "); the console shows the running configuration and cannot edit it until the file is fixed"
 	} else {
 		pf.view.Editable = true
-		pf.text, pf.lines, pf.blocks = string(data), strings.Split(string(data), "\n"), map[int]block{}
-		for _, header := range []string{hostHeader, listenerHeader} {
-			for _, b := range sectionBlocks(pf.lines, header) {
-				pf.blocks[b.start+1] = b
-			}
-		}
+		pf.text = string(data)
+		pf.rules, pf.listeners = fileValues(pf.text)
 	}
 	rs.file = pf
 	return pf
@@ -237,20 +234,11 @@ func (c *Console) state() consoleState {
 	if pf.cfg != nil {
 		shown = pf.cfg
 	}
-	values := func(line int) map[string]string {
-		if pf.cfg == nil {
-			return map[string]string{}
+	values := func(m map[int]map[string]any, line int) map[string]any {
+		if v, ok := m[line]; ok && pf.cfg != nil {
+			return v
 		}
-		if b, ok := pf.blocks[line]; ok {
-			return blockValues(pf.lines, b)
-		}
-		return map[string]string{}
-	}
-	ruleValues := func(line int) map[string]string {
-		if b, ok := pf.blocks[line]; ok && pf.cfg != nil {
-			return hostValues(pf.lines, b)
-		}
-		return values(line)
+		return map[string]any{}
 	}
 
 	byRule := map[string][]*ConnState{}
@@ -311,7 +299,7 @@ func (c *Console) state() consoleState {
 	for i := range shown.Listeners {
 		l := &shown.Listeners[i]
 		lv := listenerView{Name: l.Name, Line: l.Line, Bind: l.Bind, Port: l.Port, Console: l.Console,
-			Values: values(l.Line), MaxConnections: l.MaxConnections,
+			Values: values(pf.listeners, l.Line), MaxConnections: l.MaxConnections,
 			HandshakeTimeout: secondsOrNil(l.HandshakeTimeout), IdleTimeout: secondsOrNil(l.IdleTimeout), HalfCloseTimeout: secondsOrNil(l.HalfCloseTimeout),
 			AggSpeed: l.MaxAggregatedSpeed, ConnSpeed: l.MaxSingleConnectionSpeed}
 		if l.ProxyTrustSource != nil {
@@ -324,14 +312,14 @@ func (c *Console) state() consoleState {
 		addListener(lv)
 	}
 	if l := shown.Redirect; l != nil {
-		addListener(listenerView{Name: l.Name, Redirect: true, Bind: l.Bind, Port: l.Port, Values: map[string]string{}})
+		addListener(listenerView{Name: l.Name, Redirect: true, Bind: l.Bind, Port: l.Port, Values: map[string]any{}})
 	}
 	for i := range shown.Rules {
 		r := &shown.Rules[i]
 		v := ruleView{Listener: r.Listener, Line: r.Line, Key: r.Key(), Pattern: r.Source, Kind: r.Kind.String(), Allow: r.Allow,
 			Terminates: r.Terminates(), Cert: r.Cert, Proxy: r.Proxy, ProxyVersion: r.ProxyVersion,
 			AggSpeed: r.MaxAggregatedSpeed, ConnSpeed: r.MaxSingleConnectionSpeed,
-			Stopped: stopped[r.Key()], Running: running[r.Key()], Values: ruleValues(r.Line)}
+			Stopped: stopped[r.Key()], Running: running[r.Key()], Values: values(pf.rules, r.Line)}
 		switch {
 		case r.Console:
 			v.Target, v.Console = "the console", true
@@ -353,7 +341,7 @@ func (c *Console) state() consoleState {
 	if shown.Redirect != nil {
 		lv := &listeners[index[shown.Redirect.Name]]
 		lv.Rules = append(lv.Rules, view(ruleView{Listener: shown.Redirect.Name, Key: redirectKey, Pattern: redirectPattern, Kind: "redirect",
-			Allow: true, Target: "https://", Running: rt.cfg.Redirect != nil, Values: map[string]string{}}))
+			Allow: true, Target: "https://", Running: rt.cfg.Redirect != nil, Values: map[string]any{}}))
 	}
 	// Connections of a rule (or listener) that is gone still show up.
 	var orphans []string
@@ -366,14 +354,14 @@ func (c *Console) state() consoleState {
 	for _, key := range orphans {
 		name := ruleListener[key]
 		if _, ok := index[name]; !ok {
-			addListener(listenerView{Name: name, Removed: true, Values: map[string]string{}})
+			addListener(listenerView{Name: name, Removed: true, Values: map[string]any{}})
 		}
 		pattern := rulePattern[key]
 		if pattern == "" {
 			pattern = key
 		}
 		lv := &listeners[index[name]]
-		lv.Rules = append(lv.Rules, view(ruleView{Listener: name, Key: key, Pattern: pattern, Kind: "removed", Values: map[string]string{}}))
+		lv.Rules = append(lv.Rules, view(ruleView{Listener: name, Key: key, Pattern: pattern, Kind: "removed", Values: map[string]any{}}))
 	}
 	host, _ := os.Hostname()
 	return consoleState{
@@ -573,7 +561,7 @@ type ruleEditRequest struct {
 	Line      int
 	BaseHash  string
 	BaseMtime string
-	Values    map[string]string
+	Values    map[string]any
 	SNIs      []string // validate only: names to route through the edited config
 }
 
@@ -582,7 +570,7 @@ func (c *Console) ruleDelete(w http.ResponseWriter, r *http.Request) { c.ruleEdi
 
 // ruleValidate is the editor's dry run, called as the user types: it applies
 // the values to the file as it is now and reports whether the result loads,
-// the [[host]] block that would be written, warnings, and where sample names
+// the rule as it would be written, warnings, and where sample names
 // would be routed. Nothing is written.
 func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 	var req ruleEditRequest
@@ -598,24 +586,13 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{"ok": false, "stale": req.Line > 0 && (req.BaseMtime != ver.Mtime || req.BaseHash != ver.Hash)}
-	full, err := editRules(string(onDisk), req.Line, req.Values, false)
+	full, block, at, err := editRules(string(onDisk), req.Line, req.Values, false)
 	if err != nil {
 		resp["error"] = err.Error()
 		writeJSON(w, 200, resp)
 		return
 	}
-	// The block as it would be written: find it in the edited text.
-	lines := strings.Split(full, "\n")
-	blocks := hostBlocks(lines)
-	b := blocks[len(blocks)-1] // a new rule goes after the last one
-	if req.Line > 0 {
-		for _, x := range blocks {
-			if x.start == req.Line-1 {
-				b = x
-			}
-		}
-	}
-	resp["block"] = strings.Join(lines[b.start:b.end], "\n")
+	resp["block"] = block
 	cfg, err := c.srv.loadConfig(full)
 	if err == nil {
 		err = c.srv.certs.Check(cfg)
@@ -628,7 +605,7 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 	// Route with the rules of the edited rule's listener.
 	eff := cfg
 	for i := range cfg.Rules {
-		if cfg.Rules[i].Line == b.start+1 {
+		if cfg.Rules[i].Line == at {
 			eff = cfg.ForListener(cfg.Listener(cfg.Rules[i].Listener))
 		}
 	}
@@ -636,12 +613,12 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 	for _, sni := range req.SNIs {
 		name := strings.ToLower(strings.TrimSpace(sni))
 		d := eff.RouteExcept(name, c.srv.stoppedRules())
-		row := map[string]any{"sni": sni, "allow": d.Allow, "error": d.Err, "thisRule": d.RuleLine == b.start+1}
+		row := map[string]any{"sni": sni, "allow": d.Allow, "error": d.Err, "thisRule": d.RuleLine == at}
 		if d.Rule != nil {
 			row["pattern"], row["kind"], row["ruleLine"] = d.Rule.Source, d.Rule.Kind.String(), d.RuleLine
 		}
 		if d.Allow {
-			row["target"] = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+			row["target"] = routeTarget(d)
 		}
 		routes = append(routes, row)
 	}
@@ -669,7 +646,7 @@ func (c *Console) ruleEdit(w http.ResponseWriter, r *http.Request, del bool) {
 		fail(w, http.StatusConflict, "not saved: the config file changed after this page loaded it. The rules shown are now up to date; try again")
 		return
 	}
-	full, err := editRules(string(onDisk), req.Line, req.Values, del)
+	full, _, _, err := editRules(string(onDisk), req.Line, req.Values, del)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -698,12 +675,12 @@ type listenerEditRequest struct {
 	Line      int
 	BaseHash  string
 	BaseMtime string
-	Values    map[string]string
+	Values    map[string]any
 }
 
 // listenerChange applies a listener edit to the file as it is now. The
 // caller holds configFileMu if it goes on to write.
-func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []byte, full string, at int, notes []string, cfg *Config, ver fileVersion, err error) {
+func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []byte, full, block string, notes []string, cfg *Config, ver fileVersion, err error) {
 	if onDisk, ver, err = c.readConfig(); err != nil {
 		return
 	}
@@ -727,7 +704,7 @@ func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []by
 			}
 		}
 	}
-	if full, at, notes, err = editListeners(string(onDisk), req.Line, req.Values, del); err != nil {
+	if full, block, _, notes, err = editListeners(string(onDisk), req.Line, req.Values, del); err != nil {
 		return
 	}
 	if cfg, err = c.srv.loadConfig(full); err == nil {
@@ -745,15 +722,9 @@ func (c *Console) listenerValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	configFileMu.Lock()
-	_, full, at, notes, cfg, ver, err := c.listenerChange(req, false)
+	_, _, block, notes, cfg, ver, err := c.listenerChange(req, false)
 	configFileMu.Unlock()
-	resp := map[string]any{"ok": err == nil, "stale": req.Line > 0 && (req.BaseMtime != ver.Mtime || req.BaseHash != ver.Hash), "notes": notes}
-	if full != "" {
-		lines := strings.Split(full, "\n")
-		if b := blockAt(sectionBlocks(lines, listenerHeader), at); b != nil {
-			resp["block"] = strings.Join(lines[b.start:b.end], "\n")
-		}
-	}
+	resp := map[string]any{"ok": err == nil, "stale": req.Line > 0 && (req.BaseMtime != ver.Mtime || req.BaseHash != ver.Hash), "notes": notes, "block": block}
 	if err != nil {
 		resp["error"] = err.Error()
 	} else {
@@ -865,4 +836,15 @@ func (c *Console) commit(w http.ResponseWriter, r *http.Request, onDisk []byte, 
 	c.poke()
 	writeJSON(w, 200, map[string]any{"ok": true, "hash": now.Hash, "mtime": now.Mtime, "backup": filepath.Base(backup),
 		"warnings": cfg.Warnings, "problems": problems})
+}
+
+// routeTarget is where an allowed decision goes, as the console shows it.
+func routeTarget(d Decision) string {
+	switch {
+	case d.Rule != nil && d.Rule.Console:
+		return "the console"
+	case d.Rule != nil && d.Rule.Serves():
+		return "served here"
+	}
+	return net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
 }

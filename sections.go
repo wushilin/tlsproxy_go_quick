@@ -1,421 +1,535 @@
 package main
 
-// Editing the config file one section at a time, for the console: a
-// [[host]] or [[listener]] block is rewritten in place, so comments, order
-// and spacing elsewhere survive.
+// Editing config.yaml one rule or listener at a time, for the console: the
+// file is read into its YAML tree, the one item changes there, and the tree
+// is written back, so comments and the rest of the file survive (spacing is
+// the library's).
+//
+// Values come from the console as JSON: a string, a list of strings, or
+// for serve a list of objects. An empty value or list removes the key.
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
-	"maps"
-	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 )
 
-// hostKeys and listenerKeys are each section's options, in the order a new
-// block lists them.
+// ruleKeys and listenerKeys are each item's keys, in the order a new item
+// lists them. listener is not a key of a rule in the file: it is the routes
+// item the rule sits in.
 var (
-	hostKeys = []string{"listener", "pattern", "action", "target_host", "target_port",
-		"max_aggregated_speed", "max_single_connection_speed", "proxy", "proxy_version",
-		"cert", "cert_domains", "cert_validate_script", "cert_validate_args", "upstream_tls", "upstream_tls_verify", "upstream_sni"}
+	ruleKeys = []string{"domain", "action", "target", "cert", "cert_domains", "cert_validate_script", "cert_validate_args",
+		"upstream_tls", "upstream_tls_verify", "upstream_sni", "proxy", "max_aggregated_speed", "max_single_connection_speed", "serve"}
 	listenerKeys = []string{"name", "bind", "port", "proxy_trust_source", "max_connections",
 		"handshake_timeout", "idle_timeout", "half_close_timeout", "max_aggregated_speed", "max_single_connection_speed"}
+	serveKeys = []string{"type", "prefix", "target", "base_dir", "strip_prefix", "force_host", "tls_verify", "basic_auth"}
 )
 
-const (
-	hostHeader     = "[[host]]"
-	listenerHeader = "[[listener]]"
-)
+// yamlDoc is a config.yaml being edited.
+type yamlDoc struct {
+	doc  *yaml.Node
+	root *yaml.Node // the top mapping
+}
 
-func isComment(l string) bool { return strings.HasPrefix(strings.TrimSpace(l), "#") }
-func isBlank(l string) bool   { return strings.TrimSpace(l) == "" }
-func isHeader(l string) bool  { return strings.HasPrefix(strings.TrimSpace(l), "[") }
+func loadDoc(text string) (*yamlDoc, error) {
+	doc, err := parseYAML(text)
+	if err != nil {
+		return nil, err
+	}
+	return &yamlDoc{doc: doc, root: doc.Content[0]}, nil
+}
 
-// block is the lines [start, end) of one section: its header through its
-// last key, without the blank lines and the comments that lead into the
-// next section.
-type block struct{ start, end int }
+// String writes the tree back, indented by two.
+func (d *yamlDoc) String() string { return encodeNode(d.doc) }
 
-// sectionBlocks finds every section whose header is header ("[[host]]",
-// "[global]").
-func sectionBlocks(lines []string, header string) []block {
-	var out []block
-	for i := 0; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) != header {
+func encodeNode(n *yaml.Node) string {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	enc.Encode(n)
+	enc.Close()
+	return buf.String()
+}
+
+// mapGet is the value of key in mapping m, nil if absent.
+func mapGet(m *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// section is the top-level list key (listeners, routes), made if missing.
+func (d *yamlDoc) section(key string) *yaml.Node {
+	if v := mapGet(d.root, key); v != nil {
+		if v.Kind != yaml.SequenceNode { // "routes:" with nothing after it
+			*v = yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		}
+		return v
+	}
+	v := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	d.root.Content = append(d.root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, v)
+	return v
+}
+
+// ruleAt finds the rule whose mapping starts on line, with the routes item
+// holding it.
+func (d *yamlDoc) ruleAt(line int) (group, rules, rule *yaml.Node) {
+	routes := mapGet(d.root, "routes")
+	if routes == nil || routes.Kind != yaml.SequenceNode {
+		return nil, nil, nil
+	}
+	for _, g := range routes.Content {
+		rs := mapGet(g, "rules")
+		if rs == nil || rs.Kind != yaml.SequenceNode {
 			continue
 		}
-		next := i + 1
-		for next < len(lines) && !isHeader(lines[next]) {
-			next++
-		}
-		end := next
-		if next < len(lines) {
-			for end-1 > i && isComment(lines[end-1]) {
-				end-- // a comment right above the next header describes that section
+		for _, r := range rs.Content {
+			if r.Line == line && r.Kind == yaml.MappingNode {
+				return g, rs, r
 			}
 		}
-		for end-1 > i && isBlank(lines[end-1]) {
-			end--
+	}
+	return nil, nil, nil
+}
+
+// groupFor is the routes item for a listener, made at the end if missing.
+func (d *yamlDoc) groupFor(listener string) *yaml.Node {
+	routes := d.section("routes")
+	for _, g := range routes.Content {
+		if l := mapGet(g, "listener"); l != nil && l.Value == listener {
+			if mapGet(g, "rules") == nil {
+				g.Content = append(g.Content, scalar("rules"), &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"})
+			}
+			return g
 		}
-		out = append(out, block{i, end})
-		i = next - 1
+	}
+	g := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+		scalar("listener"), scalar(listener), scalar("rules"), {Kind: yaml.SequenceNode, Tag: "!!seq"}}}
+	routes.Content = append(routes.Content, g)
+	return g
+}
+
+// scalar is a YAML value for s: a number or true/false as one, anything
+// else a string (quoted when it has to be).
+func scalar(s string) *yaml.Node {
+	tag := "!!str"
+	if _, err := strconv.ParseUint(s, 10, 63); err == nil && (s == "0" || !strings.HasPrefix(s, "0")) {
+		tag = "!!int"
+	} else if s == "true" || s == "false" {
+		tag = "!!bool"
+	}
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: s}
+}
+
+// valueNode turns one value from the console into YAML; nil means remove
+// the key.
+func valueNode(key string, v any) (*yaml.Node, error) {
+	switch x := v.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		x = strings.TrimSpace(x)
+		if strings.ContainsAny(x, "\r\n") {
+			return nil, fmt.Errorf("%s: values cannot span lines", key)
+		}
+		if x == "" {
+			return nil, nil
+		}
+		return scalar(x), nil
+	case []any:
+		if len(x) == 0 {
+			return nil, nil
+		}
+		seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		if key == "serve" {
+			seq.Style = 0
+			for i, it := range x {
+				m, ok := it.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("serve entry %d is not an object", i+1)
+				}
+				entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Style: yaml.FlowStyle}
+				if err := setMapping(entry, serveKeys, m, true); err != nil {
+					return nil, fmt.Errorf("serve entry %d: %v", i+1, err)
+				}
+				if len(entry.Content) > 0 {
+					seq.Content = append(seq.Content, entry)
+				}
+			}
+			if len(seq.Content) == 0 {
+				return nil, nil
+			}
+			return seq, nil
+		}
+		seq.Style = yaml.FlowStyle
+		for _, it := range x {
+			s, ok := it.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s: a list of values", key)
+			}
+			if s = strings.TrimSpace(s); s != "" {
+				seq.Content = append(seq.Content, scalar(s))
+			}
+		}
+		if len(seq.Content) == 0 {
+			return nil, nil
+		}
+		return seq, nil
+	case bool:
+		return scalar(strconv.FormatBool(x)), nil
+	case float64:
+		return scalar(strconv.FormatFloat(x, 'f', -1, 64)), nil
+	}
+	return nil, fmt.Errorf("%s: unexpected value %v", key, v)
+}
+
+// setMapping applies values to mapping m: a changed key keeps its place
+// and comments, an empty one goes, a new one is added in keys order. With
+// strict, every value's key must be in keys.
+func setMapping(m *yaml.Node, keys []string, values map[string]any, strict bool) error {
+	for k := range values {
+		if strict && !slices.Contains(keys, k) {
+			return fmt.Errorf("unknown key %q", k)
+		}
+	}
+	for _, k := range keys {
+		v, given := values[k]
+		if !given {
+			continue // not part of this edit
+		}
+		node, err := valueNode(k, v)
+		if err != nil {
+			return err
+		}
+		i := -1
+		for j := 0; j+1 < len(m.Content); j += 2 {
+			if m.Content[j].Value == k {
+				i = j
+				break
+			}
+		}
+		switch {
+		case node == nil && i >= 0:
+			m.Content = slices.Delete(m.Content, i, i+2)
+		case node == nil:
+		case i >= 0:
+			if old := m.Content[i+1]; sameValue(old, node) {
+				continue // unchanged: keep it as written
+			} else {
+				node.LineComment = old.LineComment
+			}
+			m.Content[i+1] = node
+		default:
+			// After the last key that comes before it in keys order.
+			at := len(m.Content)
+			for j := 0; j+1 < len(m.Content); j += 2 {
+				if slices.Index(keys, m.Content[j].Value) > slices.Index(keys, k) {
+					at = j
+					break
+				}
+			}
+			m.Content = slices.Insert(m.Content, at, scalar(k), node)
+			m.Content[at].Tag = "!!str"
+		}
+	}
+	return nil
+}
+
+// sameValue reports whether two value nodes read the same.
+func sameValue(a, b *yaml.Node) bool {
+	if a.Kind != b.Kind {
+		return false
+	}
+	if a.Kind == yaml.ScalarNode {
+		return a.Value == b.Value
+	}
+	if len(a.Content) != len(b.Content) {
+		return false
+	}
+	for i := range a.Content {
+		if !sameValue(a.Content[i], b.Content[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// nodeValues reads an item's keys for the console: a scalar as text, a
+// list of scalars as a list, serve as a list of objects.
+func nodeValues(m *yaml.Node) map[string]any {
+	out := map[string]any{}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k, v := m.Content[i].Value, m.Content[i+1]
+		out[k] = nodeValue(v)
 	}
 	return out
 }
 
-func hostBlocks(lines []string) []block { return sectionBlocks(lines, hostHeader) }
-
-// blockValues reads the options of a block as raw strings.
-func blockValues(lines []string, b block) map[string]string {
-	vals := map[string]string{}
-	for _, l := range lines[b.start+1 : b.end] {
-		if isBlank(l) || isComment(l) {
-			continue
+func nodeValue(v *yaml.Node) any {
+	switch v.Kind {
+	case yaml.ScalarNode:
+		if v.Tag == "!!null" {
+			return ""
 		}
-		if k, v, ok := strings.Cut(l, "="); ok {
-			k = strings.TrimSpace(k)
-			if k == "cert_validate_args" { // an array: kept as TOML text, comment dropped
-				if js, err := arrayValue(v); err == nil {
-					vals[k] = tomlArray(js)
-				}
-			} else if val, err := parseValue(v); err == nil {
-				vals[k] = val
-			}
+		return v.Value
+	case yaml.SequenceNode:
+		var items []any
+		for _, it := range v.Content {
+			items = append(items, nodeValue(it))
 		}
+		return items
+	case yaml.MappingNode:
+		return nodeValues(v)
 	}
-	return vals
+	return ""
 }
 
-// fmtValue writes a value so that parseValue reads it back unchanged: as it
-// is when that is safe, double-quoted otherwise.
-var plainValue = regexp.MustCompile(`^[A-Za-z0-9._:/*+=%,${}-]+$`)
-
-func fmtValue(v string) (string, error) {
-	if strings.ContainsAny(v, "\r\n\x00") {
-		return "", fmt.Errorf("values cannot span lines")
-	}
-	// An array of strings (cert_validate_args) is written as it is.
-	if strings.HasPrefix(v, "[") {
-		if _, err := arrayValue(v); err == nil {
-			return v, nil
-		}
-	}
-	// Anything but a plain token is written as a quoted TOML string.
-	if !plainValue.MatchString(v) {
-		return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\t", `\t`).Replace(v) + `"`, nil
-	}
-	return v, nil
-}
-
-// tomlArray writes a JSON array of strings (from arrayValue) as TOML.
-func tomlArray(js string) string {
-	var items []string
-	json.Unmarshal([]byte(js), &items)
-	out := make([]string, len(items))
-	for i, s := range items {
-		out[i] = `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\t", `\t`).Replace(s) + `"`
-	}
-	return "[" + strings.Join(out, ", ") + "]"
-}
-
-// newBlock is a fresh section with the non-empty values, in keys order.
-func newBlock(header string, keys []string, values map[string]string) ([]string, error) {
-	out := []string{header}
-	for _, k := range keys {
-		if v := values[k]; v != "" {
-			fv, err := fmtValue(v)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %v", k, err)
-			}
-			out = append(out, k+" = "+fv)
-		}
-	}
-	return out, nil
-}
-
-// setValues rewrites the option lines of b: a value replaces the line of its
-// key (or is added after the last option), "" removes it. Lines that keep
-// their value are left alone, inline comments included.
-func setValues(lines []string, b block, keys []string, values map[string]string) ([]string, error) {
-	old := blockValues(lines, b)
-	out := []string{lines[b.start]}
-	lastKey := 0 // index in out of the last option line, where new options go
-	written := map[string]bool{}
-	for _, l := range lines[b.start+1 : b.end] {
-		k, _, isKV := strings.Cut(l, "=")
-		k = strings.TrimSpace(k)
-		if isBlank(l) || isComment(l) || !isKV {
-			out = append(out, l)
-			continue
-		}
-		v, set := values[k]
-		switch {
-		case !set:
-			out = append(out, l) // not part of this edit
-		case written[k]:
-			continue // a repeated option: its first line carries the value now
-		case v == "":
-			written[k] = true
-			continue // removed
-		case v == old[k]:
-			out = append(out, l) // unchanged: keep the line, inline comment included
-		default:
-			fv, err := fmtValue(v)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %v", k, err)
-			}
-			indent := l[:len(l)-len(strings.TrimLeft(l, " \t"))]
-			out = append(out, indent+k+" = "+fv)
-		}
-		written[k] = true
-		lastKey = len(out) - 1
-	}
-	var added []string
-	for _, k := range keys {
-		if v := values[k]; v != "" && !written[k] {
-			fv, err := fmtValue(v)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %v", k, err)
-			}
-			added = append(added, k+" = "+fv)
-		}
-	}
-	out = slices.Insert(out, lastKey+1, added...)
-	return slices.Concat(lines[:b.start], out, lines[b.end:]), nil
-}
-
-// deleteBlock removes b, the comment right above it and one blank line.
-func deleteBlock(lines []string, b block) []string {
-	start := b.start
-	for start > 0 && isComment(lines[start-1]) {
-		start-- // the comment that introduces the section goes with it
-	}
-	rest := lines[b.end:]
-	if start > 0 && isBlank(lines[start-1]) && (len(rest) == 0 || isBlank(rest[0])) {
-		start-- // don't leave two blank lines behind
-	}
-	return slices.Concat(lines[:start], rest)
-}
-
-// insertBlock puts a new section at line index at (the start of a section,
-// before its introducing comment, or len(lines)), separated by blank lines.
-func insertBlock(lines []string, at int, sec []string) []string {
-	for at > 0 && at < len(lines) && isComment(lines[at-1]) {
-		at-- // keep a section's comment attached to it
-	}
-	if at == len(lines) {
-		body := lines
-		for len(body) > 0 && isBlank(body[len(body)-1]) {
-			body = body[:len(body)-1]
-		}
-		return slices.Concat(body, []string{""}, sec, []string{""})
-	}
-	return slices.Concat(lines[:at], sec, []string{""}, lines[at:])
-}
-
-// blockAt finds the block whose header is on line (1-based).
-func blockAt(blocks []block, line int) *block {
-	for i := range blocks {
-		if blocks[i].start == line-1 {
-			return &blocks[i]
-		}
-	}
-	return nil
-}
-
-func checkKeys(keys []string, values map[string]string, section string) error {
-	for k := range values {
-		if !slices.Contains(keys, k) {
-			return fmt.Errorf("unknown %s option %q", section, k)
-		}
-	}
-	return nil
-}
-
-// editRules applies one change to the config text: values for the rule
-// whose header is on line (1-based; 0 adds a new rule), or its deletion.
-// An empty value removes that option.
-func editRules(text string, line int, values map[string]string, del bool) (string, error) {
-	routes, setRoutes := values[serviceRulesValue]
-	if setRoutes {
-		values = maps.Clone(values)
-		delete(values, serviceRulesValue)
-	}
-	if err := checkKeys(hostKeys, values, hostHeader); err != nil {
-		return "", err
-	}
-	routeLines, err := serviceRuleLines(routes)
-	if err != nil {
-		return "", err
-	}
-	lines := strings.Split(text, "\n")
-	blocks := hostBlocks(lines)
-	b := blockAt(blocks, line)
-	if line != 0 && b == nil {
-		return "", fmt.Errorf("there is no [[host]] rule at line %d any more; reload and try again", line)
-	}
-	switch {
-	case del:
-		return strings.Join(deleteBlock(lines, *b), "\n"), nil
-	case line == 0:
-		sec, err := newBlock(hostHeader, hostKeys, values)
-		if err != nil {
-			return "", err
-		}
-		sec = append(sec, routeLines...)
-		if len(blocks) == 0 {
-			return strings.Join(insertBlock(lines, len(lines), sec), "\n"), nil
-		}
-		at := blocks[len(blocks)-1].end // after the last rule: new rules sit with the others
-		return strings.Join(slices.Concat(lines[:at], []string{""}, sec, lines[at:]), "\n"), nil
-	}
-	out, err := setValues(lines, *b, hostKeys, values)
-	if err != nil || !setRoutes {
-		return strings.Join(out, "\n"), err
-	}
-	return strings.Join(replaceServiceRules(out, *blockAt(hostBlocks(out), line), routeLines), "\n"), nil
-}
-
-// serviceRulesValue is the rule editor's one text box for a rule's
-// service_rule keys: one per line, written back as service_rule1, 2, ...
-const serviceRulesValue = "service_rules"
-
-// serviceRuleLines turns the text box into service_rule lines, checking
-// each the way the config loader will. Blank lines and # comments are left
-// out.
-func serviceRuleLines(text string) ([]string, error) {
-	var out []string
-	for i, l := range strings.Split(text, "\n") {
-		if l = strings.TrimSpace(l); l == "" || strings.HasPrefix(l, "#") {
-			continue
-		}
-		key := fmt.Sprintf("service_rule%d", len(out)+1)
-		if _, err := parseServiceRule(key, l, 0); err != nil {
-			return nil, fmt.Errorf("service rule on line %d: %v", i+1, err)
-		}
-		fv, err := fmtValue(l)
-		if err != nil {
-			return nil, fmt.Errorf("service rule on line %d: %v", i+1, err)
-		}
-		out = append(out, key+" = "+fv)
-	}
-	return out, nil
-}
-
-// replaceServiceRules swaps a block's service_rule lines for routes, put
-// where the first one was (after the last option if there was none).
-func replaceServiceRules(lines []string, b block, routes []string) []string {
-	out := []string{lines[b.start]}
-	at := -1
-	for _, l := range lines[b.start+1 : b.end] {
-		if k, _, ok := strings.Cut(l, "="); ok && !isComment(l) && isServiceRuleKey(strings.TrimSpace(k)) {
-			if at < 0 {
-				at = len(out)
-			}
-			continue
-		}
-		out = append(out, l)
-	}
-	if at < 0 {
-		at = len(out)
-		for at > 1 && (isBlank(out[at-1]) || isComment(out[at-1])) {
-			at--
-		}
-	}
-	out = slices.Insert(out, at, routes...)
-	return slices.Concat(lines[:b.start], out, lines[b.end:])
-}
-
-// hostValues is blockValues for a [[host]] block, with its service_rule
-// keys gathered into the editor's one text box (each key's last value, in
-// the order the keys first appear).
-func hostValues(lines []string, b block) map[string]string {
-	vals := blockValues(lines, b)
-	var order []string
-	last := map[string]string{}
-	for _, l := range lines[b.start+1 : b.end] {
-		k, v, ok := strings.Cut(l, "=")
-		if k = strings.TrimSpace(k); !ok || isComment(l) || !isServiceRuleKey(k) {
-			continue
-		}
-		val, err := parseValue(v)
-		if err != nil {
-			continue
-		}
-		if _, seen := last[k]; !seen {
-			order = append(order, k)
-		}
-		last[k] = val
-		delete(vals, k)
-	}
-	if len(order) > 0 {
-		var text []string
-		for _, k := range order {
-			text = append(text, last[k])
-		}
-		vals[serviceRulesValue] = strings.Join(text, "\n")
-	}
-	return vals
-}
-
-func orDefault(v, def string) string {
-	if v == "" {
-		return def
+// ruleValues reads a rule for the console, with its routes item's listener.
+func ruleValues(group, rule *yaml.Node) map[string]any {
+	v := nodeValues(rule)
+	if l := mapGet(group, "listener"); l != nil {
+		v["listener"] = l.Value
 	}
 	return v
 }
 
-// editListeners applies one change to a [[listener]]: values for the one on
-// line (0 adds one), or its deletion. A rename retags the rules that named
-// the old name. It returns the new text, the line of the edited
-// section (0 after a delete) and notes on any change beyond the section.
-func editListeners(text string, line int, values map[string]string, del bool) (string, int, []string, error) {
-	if err := checkKeys(listenerKeys, values, listenerHeader); err != nil {
-		return "", 0, nil, err
+// editRules applies one change to the config text: values for the rule
+// whose mapping starts on line (0 adds a new rule), or its deletion. It
+// returns the new text, the rule as written and the line it starts on in
+// the new text (empty and 0 after a delete).
+func editRules(text string, line int, values map[string]any, del bool) (string, string, int, error) {
+	full, block, rule, d, err := editRule(text, line, values, del)
+	if err != nil || rule == nil {
+		return full, "", 0, err
 	}
-	var notes []string
-	lines := strings.Split(text, "\n")
-	blocks := sectionBlocks(lines, listenerHeader)
-	if line == 0 { // add, after the last listener
-		sec, err := newBlock(listenerHeader, listenerKeys, values)
-		if err != nil {
-			return "", 0, nil, err
-		}
-		at := len(lines)
-		if len(blocks) > 0 {
-			at = blocks[len(blocks)-1].end
-		} else if hb := hostBlocks(lines); len(hb) > 0 {
-			at = hb[0].start
-		}
-		lines = slices.Concat(lines[:at], []string{""}, sec, lines[at:])
-		return strings.Join(lines, "\n"), at + 2, notes, nil
-	}
-	b := blockAt(blocks, line)
-	if b == nil {
-		return "", 0, nil, fmt.Errorf("there is no [[listener]] at line %d any more; reload and try again", line)
-	}
-	if del {
-		return strings.Join(deleteBlock(lines, *b), "\n"), 0, notes, nil
-	}
-	oldName := blockValues(lines, *b)["name"]
-	out, err := setValues(lines, *b, listenerKeys, values)
+	return full, block, d.lineAfter(full, rule), nil
+}
+
+// lineAfter is where node, a rule or listener of d, starts in full, the
+// text d was written as.
+func (d *yamlDoc) lineAfter(full string, node *yaml.Node) int {
+	again, err := loadDoc(full)
 	if err != nil {
-		return "", 0, nil, err
+		return 0
 	}
-	if newName, ok := values["name"]; ok && newName != "" && newName != oldName && oldName != "" {
-		retagged := 0
-		for _, hb := range hostBlocks(out) {
-			if blockValues(out, hb)["listener"] == oldName {
-				if out, err = setValues(out, hb, hostKeys, map[string]string{"listener": newName}); err != nil {
-					return "", 0, nil, err
+	for _, key := range []string{"listeners", "routes"} {
+		a, b := mapGet(d.root, key), mapGet(again.root, key)
+		if a == nil || b == nil {
+			continue
+		}
+		for i, item := range a.Content {
+			if item == node && i < len(b.Content) {
+				return b.Content[i].Line
+			}
+			ra, rb := mapGet(item, "rules"), (*yaml.Node)(nil)
+			if i < len(b.Content) {
+				rb = mapGet(b.Content[i], "rules")
+			}
+			if ra == nil || rb == nil {
+				continue
+			}
+			for j, r := range ra.Content {
+				if r == node && j < len(rb.Content) {
+					return rb.Content[j].Line
 				}
-				retagged++
 			}
 		}
-		if retagged > 0 {
-			notes = append(notes, fmt.Sprintf("Renames the listener in its %d rule(s): listener = %s becomes listener = %s", retagged, oldName, newName))
+	}
+	return 0
+}
+
+func editRule(text string, line int, values map[string]any, del bool) (string, string, *yaml.Node, *yamlDoc, error) {
+	d, err := loadDoc(text)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	listener, _ := values["listener"].(string)
+	values = without(values, "listener")
+	var rule *yaml.Node
+	switch {
+	case line == 0 && !del:
+		if listener == "" {
+			return "", "", nil, nil, fmt.Errorf("listener is required")
+		}
+		rule = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		if err := setMapping(rule, ruleKeys, values, true); err != nil {
+			return "", "", nil, nil, err
+		}
+		rules := mapGet(d.groupFor(listener), "rules")
+		rules.Content = append(rules.Content, rule)
+	default:
+		group, rules, r := d.ruleAt(line)
+		if r == nil {
+			return "", "", nil, nil, fmt.Errorf("there is no rule at line %d any more; reload and try again", line)
+		}
+		if del {
+			rules.Content = slices.DeleteFunc(rules.Content, func(n *yaml.Node) bool { return n == r })
+			d.dropEmptyGroup(group)
+			return d.String(), "", nil, d, nil
+		}
+		if err := setMapping(r, ruleKeys, values, true); err != nil {
+			return "", "", nil, nil, err
+		}
+		rule = r
+		if l := mapGet(group, "listener"); listener != "" && (l == nil || l.Value != listener) {
+			// Another listener: the rule moves to that listener's routes item.
+			rules.Content = slices.DeleteFunc(rules.Content, func(n *yaml.Node) bool { return n == r })
+			d.dropEmptyGroup(group)
+			dst := mapGet(d.groupFor(listener), "rules")
+			dst.Content = append(dst.Content, r)
 		}
 	}
-	return strings.Join(out, "\n"), line, notes, nil
+	return d.String(), encodeNode(rule), rule, d, nil
+}
+
+// dropEmptyGroup removes a routes item that has no rules left.
+func (d *yamlDoc) dropEmptyGroup(group *yaml.Node) {
+	if rs := mapGet(group, "rules"); rs != nil && len(rs.Content) > 0 {
+		return
+	}
+	routes := mapGet(d.root, "routes")
+	routes.Content = slices.DeleteFunc(routes.Content, func(n *yaml.Node) bool { return n == group })
+}
+
+func without(m map[string]any, key string) map[string]any {
+	out := map[string]any{}
+	for k, v := range m {
+		if k != key {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// listenerAt finds the listener whose mapping starts on line.
+func (d *yamlDoc) listenerAt(line int) *yaml.Node {
+	ls := mapGet(d.root, "listeners")
+	if ls == nil || ls.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for _, l := range ls.Content {
+		if l.Line == line && l.Kind == yaml.MappingNode {
+			return l
+		}
+	}
+	return nil
+}
+
+// editListeners applies one change to a listener: values for the one on
+// line (0 adds one), or its deletion. A rename renames it in its routes
+// item too. It returns the new text, the listener as written, the line it
+// starts on in the new text, and notes on any change beyond it.
+func editListeners(text string, line int, values map[string]any, del bool) (string, string, int, []string, error) {
+	full, block, node, notes, d, err := editListener(text, line, values, del)
+	if err != nil || node == nil {
+		return full, "", 0, notes, err
+	}
+	return full, block, d.lineAfter(full, node), notes, nil
+}
+
+func editListener(text string, line int, values map[string]any, del bool) (string, string, *yaml.Node, []string, *yamlDoc, error) {
+	d, err := loadDoc(text)
+	if err != nil {
+		return "", "", nil, nil, nil, err
+	}
+	var notes []string
+	if line == 0 {
+		l := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		if err := setMapping(l, listenerKeys, values, true); err != nil {
+			return "", "", nil, nil, nil, err
+		}
+		ls := d.section("listeners")
+		ls.Content = append(ls.Content, l)
+		return d.String(), encodeNode(l), l, nil, d, nil
+	}
+	l := d.listenerAt(line)
+	if l == nil {
+		return "", "", nil, nil, nil, fmt.Errorf("there is no listener at line %d any more; reload and try again", line)
+	}
+	if del {
+		ls := mapGet(d.root, "listeners")
+		ls.Content = slices.DeleteFunc(ls.Content, func(n *yaml.Node) bool { return n == l })
+		return d.String(), "", nil, nil, d, nil
+	}
+	oldName := ""
+	if n := mapGet(l, "name"); n != nil {
+		oldName = n.Value
+	}
+	if err := setMapping(l, listenerKeys, values, true); err != nil {
+		return "", "", nil, nil, nil, err
+	}
+	if newName, _ := values["name"].(string); newName != "" && newName != oldName && oldName != "" {
+		if routes := mapGet(d.root, "routes"); routes != nil {
+			for _, g := range routes.Content {
+				if n := mapGet(g, "listener"); n != nil && n.Value == oldName {
+					n.Value = newName
+					notes = append(notes, fmt.Sprintf("Renames the listener in its routes: listener: %s becomes listener: %s", oldName, newName))
+				}
+			}
+		}
+	}
+	return d.String(), encodeNode(l), l, notes, d, nil
+}
+
+// fileValues is what the console shows of each rule and listener in the
+// file, by the line its mapping starts on.
+func fileValues(text string) (rules, listeners map[int]map[string]any) {
+	rules, listeners = map[int]map[string]any{}, map[int]map[string]any{}
+	d, err := loadDoc(text)
+	if err != nil {
+		return
+	}
+	if ls := mapGet(d.root, "listeners"); ls != nil {
+		for _, l := range ls.Content {
+			if l.Kind == yaml.MappingNode {
+				listeners[l.Line] = nodeValues(l)
+			}
+		}
+	}
+	if routes := mapGet(d.root, "routes"); routes != nil {
+		for _, g := range routes.Content {
+			if rs := mapGet(g, "rules"); rs != nil {
+				for _, r := range rs.Content {
+					if r.Kind == yaml.MappingNode {
+						rules[r.Line] = ruleValues(g, r)
+					}
+				}
+			}
+		}
+	}
+	return
+}
+
+// sectionValues is a top-level mapping (global, logging) as text values.
+func sectionValues(text, key string) map[string]string {
+	out := map[string]string{}
+	d, err := loadDoc(text)
+	if err != nil {
+		return out
+	}
+	if m := mapGet(d.root, key); m != nil && m.Kind == yaml.MappingNode {
+		for k, v := range nodeValues(m) {
+			out[k] = valueText(v)
+		}
+	}
+	return out
+}
+
+// valueText is a value as one line: a list joined with ", ".
+func valueText(v any) string {
+	if items, ok := v.([]any); ok {
+		var s []string
+		for _, it := range items {
+			s = append(s, fmt.Sprint(it))
+		}
+		return strings.Join(s, ", ")
+	}
+	return fmt.Sprint(v)
 }

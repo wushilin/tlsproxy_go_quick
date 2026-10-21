@@ -13,6 +13,7 @@ package main
 // the client opens a connection of its own for it.
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -143,7 +144,7 @@ func (s *Server) newServeState(cfg *Config) *serveState {
 				root, err := os.OpenRoot(route.BaseDir)
 				if err != nil {
 					st.rootErrs[route] = err
-					errorf("[[host]] at line %d: %s: base_dir: %v; its requests are answered 503 until it is fixed and the configuration reloaded", r.Line, route.Key, err)
+					errorf("rule at line %d: %s: base_dir: %v; its requests are answered 503 until it is fixed and the configuration reloaded", r.Line, route.Key, err)
 					continue
 				}
 				st.roots[route] = root
@@ -531,6 +532,17 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 // Unwrap lets http.ResponseController reach Flush and Hijack (WebSocket).
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// Hijack and Flush serve handlers that ask the writer itself (the
+// console's WebSockets, the reverse proxy's streaming).
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.status == 0 {
+		w.status = http.StatusSwitchingProtocols
+	}
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+func (w *statusWriter) Flush() { http.NewResponseController(w.ResponseWriter).Flush() }
+
 // rootDir serves a base_dir through os.Root, so nothing outside it is
 // reached (a symlink that leads out is refused). It hides directories that
 // have no index.html, so the file server never lists one.
@@ -598,7 +610,7 @@ func reverseProxy(rule *Rule, route *ServiceRoute, transport *http.Transport) *h
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			errorf("[[host]] at line %d: %s: %s %s: upstream %s: %v", rule.Line, route.Key, r.Method, r.URL.RequestURI(), route.Target, err)
+			errorf("rule at line %d: %s: %s %s: upstream %s: %v", rule.Line, route.Key, r.Method, r.URL.RequestURI(), route.Target, err)
 			w.WriteHeader(http.StatusBadGateway)
 		},
 		ErrorLog: log.New(webErrorLog{}, "", 0),

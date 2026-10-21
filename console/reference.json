@@ -1,6 +1,6 @@
 [
   {
-    "section": "[global]",
+    "section": "global",
     "about": "Settings for the whole proxy. Listeners may override some of them.",
     "keys": [
       {
@@ -36,7 +36,7 @@
       {
         "key": "proxy_trust_source",
         "default": "(nobody)",
-        "meaning": "Addresses or networks that may send a PROXY protocol header (v1 or v2), separated by ;. (Called proxy_protocol_from before v1.5.0.)"
+        "meaning": "A list of addresses or networks that may send a PROXY protocol header (v1 or v2). (Called proxy_protocol_from before v1.5.0.)"
       },
       {
         "key": "buffer_size",
@@ -96,7 +96,7 @@
       {
         "key": "ca_root",
         "default": "./ca",
-        "meaning": "Where your own CAs live, one folder each (ca001, ca002, ...), with the certificates they issued: see cert = local-ca."
+        "meaning": "Where your own CAs live, one folder each (ca001, ca002, ...), with the certificates they issued: see cert: local-ca."
       },
       {
         "key": "expiry_threshold_days",
@@ -106,7 +106,7 @@
       {
         "key": "acme_agree_tos",
         "default": "false",
-        "meaning": "Must be true for cert = auto: you accept the CA's terms of service."
+        "meaning": "Must be true for cert: auto: you accept the CA's terms of service."
       },
       {
         "key": "acme_email",
@@ -126,12 +126,12 @@
       {
         "key": "public_ip_address",
         "default": "(not checked)",
-        "meaning": "cert = auto only asks the CA when the name resolves to one of these addresses, separated by ;."
+        "meaning": "A list: cert: auto only asks the CA when the name resolves to one of these addresses."
       },
       {
         "key": "dns_resolvers",
-        "default": "required with cert = auto and public_ip_address",
-        "meaning": "Public DNS servers for that check, IP or IP:port: three attempts, each the next server in turn, 3 s each; no answer means no certificate is requested. E.g. 1.1.1.1; 8.8.8.8; 2606:4700:4700::1111."
+        "default": "required with cert: auto and public_ip_address",
+        "meaning": "A list of public DNS servers for that check, IP or IP:port: three attempts, each the next server in turn, 3 s each; no answer means no certificate is requested. E.g. [1.1.1.1, 8.8.8.8, 2606:4700:4700::1111]."
       },
       {
         "key": "io_model",
@@ -146,18 +146,18 @@
     ]
   },
   {
-    "section": "[[listener]]",
-    "about": "A port with its own rules; at least one is required. Overrides apply to this listener only.",
+    "section": "listeners",
+    "about": "A list of ports, each with its own rules; at least one is required. Overrides apply to that listener only. With the web console on, its listener (https on 443, console_http otherwise) may be listed by name with options only: no bind or port.",
     "keys": [
       {
         "key": "name",
         "default": "(required)",
-        "meaning": "Up to 64 letters, digits, spaces and -_@#~()[]\u003c\u003e\"'; unique ignoring case. What listener = in a rule refers to."
+        "meaning": "Up to 64 letters, digits, spaces and -_@#~()[]\u003c\u003e\"'; unique ignoring case. What listener: in routes refers to."
       },
       {
         "key": "bind",
         "default": "0.0.0.0",
-        "meaning": "Listen address: 0.0.0.0 all IPv4, :: all IPv6 and IPv4, or addresses separated by ;."
+        "meaning": "Listen addresses, a list: 0.0.0.0 all IPv4, :: all IPv6 and IPv4. The web console's exact bind and port are reserved."
       },
       {
         "key": "port",
@@ -166,8 +166,8 @@
       },
       {
         "key": "proxy_trust_source",
-        "default": "[global]",
-        "meaning": "Overrides [global] for this listener."
+        "default": "global",
+        "meaning": "Overrides global for this listener."
       },
       {
         "key": "max_connections",
@@ -176,18 +176,18 @@
       },
       {
         "key": "handshake_timeout",
-        "default": "[global]",
-        "meaning": "Overrides [global] for this listener."
+        "default": "global",
+        "meaning": "Overrides global for this listener."
       },
       {
         "key": "idle_timeout",
-        "default": "[global]",
-        "meaning": "Overrides [global] for this listener."
+        "default": "global",
+        "meaning": "Overrides global for this listener."
       },
       {
         "key": "half_close_timeout",
-        "default": "[global]",
-        "meaning": "Overrides [global] for this listener."
+        "default": "global",
+        "meaning": "Overrides global for this listener."
       },
       {
         "key": "max_aggregated_speed",
@@ -202,18 +202,29 @@
     ]
   },
   {
-    "section": "[[host]]",
-    "about": "A rule. The most specific pattern wins: literal names, then wildcards (more fixed characters first), then ANY. A name no rule matches is denied.",
+    "section": "routes",
+    "about": "A list of items, each the rules of one listener.",
     "keys": [
       {
         "key": "listener",
         "default": "(required)",
-        "meaning": "The [[listener]] this rule belongs to."
+        "meaning": "The listener its rules belong to: a name from listeners, or the console's https / console_http."
       },
       {
-        "key": "pattern",
+        "key": "rules",
+        "default": "(none)",
+        "meaning": "Its list of rules (see rules)."
+      }
+    ]
+  },
+  {
+    "section": "rules",
+    "about": "Each item of a routes item's rules. The most specific domain wins: $no_sni and literal names, then wildcards (more fixed characters first), then $anything_else. A name no rule matches is denied.",
+    "keys": [
+      {
+        "key": "domain",
         "default": "(required)",
-        "meaning": "A host name with * wildcards (a * never crosses a dot; as a whole label it is exactly one label), NONE for clients without SNI, or ANY for everything."
+        "meaning": "A host name with * wildcards (a * never crosses a dot; as a whole label it is exactly one label), $no_sni for clients that send no name, or $anything_else for every name no other rule takes (checked last)."
       },
       {
         "key": "action",
@@ -221,14 +232,9 @@
         "meaning": "allow or deny. deny answers with a TLS access_denied alert."
       },
       {
-        "key": "target_host",
+        "key": "target",
         "default": "(required for allow)",
-        "meaning": "Where to connect. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces."
-      },
-      {
-        "key": "target_port",
-        "default": "(required for allow)",
-        "meaning": "Target port."
+        "meaning": "host:port to connect to; an IPv6 host in brackets, [2001:db8::1]:443. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces."
       },
       {
         "key": "cert",
@@ -237,18 +243,18 @@
       },
       {
         "key": "cert_domains",
-        "default": "the literal pattern",
-        "meaning": "cert = auto: exact names to issue, separated by , or ;. cert = local-ca: names or globs (*.dev.example.com, several) that get a certificate; any other name is refused (default: every name the rule matches). With NONE or ANY it may list IP addresses: a client without a host name gets one certificate for all of them (and a NONE rule's names), otherwise one for the address it connected to; an IP address a client sends as SNI must be listed."
+        "default": "the literal domain",
+        "meaning": "A list. cert: auto: exact names to issue. cert: local-ca: names or globs (*.dev.example.com, several) that get a certificate; any other name is refused (default: every name the rule matches). With $no_sni or $anything_else it may list IP addresses: a client without a host name gets one certificate for all of them (and a $no_sni rule's names), otherwise one for the address it connected to; an IP address a client sends as SNI must be listed."
       },
       {
         "key": "cert_validate_script",
         "default": "(none)",
-        "meaning": "cert = auto: a script that decides per name not in cert_domains; exit 0 = issue."
+        "meaning": "cert: auto: a script that decides per name not in cert_domains; exit 0 = issue."
       },
       {
         "key": "cert_validate_args",
         "default": "[\"${host}\"]",
-        "meaning": "The script's arguments, a TOML array of strings with ${1}, ${host} ... filled in."
+        "meaning": "The script's arguments, a list of strings with ${1}, ${host} ... filled in."
       },
       {
         "key": "upstream_tls",
@@ -267,13 +273,8 @@
       },
       {
         "key": "proxy",
-        "default": "false",
-        "meaning": "Send the target a PROXY protocol header with the client's address."
-      },
-      {
-        "key": "proxy_version",
-        "default": "2",
-        "meaning": "PROXY protocol version, 1 or 2."
+        "default": "none",
+        "meaning": "v1 or v2: send the target a PROXY protocol header with the client's address."
       },
       {
         "key": "max_aggregated_speed",
@@ -286,30 +287,76 @@
         "meaning": "For each connection of this rule, each direction."
       },
       {
-        "key": "service_rule1",
+        "key": "serve",
         "default": "(none)",
-        "meaning": "Serve HTTP here instead of connecting to a target (any key starting service_rule; needs cert, and no target_host, upstream_* or proxy). Options separated by ;: type=reverse_proxy; prefix=/api/; target=http://127.0.0.1:8080 (or https://; tls_verify=false to skip checking its certificate); strip_prefix=true; force_host=name. Or type=static_content; prefix=/assets/; base_dir=/opt/www/assets (prefix stands for base_dir: /assets/a.css is base_dir/a.css; no listings, no hidden files but .well-known). basic_auth=\u003c[[basic_auth]] name\u003e on either. The longest prefix wins; none = 404. The client's address goes upstream as X-Forwarded-For; what it sent is replaced."
+        "meaning": "A list of entries: the rule answers HTTP itself instead of connecting to a target (needs cert; no target, upstream_* or proxy). The longest prefix wins; none = 404. See serve entries."
       }
     ]
   },
   {
-    "section": "[[basic_auth]]",
-    "about": "Users and passwords that service rules can ask for (basic_auth=\u003cname\u003e in a service_rule). A password a browser sends is checked once and remembered for 5 minutes.",
+    "section": "serve entries",
+    "about": "Each item of a rule's serve list. The client's address goes upstream as X-Forwarded-For; what it sent is replaced.",
+    "keys": [
+      {
+        "key": "type",
+        "default": "(required)",
+        "meaning": "reverse_proxy or static_content."
+      },
+      {
+        "key": "prefix",
+        "default": "(required)",
+        "meaning": "The request path it takes, starting with /. For /api/, a request for /api is redirected to /api/."
+      },
+      {
+        "key": "target",
+        "default": "(required for reverse_proxy)",
+        "meaning": "http://host:port or https://host:port, no path."
+      },
+      {
+        "key": "strip_prefix",
+        "default": "false",
+        "meaning": "reverse_proxy: /api/x is sent as /x."
+      },
+      {
+        "key": "force_host",
+        "default": "the client's Host",
+        "meaning": "reverse_proxy: the Host header sent on."
+      },
+      {
+        "key": "tls_verify",
+        "default": "true",
+        "meaning": "reverse_proxy to https://: check the target's certificate."
+      },
+      {
+        "key": "base_dir",
+        "default": "(required for static_content)",
+        "meaning": "The folder the prefix stands for: /assets/a.css is base_dir/a.css. No listings, no hidden files but .well-known, no symlinks out."
+      },
+      {
+        "key": "basic_auth",
+        "default": "(none)",
+        "meaning": "The name of a basic_auth item whose users may use it."
+      }
+    ]
+  },
+  {
+    "section": "basic_auth",
+    "about": "A list of user groups that serve entries can ask for (basic_auth: \u003cname\u003e). A password a browser sends is checked once and remembered for 5 minutes.",
     "keys": [
       {
         "key": "name",
         "default": "(required)",
-        "meaning": "What basic_auth= in a service_rule names. A second section with the same name replaces the first."
+        "meaning": "What basic_auth: in a serve entry names; unique."
       },
       {
-        "key": "user1",
+        "key": "users",
         "default": "(at least one)",
-        "meaning": "Any key starting user: username=\u003cname\u003e; password_hash=\u003chash\u003e (argon2id, or pbkdf2-sha256; make one with tlsproxy --hash-password), or password_plain=\u003cpassword\u003e (no ; in it). A key given twice keeps its last value."
+        "meaning": "A list of {username, password_hash} (argon2id, or pbkdf2-sha256; make one with tlsproxy --hash-password) or {username, password_plain}."
       }
     ]
   },
   {
-    "section": "[logging]",
+    "section": "logging",
     "about": "Where the two log streams go: activity (stdout) and problems (stderr).",
     "keys": [
       {
@@ -340,48 +387,33 @@
     ]
   },
   {
-    "section": "[console]",
-    "about": "This web console, in console.toml (given with --console), not in this file: the console can't change it. It is read again on every reload.",
+    "section": "console",
+    "about": "The web console is not in this file: it is set at start-up, so nothing saved from it can change it. On by default; -noconsole turns it off.",
     "keys": [
       {
-        "key": "bind",
-        "default": "127.0.0.1",
-        "meaning": "Addresses, separated by ;. With cert: the [[listener]] with exactly this bind and port serves the console (one of its own if none has)."
+        "key": "-console_domain",
+        "default": "$CONSOLE_DOMAIN (required)",
+        "meaning": "The name it is served under, as a rule of its listener that this file can't override."
       },
       {
-        "key": "port",
+        "key": "$CONSOLE_PASSWORD",
         "default": "(required)",
-        "meaning": "Console port, e.g. 443 to share a listener."
+        "meaning": "Its password, hashed at start-up, or a hash from tlsproxy --hash-password."
       },
       {
-        "key": "hostname",
-        "default": "(required with cert)",
-        "meaning": "The name the console is served under, as a rule of its listener that config.toml can't override."
+        "key": "-console_bind",
+        "default": "$CONSOLE_BIND, or all addresses",
+        "meaning": "Where it listens."
       },
       {
-        "key": "cert",
-        "default": "(plain HTTP)",
-        "meaning": "auto or local-ca / local-ca:ca002: serve the console over TLS. Without it, plain HTTP on bind:port (keep it on loopback); a change of bind or port then needs a restart."
+        "key": "-console_port",
+        "default": "$CONSOLE_PORT, or 443",
+        "meaning": "Its port: listener https on 443, console_http on any other. That listener's name, bind and port are reserved."
       },
       {
-        "key": "password",
-        "default": "",
-        "meaning": "Plain text; replaced by password_hash when the proxy starts."
-      },
-      {
-        "key": "password_hash",
-        "default": "",
-        "meaning": "$argon2id$... (or pbkdf2-sha256$... from older versions); make one with tlsproxy --hash-password."
-      },
-      {
-        "key": "secure_cookie",
-        "default": "false",
-        "meaning": "Plain HTTP only: mark the session cookie Secure, when another proxy publishes the console over HTTPS."
-      },
-      {
-        "key": "hostnames",
-        "default": "(none)",
-        "meaning": "Plain HTTP only: names the console may be addressed by, besides IP addresses and localhost."
+        "key": "-console_cert",
+        "default": "$CONSOLE_CERT, or auto",
+        "meaning": "auto (needs acme_agree_tos: true) or local-ca / local-ca:ca002."
       }
     ]
   }

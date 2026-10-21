@@ -1,0 +1,24 @@
+# Specific routes, and $anything_else as the default backend (which also takes
+# clients that send no SNI at all, e.g. old devices or bare-IP access).
+#
+#> api.example.com     => 10.0.0.21:443
+#> shop.example.com    => 10.0.0.22:443
+#> anything.else.org   => 10.0.0.99:443
+#> <none>              => 10.0.0.99:443
+
+listeners:
+  - name: https
+    bind: [0.0.0.0]
+    port: 443
+
+routes:
+  - listener: https
+    rules:
+      - domain: api.example.com
+        target: "10.0.0.21:443"
+
+      - domain: shop.example.com
+        target: "10.0.0.22:443"
+
+      - domain: $anything_else
+        target: "10.0.0.99:443"

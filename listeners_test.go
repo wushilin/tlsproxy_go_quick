@@ -14,7 +14,7 @@ import (
 func TestListenerConfig(t *testing.T) {
 	// One listener: its rules still name it.
 	c := mustParse(t, "[[listener]]\nname=https\nbind=127.0.0.1\nport=443\n[[host]]\nlistener=https\npattern=a.test\ntarget_host=x\ntarget_port=443\n")
-	if len(c.Listeners) != 1 || c.Listeners[0].Name != "https" || c.Listeners[0].Line != 1 || c.Rules[0].Listener != "https" {
+	if len(c.Listeners) != 1 || c.Listeners[0].Name != "https" || c.Listeners[0].Line != 2 || c.Rules[0].Listener != "https" {
 		t.Fatalf("%+v", c.Listeners)
 	}
 
@@ -45,21 +45,21 @@ func TestListenerConfig(t *testing.T) {
 
 	base := "[[listener]]\nname=a\nport=1\n[[listener]]\nname=b\nport=2\n"
 	for text, want := range map[string]string{
-		base + "[[host]]\npattern=x.test\ntarget_host=x\ntarget_port=443\n":                      "listener = <name> is required (listeners: a, b)",
-		"[[listener]]\nname=a\nport=1\n[[host]]\npattern=x.test\ntarget_host=x\ntarget_port=1\n": "listener = <name> is required (listeners: a)",
-		"[[listener]]\nname=a\nport=1\n[[host]]\nlistener=a\npattern=x.test\ntarget_host=x\n":    "target_port is required for allow",
-		base + "[[host]]\nlistener=c\npattern=x.test\ntarget_host=x\ntarget_port=443\n":          "there is no [[listener]] named c",
-		"[global]\nport=443\n" + base:     "[global] port is no longer supported",
-		"[global]\nbind=0.0.0.0\n" + base: "[global] bind is no longer supported",
-		"[global]\nport=443\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=x\ntarget_port=443\n": "[global] port is no longer supported",
-		"[global]\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=x\ntarget_port=443\n":           "no [[listener]] section",
+		base + "[[host]]\npattern=x.test\ntarget_host=x\ntarget_port=443\n":                      "a routes item needs listener: <name>",
+		"[[listener]]\nname=a\nport=1\n[[host]]\npattern=x.test\ntarget_host=x\ntarget_port=1\n": "a routes item needs listener: <name>",
+		"[[listener]]\nname=a\nport=1\n[[host]]\nlistener=a\npattern=x.test\ntarget_host=x\n":    "needs a port: host:port",
+		base + "[[host]]\nlistener=c\npattern=x.test\ntarget_host=x\ntarget_port=443\n":          "there is no listener named c",
+		"[global]\nport=443\n" + base:     "global has no port: every listen address is a listener",
+		"[global]\nbind=0.0.0.0\n" + base: "global has no bind: every listen address is a listener",
+		"[global]\nport=443\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=x\ntarget_port=443\n": "global has no port: every listen address is a listener",
+		"[global]\n[[host]]\nlistener=default\npattern=ANY\ntarget_host=x\ntarget_port=443\n":           "no listeners: add one",
 		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=a\nport=2\n":                                  "the name a is already used",
 		"[[listener]]\nname=a\nport=1\n[[listener]]\nname=b\nbind=10.0.0.1\nport=1\n":                   "overlaps a",
 		"[[listener]]\nname=Bad/Name\nport=1\n":                                                         "name must be",
 		"[[listener]]\nname=a\n":                                                                        "port is required",
-		"[[listener]]\nname=a\nport=1\nfoo=1\n":                                                         `unknown key "foo" in [[listener]]`,
+		"[[listener]]\nname=a\nport=1\nfoo=1\n":                                                         `unknown key "foo" in a listener`,
 	} {
-		_, err := ParseConfig(text)
+		_, err := parseFixture(text)
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", text, err, want)
 		}
@@ -82,7 +82,7 @@ func TestLiveListeners(t *testing.T) {
 				text += fmt.Sprintf("[[host]]\nlistener=%s\npattern=ANY\ntarget_host=127.0.0.1\ntarget_port=%d\n", name, b)
 			}
 		}
-		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(yamlFixture(text)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -166,16 +166,16 @@ func TestConsoleAddsListener(t *testing.T) {
 	port := freePort(t)
 	_, st := c.get("/api/state")
 	f := st["file"].(map[string]any)
-	vals := map[string]string{"name": "lab", "bind": "127.0.0.1", "port": strconv.Itoa(port)}
+	vals := map[string]any{"name": "lab", "bind": []string{"127.0.0.1"}, "port": strconv.Itoa(port)}
 	_, out := c.post("/api/listeners/validate", map[string]any{"line": 0, "values": vals})
-	if out["ok"] != true || !strings.Contains(out["block"].(string), "name = lab") || out["notes"] != nil {
+	if out["ok"] != true || !strings.Contains(out["block"].(string), "name: lab") || out["notes"] != nil {
 		t.Fatal(out)
 	}
 	if code, out := c.post("/api/listeners/save", map[string]any{"line": 0, "baseHash": f["hash"], "baseMtime": f["mtime"], "values": vals}); code != 200 || out["ok"] != true {
 		t.Fatal(code, out)
 	}
 	text, _ := os.ReadFile(path)
-	for _, want := range []string{"[[listener]]\nname=default\nport=1\n", "\n[[listener]]\nname = lab\nbind = 127.0.0.1\nport = " + strconv.Itoa(port), "[[host]]\nlistener = default\npattern = ANY"} {
+	for _, want := range []string{"- name: \"default\"\n    port: \"1\"\n", "  - name: lab\n    bind: [127.0.0.1]\n    port: " + strconv.Itoa(port) + "\n", "- domain: $anything_else"} {
 		if !strings.Contains(string(text), want) {
 			t.Fatalf("missing %q in:\n%s", want, text)
 		}
@@ -208,12 +208,9 @@ func TestConsoleAddsListener(t *testing.T) {
 // are quoted, and rules refer to them the same way.
 func TestListenerNames(t *testing.T) {
 	for _, name := range []string{"Kafka (EU)", `a"b'c`, "#1 <tls> [x]", "~@_-", "A"} {
-		q, err := fmtValue(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := "[[listener]]\nname = " + q + "\nport = 1\n[[host]]\nlistener = " + q + "\npattern = a.com\ntarget_host = b\ntarget_port = 443\n" +
-			"[[listener]]\nname = other\nport = 2\n"
+		q := strconv.Quote(name) // a YAML double-quoted string
+		text := "listeners:\n  - {name: " + q + ", port: 1}\n  - {name: other, port: 2}\nroutes:\n  - listener: " + q +
+			"\n    rules:\n      - {domain: a.com, target: \"b:443\"}\n"
 		cfg, err := ParseConfig(text)
 		if err != nil {
 			t.Errorf("%q: %v", name, err)
@@ -224,12 +221,11 @@ func TestListenerNames(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{" lead", "trail ", "a/b", "a:b", "a.b", "a\\b", "é", strings.Repeat("x", 65)} {
-		q, _ := fmtValue(bad)
-		if _, err := ParseConfig("[[listener]]\nname = " + q + "\nport = 1\n"); err == nil || !strings.Contains(err.Error(), "name must be") {
+		if _, err := ParseConfig("listeners:\n  - {name: " + strconv.Quote(bad) + ", port: 1}\n"); err == nil || !strings.Contains(err.Error(), "name must be") {
 			t.Errorf("%q accepted: %v", bad, err)
 		}
 	}
-	if _, err := ParseConfig("[[listener]]\nname = Web\nport = 1\n[[listener]]\nname = web\nport = 2\n"); err == nil || !strings.Contains(err.Error(), "already used") {
+	if _, err := parseFixture("[[listener]]\nname = Web\nport = 1\n[[listener]]\nname = web\nport = 2\n"); err == nil || !strings.Contains(err.Error(), "already used") {
 		t.Errorf("names differing only in case: %v", err)
 	}
 }
@@ -245,7 +241,7 @@ func TestStartupWithABusyPort(t *testing.T) {
 	defer busy.Close()
 	busyPort := busy.Addr().(*net.TCPAddr).Port
 	free := freePort(t)
-	cfg, err := ParseConfig(fmt.Sprintf("[[listener]]\nname=ok\nbind=127.0.0.1\nport=%d\n[[listener]]\nname=taken\nbind=127.0.0.1\nport=%d\n"+
+	cfg, err := parseFixture(fmt.Sprintf("[[listener]]\nname=ok\nbind=127.0.0.1\nport=%d\n[[listener]]\nname=taken\nbind=127.0.0.1\nport=%d\n"+
 		"[[host]]\nlistener=ok\npattern=ANY\naction=deny\n", free, busyPort))
 	if err != nil {
 		t.Fatal(err)

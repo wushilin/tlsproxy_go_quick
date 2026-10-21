@@ -1,0 +1,57 @@
+#! console: console.example.com 443
+# The web console: dashboard, open connections, certificates, recent log and a
+# config editor. Its settings are not in this file: they are given at start-up,
+# so nothing saved from the console can change its password or take it off the
+# network:
+#
+#   CONSOLE_PASSWORD='change-me' tlsproxy 11-web-console.yaml -console_domain console.example.com
+#
+# (the first line of this file tells `go test` to run it the same way). The
+# console is on by default, on all addresses (-console_bind), port 443
+# (-console_port) and with cert auto (-console_cert; auto needs
+# acme_agree_tos: true below). Each flag has an environment variable too:
+# $CONSOLE_DOMAIN, $CONSOLE_BIND, $CONSOLE_PORT, $CONSOLE_CERT. $CONSOLE_PASSWORD
+# is the password itself or a hash from `tlsproxy --hash-password`.
+# -noconsole runs without it.
+#
+# On port 443 the console owns the listener named https (on any other port:
+# console_http). It has a rule there for console.example.com, served over TLS
+# inside this process with a certificate like any other name; nothing in this
+# file can override it, and the console can't stop it or its listener. The
+# listener's name, bind and port come from the console's settings: this file
+# may list it with other options only, and add rules to it.
+#
+#> console.example.com   => CONSOLE
+#> www.example.com       => 10.0.0.10:443
+#> other.org             => DENY
+
+global:
+  cert_path: /var/db/tlsproxy/certs
+  acme_agree_tos: true
+  public_ip_address: [203.0.113.7]
+  dns_resolvers: [1.1.1.1, 8.8.8.8]
+
+listeners:
+  # The console's listener: options only. A bind or port here is an error.
+  - name: https
+    max_connections: 512
+
+routes:
+  - listener: https
+    rules:
+      # No rule for console.example.com: the console has it. A rule for that
+      # exact name on this listener would be refused.
+      - domain: www.example.com
+        target: "10.0.0.10:443"
+
+      - domain: $anything_else
+        action: deny
+
+# A password is always required. Sign-ins are rate limited (5 failures, then
+# 30 s doubling up to 15 min), sessions last 12 hours, cookies are always
+# Secure, every change needs the session's CSRF token.
+#
+# Saving from the console's editor (this file only): the text is validated (an
+# invalid config is never written), the save is refused if the file changed
+# since the editor loaded it, the previous file is kept as
+# config.yaml.<timestamp>.bak (last 10), and the new config is applied at once.

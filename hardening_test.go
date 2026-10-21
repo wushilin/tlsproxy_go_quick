@@ -175,7 +175,7 @@ func TestSeveralBindAddresses(t *testing.T) {
 		t.Fatalf("%v %q %q", c.Binds, c.Bind, listenAddrs(c))
 	}
 	for _, bad := range []string{"bind = 0.0.0.0, 0.0.0.0", "bind = ;"} {
-		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n" + bad + "\n"); err == nil {
+		if _, err := parseFixture("[[listener]]\nname=default\nport=1\n" + bad + "\n"); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}
 	}

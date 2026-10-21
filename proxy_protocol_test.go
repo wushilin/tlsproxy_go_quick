@@ -271,11 +271,11 @@ func TestProxyProtocolConfig(t *testing.T) {
 		"deny rule":             "[[host]]\nlistener=default\npattern=a\naction=deny\nproxy=true\n",
 		"not a bool":            "[[host]]\nlistener=default\npattern=a\ntarget_host=x\ntarget_port=443\nproxy=maybe\n",
 	} {
-		if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n" + text); err == nil {
+		if _, err := parseFixture("[[listener]]\nname=default\nport=1\n" + text); err == nil {
 			t.Errorf("%s: should be rejected", name)
 		}
 	}
-	if _, err := ParseConfig("[[listener]]\nname=default\nport=1\n[global]\nproxy_trust_source = lb.example.com\n"); err == nil {
+	if _, err := parseFixture("[[listener]]\nname=default\nport=1\n[global]\nproxy_trust_source = lb.example.com\n"); err == nil {
 		t.Error("a host name is not a trusted source")
 	}
 }

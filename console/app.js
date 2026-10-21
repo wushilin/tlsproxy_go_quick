@@ -904,10 +904,10 @@ function paint() {
     if (ui.filter) matched += r.connections.filter((c) => matches(c, r, rr.listener)).length;
 
     setText(rr.pattern, r.pattern);
-    rr.pattern.title = r.line ? `[[host]] at line ${r.line} of the config file` : "";
+    rr.pattern.title = r.line ? `The rule at line ${r.line} of the config file` : "";
     setText(rr.target, removed ? "removed" : r.allow ? r.target : "deny");
     rr.target.classList.toggle("deny", !removed && !r.allow);
-    rr.target.title = r.console ? "The web console, from console.toml: it can't be stopped or edited here" : r.routes ? r.routes.join("\n") : "";
+    rr.target.title = r.console ? "The web console, set at start-up: it can't be stopped or edited here" : r.routes ? r.routes.join("\n") : "";
     rr.card.classList.toggle("stopped", out);
 
     rr.status.hidden = !out;
@@ -985,8 +985,8 @@ function paint() {
 function paintListener(lr, l, now, file) {
   setText(lr.lname, l.name);
   setText(lr.listen, `[${listenAddrs(l)}]`);
-  lr.listen.title = l.redirect ? "http_to_https_redirect = true in [global]: port 80 on every address the other listeners use"
-    : `[[listener]] at line ${l.line} of the config file`;
+  lr.listen.title = l.redirect ? "http_to_https_redirect: true in global: port 80 on every address the other listeners use"
+    : l.line ? `The listener at line ${l.line} of the config file` : "The web console's listener, set at start-up";
   const n = l.rules.length;
   setText(lr.target, l.redirect ? "https://" : `${n} rule${n === 1 ? "" : "s"}`);
   const out = l.stopped || !l.running;
@@ -1010,7 +1010,7 @@ function paintListener(lr, l, now, file) {
   setText(lr.err, l.error ? `Could not open the port: ${l.error}` : "");
   lr.redirectChip.hidden = !l.redirect;
   setText(lr.redirectChip, "HTTP → HTTPS redirect");
-  lr.redirectChip.title = "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in [global]; it has no rules and cannot be edited here.";
+  lr.redirectChip.title = "http_to_https_redirect: every plain HTTP request is redirected to the same URL on https://, whatever the name; the HTTPS rules decide from there. Set in global; it has no rules and cannot be edited here.";
   lr.ppf.hidden = !l.proxyTrustSource;
   setText(lr.ppf, `PROXY from ${l.proxyTrustSource || ""}`);
   lr.ppf.title = "Accepts a PROXY protocol header from these addresses (proxy_trust_source)";
@@ -1025,7 +1025,7 @@ function paintListener(lr, l, now, file) {
     [lr.idle, l.idleTimeout, "idle", "idle_timeout"], [lr.half, l.halfCloseTimeout, "half-close", "half_close_timeout"]]) {
     chip.hidden = v === null || v === undefined;
     setText(chip, `${label} ${v}s`);
-    chip.title = `${key} for this listener (overrides [global])`;
+    chip.title = `${key} for this listener (overrides global)`;
   }
   const vals = l.values || {};
   lr.limTotal.hidden = !l.aggSpeed;
@@ -1198,7 +1198,7 @@ function paintRuleActions(rr, r, file) {
   const removed = r.kind === "removed" || r.kind === "redirect"; // nothing to stop, edit or delete
   const editable = !!(file && file.editable && r.line > 0);
   const busy = pendingRules.has(r.key);
-  // The console's own rule comes from console.toml: nothing here may stop or change it.
+  // The console's own rule is set at start-up: nothing here may stop or change it.
   rr.toggleBtn.hidden = removed || !!r.console;
   rr.editBtn.hidden = removed || !!r.console;
   rr.delBtn.hidden = removed || !!r.console;
@@ -1350,7 +1350,7 @@ function dryRun(path, body) {
 // Three steps over one form: what to match, where to send it, options. Only
 // the fields that apply are shown. Every change runs quick checks here and,
 // 300 ms later, a dry run on the server (api/rules/validate) that returns the
-// exact [[host]] block that would be written and where sample names route.
+// exact rule that would be written and where sample names route.
 // Values go to the server as raw strings; "" removes the key from the file.
 
 const ed = {
@@ -1366,15 +1366,27 @@ const ed = {
   tryTouched: false,
 };
 
-const BOOL_KEYS = new Set(["proxy", "upstream_tls", "upstream_tls_verify"]);
-const DEFAULTS = { action: "allow", proxy: "false", proxy_version: "2", upstream_tls: "true", upstream_tls_verify: "true" };
+const BOOL_KEYS = new Set(["upstream_tls", "upstream_tls_verify"]);
+const DEFAULTS = { action: "allow", proxy: "none", upstream_tls: "true", upstream_tls_verify: "true" };
+
+// listText shows a YAML list (or a single value) in one text field;
+// textList reads it back. Lists are separated by commas, semicolons or spaces.
+const listText = (v) => Array.isArray(v) ? v.join(", ") : String(v ?? "");
+const textList = (s) => String(s ?? "").split(/[\s,;]+/).filter(Boolean);
+// splitTarget reads host:port, an IPv6 host in brackets.
+function splitTarget(t) {
+  const s = String(t ?? "").trim();
+  const m = /^\[([^\]]*)\]:(.*)$/.exec(s) || /^(.*):([^:]*)$/.exec(s);
+  return m ? [m[1], m[2]] : [s, ""];
+}
+const joinTarget = (host, port) => (host.includes(":") ? `[${host}]` : host) + ":" + port;
 const LISTENER_NAME_RE = /^[A-Za-z0-9_@#~()[\]<>"'-](?:[A-Za-z0-9 _@#~()[\]<>"'-]{0,62}[A-Za-z0-9_@#~()[\]<>"'-])?$/; // as config.go
 const RATE_RE = /^\s*\d+(\.\d+)?\s*(bit|bps|[kmg](bit|bps)|[kmg]?b|[kmg]ib)\s*(\/s)?\s*$/i;
 
 // normal is a value's meaning, so a file's own spelling ("yes", "Allow") is
 // kept when the user did not change what it means.
 function normal(key, v) {
-  let s = String(v ?? "").trim();
+  let s = Array.isArray(v) ? v.join(", ") : String(v ?? "").trim();
   if (BOOL_KEYS.has(key)) {
     const l = s.toLowerCase();
     s = ["true", "yes", "on"].includes(l) ? "true" : ["false", "no", "off"].includes(l) ? "false" : l;
@@ -1400,48 +1412,125 @@ function setRadio(name, v) {
 // "" so they leave the file.
 function formValues() {
   const allow = radio("f-action") !== "deny";
-  const serve = radio("f-action") === "serve"; // service rules: no target, nothing upstream
+  const serve = radio("f-action") === "serve"; // serve entries: no target, nothing upstream
   const term = serve || (allow && radio("f-tls") === "terminate");
   const src = radio("f-certsrc");
   const auto = term && src === "auto";
   const local = term && src === "local";
   const upTLS = term && !serve && $("f-upstream-tls").value !== "false";
   const proxy = allow && !serve && $("f-proxy").checked;
+  const host = val("f-target-host"), port = val("f-target-port");
   const v = {
     listener: $("f-listener").value,
-    pattern: val("f-pattern"),
+    domain: val("f-pattern"),
     action: allow ? "allow" : "deny",
-    target_host: allow && !serve ? val("f-target-host") : null,
-    target_port: allow && !serve ? val("f-target-port") : null,
-    service_rules: serve ? $("f-routes").value : null,
+    target: allow && !serve && (host || port) ? joinTarget(host, port) : null,
+    serve: serve ? readServe() : null,
     max_aggregated_speed: allow ? val("f-agg") : null,
     max_single_connection_speed: allow ? val("f-conn") : null,
-    proxy: allow ? (proxy ? "true" : "") : null,
-    proxy_version: proxy ? $("f-proxy-version").value : null,
+    proxy: proxy ? "v" + $("f-proxy-version").value : null,
     cert: term ? (local ? localCAValue($("f-cert-ca").value) : "auto") : null,
-    cert_domains: auto || local ? val("f-cert-domains") : null,
+    cert_domains: auto || local ? textList(val("f-cert-domains")) : null,
     cert_validate_script: auto ? val("f-cert-script") : null,
-    cert_validate_args: auto && val("f-cert-script") ? val("f-cert-args") : null,
+    cert_validate_args: auto && val("f-cert-script") ? argsList(val("f-cert-args")) : null,
     upstream_tls: term && !serve ? $("f-upstream-tls").value : null,
     upstream_tls_verify: upTLS ? $("f-upstream-verify").value : null,
     upstream_sni: upTLS ? val("f-upstream-sni") : null,
   };
   const orig = ed.rule ? ed.rule.values : {};
   for (const k of Object.keys(v)) {
-    if (v[k] === null) { v[k] = ""; continue; }
+    if (v[k] === null) { v[k] = k === "serve" || k === "cert_domains" ? [] : ""; }
+    if (k === "serve" || k === "cert_domains" || k === "cert_validate_args") {
+      if (JSON.stringify(v[k]) === JSON.stringify(orig[k] ?? [])) delete v[k]; // unchanged: left as written
+      continue;
+    }
     const o = orig[k] ?? "";
     if (normal(k, o) === normal(k, v[k])) v[k] = o;
   }
-  // Unchanged service rules are not sent, so their keys stay as written
-  // (a change rewrites them as service_rule1, 2, ...).
-  if (routeLines(v.service_rules) === routeLines(orig.service_rules)) delete v.service_rules;
   return v;
 }
 
-// routeLines is the service rules that count: blank lines and # comments out.
-function routeLines(text) {
-  return String(text ?? "").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).join("\n");
+// argsList reads the script arguments field: a list like ["--customer", "${1}"],
+// or words separated by spaces.
+function argsList(s) {
+  if (!s) return [];
+  try { const a = JSON.parse(s); if (Array.isArray(a)) return a.map(String); } catch (_) {}
+  return s.split(/\s+/).filter(Boolean);
 }
+
+// ---- serve entries: one row each ----
+
+const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "strip_prefix", "force_host", "tls_verify", "basic_auth"];
+
+function serveRow(e) {
+  const row = el("div", "serve-row");
+  const field = (label, input) => { const l = el("label", "field"); l.append(el("span", "", label), input); return l; };
+  const text = (cls, value, placeholder) => {
+    const i = el("input");
+    i.type = "text"; i.className = cls; i.value = value || ""; i.placeholder = placeholder || ""; i.spellcheck = false;
+    return i;
+  };
+  const type = el("select", "s-type");
+  for (const [v, t] of [["reverse_proxy", "reverse proxy"], ["static_content", "static files"]]) {
+    const o = el("option", "", t); o.value = v; type.appendChild(o);
+  }
+  type.value = e.type === "static_content" ? "static_content" : "reverse_proxy";
+  const where = text("s-where", e.type === "static_content" ? e.base_dir : e.target, "");
+  const remove = el("button", "btn btn-quiet", "Remove");
+  remove.type = "button";
+  remove.addEventListener("click", () => { row.remove(); onFormChange(); });
+  row.append(field("Type", type), field("Prefix", text("s-prefix", e.prefix, "/api/")), field("", where), remove);
+  const more = el("div", "more");
+  const strip = el("select", "s-strip");
+  for (const [v, t] of [["", "keep the prefix"], ["true", "strip the prefix"]]) { const o = el("option", "", t); o.value = v; strip.appendChild(o); }
+  strip.value = String(e.strip_prefix) === "true" ? "true" : "";
+  const verify = el("select", "s-verify");
+  for (const [v, t] of [["", "verify https:// (default)"], ["false", "don't verify"]]) { const o = el("option", "", t); o.value = v; verify.appendChild(o); }
+  verify.value = String(e.tls_verify) === "false" ? "false" : "";
+  more.append(field("Path sent on", strip), field("Host sent on", text("s-host", e.force_host, "the client's")),
+    field("Target certificate", verify), field("Basic auth", text("s-auth", e.basic_auth, "none")));
+  row.append(more);
+  const sync = () => {
+    const proxy = type.value === "reverse_proxy";
+    where.previousSibling.textContent = proxy ? "Target" : "Folder";
+    where.placeholder = proxy ? "http://127.0.0.1:8080" : "/opt/www/site";
+    for (const n of [strip, verify, more.querySelector(".s-host")]) n.closest(".field").hidden = !proxy;
+  };
+  type.addEventListener("change", sync);
+  sync();
+  return row;
+}
+
+// readServe is the entries as the config file has them: only what is set.
+function readServe() {
+  return [...document.querySelectorAll("#f-serve-rows .serve-row")].map((row) => {
+    const q = (c) => row.querySelector(c).value.trim();
+    const e = { type: q(".s-type"), prefix: q(".s-prefix") };
+    if (e.type === "static_content") e.base_dir = q(".s-where");
+    else {
+      e.target = q(".s-where");
+      if (q(".s-strip")) e.strip_prefix = "true";
+      if (q(".s-host")) e.force_host = q(".s-host");
+      if (q(".s-verify")) e.tls_verify = "false";
+    }
+    if (q(".s-auth")) e.basic_auth = q(".s-auth");
+    for (const k of Object.keys(e)) if (e[k] === "") delete e[k];
+    return e;
+  });
+}
+
+// sameServe reads an entry from the file the way readServe writes one, so an
+// unchanged list compares equal.
+function sameServe(e) {
+  const out = {};
+  for (const k of SERVE_KEYS) if (e[k] !== undefined && e[k] !== "") out[k] = String(e[k]);
+  return out;
+}
+
+$("f-serve-add").addEventListener("click", () => {
+  $("f-serve-rows").appendChild(serveRow({ type: "reverse_proxy", prefix: "/" }));
+  onFormChange();
+});
 
 // localCAOf is the CA a cert value names ("local-ca" is ca001), "" if none.
 function localCAOf(cert) {
@@ -1485,24 +1574,27 @@ function boolSelect(raw) {
 
 function prefill(values) {
   const v = values || {};
-  $("f-pattern").value = v.pattern || "";
-  setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : v.service_rules ? "serve" : "allow");
-  $("f-routes").value = v.service_rules || "";
-  $("f-target-host").value = v.target_host || "";
-  $("f-target-port").value = v.target_port || "";
+  $("f-pattern").value = v.domain || "";
+  const serve = Array.isArray(v.serve) ? v.serve : [];
+  setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : serve.length ? "serve" : "allow");
+  $("f-serve-rows").replaceChildren(...serve.map(serveRow));
+  if (ed.rule) ed.rule.values = { ...ed.rule.values, serve: serve.map(sameServe) };
+  const [host, port] = splitTarget(v.target);
+  $("f-target-host").value = host;
+  $("f-target-port").value = port;
   const cert = (v.cert || "").trim();
   setRadio("f-tls", cert ? "terminate" : "pass");
   const ca = localCAOf(cert);
   setRadio("f-certsrc", ca ? "local" : "auto");
   ed.ca = ca || "";
-  $("f-cert-domains").value = v.cert_domains || "";
+  $("f-cert-domains").value = listText(v.cert_domains);
   $("f-cert-script").value = v.cert_validate_script || "";
-  $("f-cert-args").value = v.cert_validate_args || "";
+  $("f-cert-args").value = Array.isArray(v.cert_validate_args) ? JSON.stringify(v.cert_validate_args) : v.cert_validate_args || "";
   $("f-upstream-tls").value = boolSelect(v.upstream_tls);
   $("f-upstream-verify").value = boolSelect(v.upstream_tls_verify);
   $("f-upstream-sni").value = v.upstream_sni || "";
-  $("f-proxy").checked = normal("proxy", v.proxy) === "true";
-  $("f-proxy-version").value = normal("proxy_version", v.proxy_version) === "1" ? "1" : "2";
+  $("f-proxy").checked = /^v[12]$/i.test(v.proxy || "");
+  $("f-proxy-version").value = /^v1$/i.test(v.proxy || "") ? "1" : "2";
   $("f-agg").value = v.max_aggregated_speed || "";
   $("f-conn").value = v.max_single_connection_speed || "";
 }
@@ -1511,8 +1603,10 @@ function prefill(values) {
 function patternInfo(p) {
   const t = p.trim();
   if (!t) return { kind: "", text: "Type the host name clients ask for, or pick an example." };
-  if (/^none$/i.test(t)) return { kind: "no SNI", text: "Only clients that send no server name (old clients, connections to an IP address). Exact names are checked before it, wildcards after." };
-  if (/^any$/i.test(t) || /^\^?\.\*\$?$/.test(t)) return { kind: "catch-all", text: "Everything, with or without a name: used only when no other rule matches." };
+  if (t === "$no_sni") return { kind: "no SNI", text: "Only clients that send no server name (old clients, connections to an IP address). Exact names are checked before it, wildcards after." };
+  if (t === "$anything_else") return { kind: "catch-all", text: "Everything, with or without a name: used only when no other rule matches." };
+  if (/^(none|any|\^?\.\*\$?)$/i.test(t)) return { kind: "", bad: true, text: `Write ${/^none$/i.test(t) ? "$no_sni" : "$anything_else"} instead.` };
+  if (t.startsWith("$")) return { kind: "", bad: true, text: "The special domains are $no_sni and $anything_else." };
   const name = t.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\./g, ".").toLowerCase();
   if (!/^[a-z0-9_*.-]+$/.test(name) || name.startsWith(".") || name.endsWith(".") || name.includes("..")) {
     return { kind: "", bad: true, text: "Not a host name: use letters, digits, hyphens and dots, with * for one label or part of one. Regular expressions are not supported." };
@@ -1538,8 +1632,8 @@ function patternRegex(p) {
 function sampleNames(p) {
   const t = p.trim();
   if (!t) return "";
-  if (/^none$/i.test(t)) return "<none>";
-  if (/^any$/i.test(t) || /^\^?\.\*\$?$/.test(t)) return "example.org <none>";
+  if (t === "$no_sni") return "<none>";
+  if (t === "$anything_else") return "example.org <none>";
   return t.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\./g, ".").replace(/\*/g, "www").toLowerCase();
 }
 
@@ -1552,10 +1646,16 @@ function quickChecks(v) {
   const out = [];
   const info = patternInfo($("f-pattern").value);
   if (!$("f-listener").value) out.push([0, "Choose the listener this rule belongs to."]);
-  if (!v.pattern) out.push([0, "The pattern is required."]);
+  if (!v.domain) out.push([0, "The domain is required."]);
   else if (info.bad) out.push([0, info.text]);
   if (radio("f-action") === "serve") {
-    if (!routeLines($("f-routes").value)) out.push([1, "Write at least one service rule, e.g. type=static_content; prefix=/; base_dir=/opt/www/site"]);
+    const entries = readServe();
+    if (!entries.length) out.push([1, "Add at least one entry: a reverse proxy or static files."]);
+    entries.forEach((e, i) => {
+      if (!e.prefix || !e.prefix.startsWith("/")) out.push([1, `Entry ${i + 1}: the prefix is a path starting with /.`]);
+      else if (e.type === "reverse_proxy" && !e.target) out.push([1, `Entry ${i + 1}: a reverse proxy needs its target, http://host:port.`]);
+      else if (e.type === "static_content" && !e.base_dir) out.push([1, `Entry ${i + 1}: static files need their folder.`]);
+    });
     if (radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the CAs page first."]);
   } else if (v.action !== "deny") {
     const host = val("f-target-host");
@@ -1744,7 +1844,7 @@ function openEditor(r, listenerName) {
   setText($("editor-title"), r ? `Edit ${r.pattern}` : "Add rule");
   setText($("editor-save"), r ? "Save" : "Add rule");
   setText($("editor-hint"), `Saved to ${s.file.path} (previous version kept as a backup) and applied at once.` +
-    (r ? ` This is the [[host]] at line ${r.line}.` : " A new rule goes after the last one."));
+    (r ? ` This is the rule at line ${r.line}.` : " A new rule goes after the last one of its listener."));
   setText($("preview-title"), `Will be written to ${s.file.path}`);
   prefill(r ? r.values : null);
   fillCASelect(ed.ca);
@@ -1794,7 +1894,7 @@ $("editor-form").addEventListener("submit", (ev) => {
     .then((d) => {
       $("editor").close();
       if (d.unchanged) toast("Nothing to save: the rule is as it was.");
-      else toast(was ? `Saved ${values.pattern}` : `Added ${values.pattern}${d.backup ? ` (previous file kept as ${d.backup})` : ""}`);
+      else toast(was ? `Saved ${values.domain}` : `Added ${values.domain}${d.backup ? ` (previous file kept as ${d.backup})` : ""}`);
       for (const w of d.warnings || []) toast(`Warning: ${w}`);
       saveProblems(d);
       if (d.restartNeeded) toast("bind/port changed: that part needs a restart.");
@@ -1809,9 +1909,9 @@ $("editor-form").addEventListener("submit", (ev) => {
 
 // ---------- listener wizard ----------
 //
-// Two steps: name and address, then optional overrides of [global]. Same
+// Two steps: name and address, then optional overrides of global. Same
 // flow as the rule wizard: quick checks here, a dry run on the server 300 ms
-// after typing stops, the [[listener]] block and the extra changes the save
+// after typing stops, the listener as written and the extra changes the save
 // will make (notes) shown before Save is enabled.
 
 const led = { l: null, base: null, step: 0, seq: 0, timer: 0, result: null, pending: false, conflict: false, saving: false };
@@ -1821,13 +1921,16 @@ const L_FIELDS = {
   max_aggregated_speed: "l-agg", max_single_connection_speed: "l-conn",
 };
 
+const L_LISTS = new Set(["bind", "proxy_trust_source"]); // YAML lists
+
 function lFormValues() {
   const orig = led.l ? led.l.values || {} : {};
   const v = {};
   for (const [k, id] of Object.entries(L_FIELDS)) {
     const now = val(id);
     const o = orig[k] ?? "";
-    v[k] = now === String(o).trim() ? o : now; // keep the file's spelling when unchanged
+    if (now === listText(o).trim()) v[k] = o; // keep the file's spelling when unchanged
+    else v[k] = L_LISTS.has(k) ? textList(now) : now;
   }
   return v;
 }
@@ -1924,7 +2027,7 @@ function openListenerEditor(l) {
   const start = {
     name: v.name ?? (l ? l.name : ""), bind: v.bind ?? (l ? l.bind : ""), port: v.port ?? (l ? String(l.port) : ""),
   };
-  for (const [k, id] of Object.entries(L_FIELDS)) $(id).value = start[k] ?? v[k] ?? "";
+  for (const [k, id] of Object.entries(L_FIELDS)) $(id).value = listText(start[k] ?? v[k] ?? "");
   setText($("lst-title"), l ? `Edit listener ${l.name}` : "Add listener");
   setText($("lst-save"), l ? "Save" : "Add listener");
   setText($("lst-hint"), `Saved to ${s.file.path} (previous version kept as a backup) and applied at once: the port opens or moves right away.`);
@@ -2448,7 +2551,7 @@ function renderRef() {
       const name = el("code", "ref-k", k.key);
       name.title = `Copy "${k.key} = " to the clipboard`;
       name.addEventListener("click", () => {
-        navigator.clipboard?.writeText(`${k.key} = `).then(() => toast(`Copied “${k.key} = ”`), () => {});
+        navigator.clipboard?.writeText(`${k.key}: `).then(() => toast(`Copied “${k.key}: ”`), () => {});
       });
       const def = el("span", "ref-def", k.default ? `default ${k.default}` : "");
       row.append(name, def, el("p", "ref-m", k.meaning));

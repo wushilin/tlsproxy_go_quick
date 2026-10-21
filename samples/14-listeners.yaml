@@ -1,0 +1,46 @@
+# Several listeners, each with its own rules: the public port 443, and a lab
+# port 9092 reachable only on the VPN address. Rules are grouped under routes
+# by the listener they belong to, as in every file.
+#
+#> public: www.example.com   => 192.168.1.30:443
+#> public: kafka.example.com => DENY
+#> lab: kafka.example.com    => 10.11.12.50:9092
+#> lab: www.example.com      => 10.11.12.60:443
+
+global:
+  idle_timeout: 600                 # applies to every listener unless it overrides it
+
+listeners:
+  - name: public                    # required: up to 64 letters, digits, spaces, -_@#~()[]<>"'; unique
+    bind: [0.0.0.0]                 # default 0.0.0.0; a list for several: [192.0.2.1, "2001:db8::1"]
+    port: 443                       # required
+
+  - name: lab
+    bind: [10.11.12.212]
+    port: 9092
+    # Optional overrides of global for this listener:
+    proxy_trust_source: [10.11.12.1] # who may send a PROXY header to this port
+    max_connections: 200            # on top of global max_connections
+    handshake_timeout: 5            # seconds
+    idle_timeout: 3600              # seconds
+    half_close_timeout: 10          # seconds
+    max_aggregated_speed: 200Mbit   # all connections on this listener together, each direction
+    max_single_connection_speed: 20MiB/s # each connection on it, each direction
+
+routes:
+  - listener: public
+    rules:
+      - domain: www.example.com
+        target: "192.168.1.30:443"
+
+      - domain: $anything_else
+        action: deny
+
+  - listener: lab
+    rules:
+      - domain: kafka.example.com
+        target: "10.11.12.50:9092"
+
+      # The same domain may appear on several listeners: each has its own rules.
+      - domain: $anything_else
+        target: "10.11.12.60:443"

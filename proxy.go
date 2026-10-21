@@ -97,11 +97,9 @@ type Server struct {
 	reloadNow  chan chan<- []string // poked by the console after a save; the reply says what failed
 	console    *Console
 
-	// console.toml (--console): its path, and the last version of it that
-	// parsed, which every load of config.toml merges in (see loadConfig).
-	consolePath string
-	consoleCfg  atomic.Pointer[ConsoleConfig]
-	consoleHash string // what was last read from consolePath, good or not (reload only)
+	// The console's settings, from start-up: every load of config.yaml
+	// merges them in (see loadConfig). nil = no console.
+	consoleCfg *ConsoleConfig
 
 	// Rules stopped from the console, by Rule.Key: routed as if absent. Kept
 	// in memory only, across reloads; a restart starts them all again.
@@ -221,34 +219,29 @@ func NewServer(cfg *Config) (*Server, error) {
 	rt := newRuntime(cfg, nil)
 	rt.serve = s.newServeState(cfg)
 	s.runtime.Store(rt)
-	s.consoleCfg.Store(cfg.Console)
-	if cfg.Console != nil {
-		s.consoleHash = cfg.Console.sourceHash
-	}
+	s.consoleCfg = cfg.Console
 	return s, nil
 }
 
 // startConsoleOnce starts the console, if the configuration has one and it
-// is not running yet. The plaintext password goes first, so the console
-// never starts with a hash that is not on disk.
+// is not running yet.
 func (s *Server) startConsoleOnce() error {
 	con := s.runtime.Load().cfg.Console
 	if con == nil || s.console != nil {
 		return nil
 	}
-	s.securePassword(con)
 	if err := s.startConsole(con); err != nil {
 		return fmt.Errorf("console: %w", err)
 	}
 	return nil
 }
 
-// loadConfig reads a version of config.toml as the proxy runs it: with
-// console.toml merged in. Every load goes through here (start-up, reloads,
-// and each check or save from the console), so a version that passes a
-// check is one a reload accepts.
+// loadConfig reads a version of config.yaml as the proxy runs it: with the
+// console merged in. Every load goes through here (start-up, reloads, and
+// each check or save from the console), so a version that passes a check
+// is one a reload accepts.
 func (s *Server) loadConfig(text string) (*Config, error) {
-	return LoadConfig(text, s.consoleCfg.Load())
+	return LoadConfig(text, s.consoleCfg)
 }
 
 // rateLimitedLog writes at most one line a second and says how many it left
@@ -305,14 +298,18 @@ func (s *Server) beginHandshake(key netip.Addr, limit int) *atomic.Int32 {
 
 func (s *Server) endHandshake(n *atomic.Int32) { n.Add(-1) }
 
-// Run binds to the configured address and serves forever. consolePath is
-// the console.toml cfg was loaded with, "" for none.
-func Run(cfg *Config, path, consolePath string) error {
+// Run binds to the configured address and serves forever.
+func Run(cfg *Config, path string) error {
+	// From here on the streams go to their log files, if configured: making
+	// the default CA already logs.
+	if err := ConfigureLogging(cfg.Log); err != nil {
+		return err
+	}
 	srv, err := NewServer(cfg) // before binding: a bad certificate is a startup error
 	if err != nil {
 		return err
 	}
-	srv.consolePath, srv.configPath = consolePath, path
+	srv.configPath = path
 	if err := srv.startConsoleOnce(); err != nil { // before any listener: its rule may be the console's
 		return err
 	}
@@ -321,10 +318,6 @@ func Run(cfg *Config, path, consolePath string) error {
 	// none can open.
 	if failed := srv.syncListeners(cfg); !srv.anyOpen(cfg.Listeners) {
 		return errors.New(strings.Join(failed, "; "))
-	}
-	// From here on the streams go to their log files, if configured.
-	if err := ConfigureLogging(cfg.Log); err != nil {
-		return err
 	}
 	StartAsyncLogging() // from here on nobody waits for the log to be written
 	defer FlushLogs()
@@ -510,9 +503,9 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 		return []string{fmt.Sprintf("cannot read %s: %v; the running configuration is unchanged", path, err)}
 	}
 	hash := fileHash(text)
-	consoleChanged, problems := s.rereadConsole()
-	if *haveLast && hash == *lastHash && !consoleChanged {
-		return problems
+	var problems []string
+	if *haveLast && hash == *lastHash {
+		return nil
 	}
 	*lastHash, *haveLast = hash, true
 	cfg, err := s.loadConfig(string(text))
@@ -524,15 +517,6 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 	if err := s.certs.Apply(cfg); err != nil {
 		errorf("config reload: %s rejected, keeping current config: %v", path, err)
 		return []string{fmt.Sprintf("the file was not applied, the running configuration is unchanged: %v", err)}
-	}
-	s.securePassword(cfg.Console)
-	if s.console != nil && cfg.Console != nil {
-		s.console.update(cfg.Console)
-		if consoleServed(cfg.Console) != s.console.served {
-			msg := fmt.Sprintf("console.toml: the console's plain HTTP address or its cert changed (from %s to %s); that part needs a restart", s.console.served, consoleServed(cfg.Console))
-			errorf("config reload: %s", msg)
-			problems = append(problems, msg)
-		}
 	}
 	for _, w := range cfg.Warnings {
 		errorf("config: %s", w)
@@ -763,12 +747,15 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	} else {
 		s.stats.CacheMisses.Add(1)
 	}
-	// The CA validating a TLS-ALPN-01 challenge for one of our names: only
-	// answered here when the rule that routes the name terminates TLS here.
-	// A passed-through name's challenges reach its target untouched, like
-	// any other connection (its backend runs its own ACME client), and so
-	// do a terminated name's when no challenge of ours is pending.
-	if info.offers(acme.ALPNProto) && d.Allow && d.Rule != nil && d.Rule.Terminates() {
+	// The CA validating a TLS-ALPN-01 challenge for a name this proxy is
+	// ordering a certificate for. The CA always comes to port 443, and the
+	// name's rule may be on another listener (the console on its own port),
+	// so it is answered here unless this listener passes the name through:
+	// then the challenge is its backend's (running its own ACME client) and
+	// reaches it untouched, like any other connection. Only a pending order
+	// of ours has an answer.
+	passedThrough := d.Allow && d.Rule != nil && !d.Rule.Terminates()
+	if info.offers(acme.ALPNProto) && !passedThrough {
 		if answer := s.certs.Challenge(sni); answer != nil {
 			tc := tls.Server(&prefixConn{Conn: client, prefix: hello}, &tls.Config{
 				Certificates: []tls.Certificate{*answer},
@@ -1430,86 +1417,4 @@ func (r *relay) finish() {
 	}
 	r.c.closed = true
 	r.c.mu.Unlock()
-}
-
-// rereadConsole reads console.toml again if it changed since it was last
-// read. A version that parses becomes the one every load merges in; one
-// that does not is reported, and the last good one stays.
-func (s *Server) rereadConsole() (changed bool, problems []string) {
-	if s.consolePath == "" {
-		return false, nil
-	}
-	text, err := os.ReadFile(s.consolePath)
-	if err != nil {
-		return false, []string{fmt.Sprintf("cannot read %s: %v; the console keeps its settings", s.consolePath, err)}
-	}
-	hash := fileHash(text)
-	if hash == s.consoleHash {
-		return false, nil
-	}
-	s.consoleHash = hash
-	con, err := ParseConsole(string(text))
-	if err != nil {
-		errorf("config reload: %s is invalid, the console keeps its settings: %v", s.consolePath, err)
-		return false, []string{fmt.Sprintf("%s is invalid, so the console keeps its settings: %v", s.consolePath, err)}
-	}
-	s.consoleCfg.Store(con)
-	logf("config reload: %s changed", s.consolePath)
-	return true, nil
-}
-
-// securePassword replaces a plaintext password in console.toml with its
-// hash, so the secret sits on disk only until the proxy first sees it.
-// Only that one line is rewritten. It reports whether the file changed.
-func (s *Server) securePassword(c *ConsoleConfig) bool {
-	if c == nil || c.Password == "" || s.consolePath == "" {
-		return false
-	}
-	path := s.consolePath
-	hash, err := hashPassword(c.Password)
-	if err != nil {
-		errorf("console: cannot hash the password: %v", err)
-		return false
-	}
-	c.PasswordHash, c.Password = hash, ""
-	configFileMu.Lock() // no other writer of ours may slip between this read and write
-	defer configFileMu.Unlock()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		errorf("console: cannot read %s to remove the plaintext password: %v", path, err)
-		return false
-	}
-	if c.sourceHash == "" || fileHash(data) != c.sourceHash {
-		logf("console: %s changed since it was parsed; leaving the newer file intact for the next reload", path)
-		return false
-	}
-	lines := strings.Split(string(data), "\n")
-	done := false
-	for i, line := range lines {
-		key, _, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok {
-			continue
-		}
-		switch strings.TrimSpace(key) {
-		case "password":
-			lines[i] = "password_hash = \"" + hash + "\""
-			done = true
-		case "password_hash":
-			lines[i] = "" // superseded by the new password
-		}
-	}
-	if !done {
-		return false
-	}
-	rewritten := []byte(strings.Join(lines, "\n"))
-	if err := writeFileAtomic(path, rewritten); err != nil {
-		errorf("console: cannot rewrite %s, THE PLAINTEXT PASSWORD IS STILL IN THE FILE: %v", path, err)
-		return false
-	}
-	c.sourceHash = fileHash(rewritten)
-	if s.consoleHash != "" {
-		s.consoleHash = c.sourceHash // our own rewrite: nothing for the next reload to pick up
-	}
-	logf("console: replaced the plaintext password in %s with its hash", path)
-	return true
 }

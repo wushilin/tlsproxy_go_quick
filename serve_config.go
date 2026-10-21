@@ -1,23 +1,24 @@
 package main
 
-// service_rule keys of a [[host]] rule, and [[basic_auth]] sections. A rule
-// with service rules serves HTTP itself, inside the TLS connection it
-// terminates: no target, no extra hop.
+// A rule's serve list, and basic_auth. A rule with serve entries answers
+// HTTP itself, inside the TLS connection it terminates: no target, no
+// extra hop.
 //
-//	[[host]]
-//	listener = https
-//	pattern = www.example.com
-//	cert = auto
-//	service_rule1 = type=reverse_proxy; prefix=/api/; target=http://127.0.0.1:8080; strip_prefix=true
-//	service_rule2 = type=static_content; prefix=/; base_dir=/opt/www/site; basic_auth=team
+//	routes:
+//	  - listener: https
+//	    rules:
+//	      - domain: www.example.com
+//	        cert: auto
+//	        serve:
+//	          - {type: reverse_proxy, prefix: /api/, target: "http://127.0.0.1:8080", strip_prefix: true}
+//	          - {type: static_content, prefix: /, base_dir: /opt/www/site, basic_auth: team}
+//	basic_auth:
+//	  - name: team
+//	    users:
+//	      - {username: jack, password_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."}
+//	      - {username: jill, password_plain: secret}
 //
-//	[[basic_auth]]
-//	name = team
-//	user1 = username=jack; password_hash=$argon2id$v=19$m=65536,t=3,p=4$...
-//	user2 = username=jill; password_plain=secret
-//
-// Any key starting service_rule is one; a key given twice keeps its last
-// value, as does a user key. The longest matching prefix serves a request.
+// The longest matching prefix serves a request.
 
 import (
 	"fmt"
@@ -32,9 +33,9 @@ const (
 	routeStatic = "static_content"
 )
 
-// ServiceRoute is one service_rule of a [[host]] rule.
+// ServiceRoute is one serve entry of a rule.
 type ServiceRoute struct {
-	Key         string // the service_rule key, e.g. service_rule1
+	Key         string // which entry it is, for messages: "serve 2"
 	Line        int
 	Type        string // routeProxy or routeStatic
 	Prefix      string // the request path it takes, starting with /
@@ -43,7 +44,7 @@ type ServiceRoute struct {
 	ForceHost   string // reverse_proxy: the Host sent on; "" = the client's
 	TLSVerify   bool   // reverse_proxy to https://: verify the target's certificate
 	BaseDir     string // static_content: the folder the prefix stands for
-	BasicAuth   string // the [[basic_auth]] that guards it; "" = none
+	BasicAuth   string // the basic_auth that guards it; "" = none
 	auth        *BasicAuth
 }
 
@@ -73,30 +74,20 @@ func (s *ServiceRoute) Describe() string {
 	return out
 }
 
-// isServiceRuleKey reports whether a [[host]] key is a service rule.
-func isServiceRuleKey(key string) bool { return strings.HasPrefix(key, "service_rule") }
-
-// rawServiceRule is a service_rule as written, parsed once the rule is.
+// rawServiceRule is a serve entry as written, parsed once the rule is.
 type rawServiceRule struct {
-	key, value string
-	line       int
+	key  string
+	opts [][2]string // its keys and values, in order
+	line int
 }
 
-// parseServiceRule reads one service_rule value: key=value options
-// separated by ;.
-func parseServiceRule(key, value string, line int) (*ServiceRoute, error) {
+// parseServiceRule reads one serve entry.
+func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, error) {
 	s := &ServiceRoute{Key: key, Line: line, TLSVerify: true}
 	seen := map[string]bool{}
 	var verify *bool
-	for _, part := range strings.Split(value, ";") {
-		if part = strings.TrimSpace(part); part == "" {
-			continue // a trailing ; is fine
-		}
-		k, v, ok := strings.Cut(part, "=")
-		if !ok {
-			return nil, fmt.Errorf("%q: expected option=value", part)
-		}
-		k, v = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(v)
+	for _, kv := range opts {
+		k, v := strings.ToLower(kv[0]), strings.TrimSpace(kv[1])
 		if seen[k] {
 			return nil, fmt.Errorf("%s is given twice", k)
 		}
@@ -138,28 +129,28 @@ func parseServiceRule(key, value string, line int) (*ServiceRoute, error) {
 			s.BaseDir = v
 		case "basic_auth":
 			if v == "" {
-				return nil, fmt.Errorf("basic_auth must name a [[basic_auth]] section")
+				return nil, fmt.Errorf("basic_auth must name a basic_auth item")
 			}
 			s.BasicAuth = v
 		default:
-			return nil, fmt.Errorf("unknown option %q (options: type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, basic_auth)", k)
+			return nil, fmt.Errorf("unknown key %q in a serve entry (type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, basic_auth)", k)
 		}
 	}
 	only := func(opt, typ string) error {
 		if seen[opt] && s.Type != typ {
-			return fmt.Errorf("%s only applies to type=%s", opt, typ)
+			return fmt.Errorf("%s only applies to type: %s", opt, typ)
 		}
 		return nil
 	}
 	switch {
 	case s.Type == "":
-		return nil, fmt.Errorf("type is required: type=%s or type=%s", routeProxy, routeStatic)
+		return nil, fmt.Errorf("type is required: %s or %s", routeProxy, routeStatic)
 	case s.Prefix == "":
-		return nil, fmt.Errorf("prefix is required, e.g. prefix=/ for everything")
+		return nil, fmt.Errorf("prefix is required, e.g. prefix: / for everything")
 	case s.Type == routeProxy && s.Target == nil:
-		return nil, fmt.Errorf("type=%s needs target=http://host:port (or https://)", routeProxy)
+		return nil, fmt.Errorf("type: %s needs target: http://host:port (or https://)", routeProxy)
 	case s.Type == routeStatic && s.BaseDir == "":
-		return nil, fmt.Errorf("type=%s needs base_dir, the folder the prefix stands for", routeStatic)
+		return nil, fmt.Errorf("type: %s needs base_dir, the folder the prefix stands for", routeStatic)
 	case s.Type == routeStatic && !strings.HasSuffix(s.Prefix, "/"):
 		return nil, fmt.Errorf("a %s prefix is a folder and ends with /, got %q", routeStatic, s.Prefix)
 	case verify != nil && s.Target != nil && s.Target.Scheme != "https":
@@ -190,7 +181,7 @@ func parseTarget(v string) (*url.URL, error) {
 	case u.User != nil:
 		return nil, fmt.Errorf("%q: no user:password@ in a target", v)
 	case u.Path != "" && u.Path != "/", u.RawQuery != "", u.Fragment != "":
-		return nil, fmt.Errorf("%q: a target is scheme://host:port only; the request's path is sent as it is (or without the prefix, with strip_prefix=true)", v)
+		return nil, fmt.Errorf("%q: a target is scheme://host:port only; the request's path is sent as it is (or without the prefix, with strip_prefix: true)", v)
 	}
 	if p := u.Port(); p != "" {
 		if _, err := parsePort(p); err != nil {
@@ -201,12 +192,11 @@ func parseTarget(v string) (*url.URL, error) {
 	return u, nil
 }
 
-// BasicAuth is one [[basic_auth]] section.
+// BasicAuth is one basic_auth item.
 type BasicAuth struct {
 	Name  string
 	Line  int
 	Users map[string]credential // by username
-	keys  map[string]string     // user key -> its username, so a repeated key replaces its user
 }
 
 // credential is one user's password: plain, or a hash checkPassword reads.
@@ -214,79 +204,58 @@ type credential struct {
 	plain, hash string
 }
 
-// basicAuthOption applies one key of a [[basic_auth]] section.
-func basicAuthOption(a *BasicAuth, key, value string) error {
-	switch {
-	case key == "name":
-		if !listenerName.MatchString(value) {
-			return fmt.Errorf("name must be 1-64 letters, digits, spaces or -_@#~()[]<>\"' (no space at either end), got %q", value)
-		}
-		a.Name = value
-		return nil
-	case !strings.HasPrefix(key, "user"):
-		return fmt.Errorf("unknown key %q in [[basic_auth]] (name, and user keys: user1 = username=...; password_hash=...)", key)
-	}
+// addUser adds one item of a basic_auth's users.
+func addUser(a *BasicAuth, opts [][2]string) error {
 	var user string
 	var cred credential
-	for _, part := range strings.Split(value, ";") {
-		if part = strings.TrimSpace(part); part == "" {
-			continue
-		}
-		k, v, ok := strings.Cut(part, "=")
-		if !ok {
-			return fmt.Errorf("%s: %q: expected option=value", key, part)
-		}
-		switch k = strings.ToLower(strings.TrimSpace(k)); k {
+	for _, kv := range opts {
+		switch k, v := kv[0], strings.TrimSpace(kv[1]); k {
 		case "username":
-			if user = strings.TrimSpace(v); user == "" || strings.Contains(user, ":") {
-				return fmt.Errorf("%s: username must be non-empty and without a colon", key)
+			if user = v; user == "" || strings.Contains(user, ":") {
+				return fmt.Errorf("username must be non-empty and without a colon")
 			}
 		case "password_plain":
-			cred.plain = strings.TrimSpace(v)
+			cred.plain = v
 		case "password_hash":
-			cred.hash = strings.TrimSpace(v)
+			cred.hash = v
 		default:
-			return fmt.Errorf("%s: unknown option %q (username, password_plain, password_hash)", key, k)
+			return fmt.Errorf("unknown key %q in a user (username, password_plain, password_hash)", k)
 		}
 	}
 	switch {
 	case user == "":
-		return fmt.Errorf("%s: username= is required", key)
+		return fmt.Errorf("username is required")
 	case cred.plain == "" && cred.hash == "":
-		return fmt.Errorf("%s: password_plain= or password_hash= is required (make a hash with tlsproxy --hash-password)", key)
+		return fmt.Errorf("user %s: password_plain or password_hash is required (make a hash with tlsproxy --hash-password)", user)
 	case cred.plain != "" && cred.hash != "":
-		return fmt.Errorf("%s: give password_plain or password_hash, not both", key)
+		return fmt.Errorf("user %s: give password_plain or password_hash, not both", user)
 	}
 	if cred.hash != "" {
 		if err := validHash(cred.hash); err != nil {
-			return fmt.Errorf("%s: password_hash: %v", key, err)
+			return fmt.Errorf("user %s: password_hash: %v", user, err)
 		}
 	}
-	if old, ok := a.keys[key]; ok {
-		delete(a.Users, old) // the key's last value wins
-	}
 	if _, dup := a.Users[user]; dup {
-		return fmt.Errorf("%s: user %s is already listed under another key", key, user)
+		return fmt.Errorf("user %s is listed twice", user)
 	}
-	a.keys[key] = user
 	a.Users[user] = cred
 	return nil
 }
 
-// resolveServe checks the service rules once every section is read: the
+// resolveServe checks the serve entries once every section is read: the
 // basic_auth each names, and prefixes given twice. The longest prefix comes
 // first, so the first that matches a request is the one that serves it.
 func (c *Config) resolveServe(auths []*BasicAuth) error {
 	c.BasicAuth = map[string]*BasicAuth{}
 	for _, a := range auths {
 		if a.Name == "" {
-			return fmt.Errorf("[[basic_auth]] at line %d: name is required", a.Line)
+			return fmt.Errorf("basic_auth at line %d: name is required", a.Line)
 		}
 		if len(a.Users) == 0 {
-			return fmt.Errorf("[[basic_auth]] at line %d (%s): no users; add user1 = username=...; password_hash=...", a.Line, a.Name)
+			return fmt.Errorf("basic_auth at line %d (%s): no users; add users: [{username: ..., password_hash: ...}]", a.Line, a.Name)
 		}
 		if prev := c.BasicAuth[a.Name]; prev != nil {
-			c.Warnings = append(c.Warnings, fmt.Sprintf("[[basic_auth]] %s at line %d replaces the one at line %d (the last one wins)", a.Name, a.Line, prev.Line))
+			return fmt.Errorf("basic_auth at line %d: the name %s is already used at line %d", a.Line, a.Name, prev.Line)
 		}
 		c.BasicAuth[a.Name] = a
 	}
@@ -298,21 +267,21 @@ func (c *Config) resolveServe(auths []*BasicAuth) error {
 				continue
 			}
 			if s.auth = c.BasicAuth[s.BasicAuth]; s.auth == nil {
-				return fmt.Errorf("[[host]] at line %d: %s: basic_auth=%s: there is no [[basic_auth]] named %s", r.Line, s.Key, s.BasicAuth, s.BasicAuth)
+				return fmt.Errorf("rule at line %d: %s: basic_auth: %s: there is no basic_auth named %s", r.Line, s.Key, s.BasicAuth, s.BasicAuth)
 			}
 			used[s.BasicAuth] = true
 		}
 	}
 	for name, a := range c.BasicAuth {
 		if !used[name] {
-			c.Warnings = append(c.Warnings, fmt.Sprintf("[[basic_auth]] %s at line %d is not used by any service_rule", name, a.Line))
+			c.Warnings = append(c.Warnings, fmt.Sprintf("basic_auth %s at line %d is not used by any serve entry", name, a.Line))
 		}
 	}
 	return nil
 }
 
-// serveSettings turns a rule's service_rule keys into its routes. A rule
-// with routes serves HTTP itself, so it has no target and nothing upstream.
+// serveSettings turns a rule's serve list into its routes. A rule with
+// routes serves HTTP itself, so it has no target and nothing upstream.
 func serveSettings(rule *Rule, r *rawRule) error {
 	if len(r.serviceRules) == 0 {
 		return nil
@@ -320,20 +289,20 @@ func serveSettings(rule *Rule, r *rawRule) error {
 	for _, kv := range []struct {
 		name string
 		v    *string
-	}{{"target_host", r.targetHost}, {"target_port", r.tport}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify},
-		{"upstream_sni", r.upstreamSNI}, {"proxy", r.proxy}, {"proxy_version", r.proxyVersion}} {
+	}{{"target", r.target}, {"upstream_tls", r.upstreamTLS}, {"upstream_tls_verify", r.upstreamVerify},
+		{"upstream_sni", r.upstreamSNI}, {"proxy", r.proxy}} {
 		if kv.v != nil {
-			return fmt.Errorf("%s does not apply to a rule with service_rule keys: it serves the requests itself (each service_rule says where they go)", kv.name)
+			return fmt.Errorf("%s does not apply to a rule with serve: it answers the requests itself (each serve entry says where they go)", kv.name)
 		}
 	}
 	if r.action != nil && !strings.EqualFold(*r.action, "allow") {
-		return fmt.Errorf("service_rule keys need action = allow (or no action)")
+		return fmt.Errorf("serve needs action: allow (or no action)")
 	}
 	if r.cert == nil || *r.cert == "" {
-		return fmt.Errorf("service_rule keys need cert = auto or cert = local-ca: the proxy has to decrypt the requests to serve them")
+		return fmt.Errorf("serve needs cert: auto or cert: local-ca: the proxy has to decrypt the requests to serve them")
 	}
 	for _, raw := range r.serviceRules {
-		s, err := parseServiceRule(raw.key, raw.value, raw.line)
+		s, err := parseServiceRule(raw.key, raw.opts, raw.line)
 		if err != nil {
 			return fmt.Errorf("%s (line %d): %v", raw.key, raw.line, err)
 		}

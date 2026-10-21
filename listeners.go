@@ -119,7 +119,7 @@ func (s *Server) syncListeners(cfg *Config) (failed []string) {
 // takeOverLocked hands a new listener the open sockets of one this
 // configuration no longer has, bound to exactly the same addresses: a
 // rename, or the console moving between its own listener and one of
-// config.toml's. Its connections never see the port close. Nil if there is
+// config.yaml's. Its connections never see the port close. Nil if there is
 // none.
 func (s *Server) takeOverLocked(name string, addrs []string, want map[string]bool) *liveListener {
 	for old, live := range s.listeners {

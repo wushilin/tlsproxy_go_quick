@@ -19,7 +19,7 @@ import (
 type treeItem struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
-	From  string `json:"from,omitempty"` // "" = written in this section; "default"; "[global]"
+	From  string `json:"from,omitempty"` // "" = written in this section; "default"; "global"
 }
 
 type treeNode struct {
@@ -97,19 +97,14 @@ func speed(bytesPerSec float64, written string) string {
 // configTree describes cfg, parsed from full; toEditor maps its lines to
 // the editor's.
 func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
-	lines := strings.Split(full, "\n")
-	written := func(header string) map[string]string {
-		if b := sectionBlocks(lines, header); len(b) > 0 {
-			return blockValues(lines, b[0])
+	written := func(section string) map[string]string { return sectionValues(full, section) }
+	hosts, lists := fileValues(full)
+	at := func(items map[int]map[string]any, line int) map[string]string {
+		out := map[string]string{}
+		for k, v := range items[line] {
+			out[k] = valueText(v)
 		}
-		return map[string]string{}
-	}
-	hosts, lists := sectionBlocks(lines, "[[host]]"), sectionBlocks(lines, "[[listener]]")
-	at := func(blocks []block, line int) map[string]string {
-		if b := blockAt(blocks, line); b != nil {
-			return blockValues(lines, *b)
-		}
-		return map[string]string{}
+		return out
 	}
 	item := func(set map[string]string, key, value string) treeItem {
 		it := treeItem{Key: key, Value: value}
@@ -119,8 +114,8 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		return it
 	}
 
-	g := written("[global]")
-	global := treeNode{Title: "[global]", Note: "applies to every listener unless it overrides it"}
+	g := written("global")
+	global := treeNode{Title: "global", Note: "applies to every listener unless it overrides it"}
 	for _, it := range []treeItem{
 		item(g, "handshake_timeout", secs(cfg.HandshakeTimeout, "none")),
 		item(g, "connect_timeout", secs(cfg.ConnectTimeout, "none")),
@@ -149,7 +144,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 			if set {
 				return treeItem{Key: key, Value: own}
 			}
-			return treeItem{Key: key, Value: global, From: "[global]"}
+			return treeItem{Key: key, Value: global, From: "global"}
 		}
 		n.Line = toEditor(l.Line)
 		n.Items = append(n.Items, treeItem{Key: "bind", Value: l.Bind}, treeItem{Key: "port", Value: strconv.Itoa(l.Port)})
@@ -227,8 +222,8 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		out = append(out, certs)
 	}
 
-	lg := written("[logging]")
-	logs := treeNode{Title: "[logging]"}
+	lg := written("logging")
+	logs := treeNode{Title: "logging"}
 	logs.Items = []treeItem{
 		item(lg, "stdout", map[bool]string{true: "the process's stdout", false: cfg.Log.Stdout}[cfg.Log.Stdout == ""]),
 		item(lg, "stderr", map[bool]string{true: "the process's stderr", false: cfg.Log.Stderr}[cfg.Log.Stderr == ""]),
@@ -248,6 +243,9 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 		return n
 	}
 	switch {
+	case r.Console:
+		n.Tag = "console"
+		add("cert", r.Cert)
 	case r.Serves():
 		n.Tag = "serve"
 		add("cert", r.Cert)
@@ -266,7 +264,7 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 		}
 		if r.CertValidateScript != "" {
 			add("cert_validate_script", r.CertValidateScript)
-			add("cert_validate_args", tomlArray(mustJSON(r.CertValidateArgs)))
+			add("cert_validate_args", strings.Join(r.CertValidateArgs, ", "))
 		}
 		if r.UpstreamTLS {
 			add("upstream", map[bool]string{true: "TLS, certificate verified", false: "TLS, certificate not verified"}[r.UpstreamTLSVerify])

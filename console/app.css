@@ -835,4 +835,8 @@ textarea.pem {
 }
 textarea.pem:focus { outline: 2px solid var(--focus); outline-offset: 0; border-color: transparent; }
 .ca-set-text { flex: 1; min-height: 360px; white-space: pre; }
-textarea.routes { white-space: pre; font-weight: 400; }
+.serve-rows { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; }
+.serve-row { display: grid; grid-template-columns: 9em 1fr 2fr auto; gap: 6px 8px; align-items: end; padding: 10px; border: 1px solid var(--line-strong); border-radius: 8px; }
+.serve-row .more { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 8px; }
+.serve-row select, .serve-row input[type=text] { height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--fg); font: 13px var(--font-mono); min-width: 0; }
+@media (max-width: 640px) { .serve-row, .serve-row .more { grid-template-columns: 1fr; } }

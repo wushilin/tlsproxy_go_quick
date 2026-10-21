@@ -246,8 +246,12 @@ func (m *CertManager) Check(cfg *Config) error {
 	// Every CA a rule names must exist (made on the CAs page) and load.
 	for i := range cfg.Rules {
 		if id := cfg.Rules[i].LocalCA(); id != "" {
-			if _, err := openLocalCA(id, filepath.Join(cfg.CARoot, id), false); err != nil {
-				return fmt.Errorf("[[host]] at line %d: cert = local-ca:%s: %w", cfg.Rules[i].Line, id, err)
+			dir := filepath.Join(cfg.CARoot, id)
+			if _, err := os.Stat(dir); id == defaultCAID && errors.Is(err, os.ErrNotExist) {
+				continue // made when the configuration is applied
+			}
+			if _, err := openLocalCA(id, dir, false); err != nil {
+				return fmt.Errorf("rule at line %d: cert: local-ca:%s: %w", cfg.Rules[i].Line, id, err)
 			}
 		}
 	}
@@ -258,6 +262,15 @@ func (m *CertManager) Check(cfg *Config) error {
 // (made on the CAs page). One already open stays open: its certificates are
 // kept.
 func (m *CertManager) openLocalCAs(cfg *Config) error {
+	// The default CA, whether a rule uses it or not: made if missing, then
+	// renewed with the others. Only a rule that needs it fails without it.
+	if dir := filepath.Join(cfg.CARoot, defaultCAID); !m.hasLocalCA(dir) {
+		if l, err := openLocalCA(defaultCAID, dir, true); err != nil {
+			errorf("cert: the default CA %s can't be made or opened in %s: %v", defaultCAID, dir, err)
+		} else {
+			m.localCAs.Store(dir, l)
+		}
+	}
 	for i := range cfg.Rules {
 		id := cfg.Rules[i].LocalCA()
 		if id == "" {
@@ -269,7 +282,7 @@ func (m *CertManager) openLocalCAs(cfg *Config) error {
 		}
 		l, err := openLocalCA(id, dir, false)
 		if err != nil {
-			return fmt.Errorf("[[host]] at line %d: cert = local-ca:%s: %w", cfg.Rules[i].Line, id, err)
+			return fmt.Errorf("rule at line %d: cert: local-ca:%s: %w", cfg.Rules[i].Line, id, err)
 		}
 		m.localCAs.Store(dir, l)
 	}
@@ -314,7 +327,7 @@ func (m *CertManager) LocalCA(cfg *Config, id string) *localCA {
 	return l
 }
 
-// reloadLocalCAConfigs picks up edits of the CAs' config.toml files.
+// reloadLocalCAConfigs picks up edits of the CAs' config.yaml files.
 func (m *CertManager) reloadLocalCAConfigs() {
 	m.localCAs.Range(func(_ string, l *localCA) bool {
 		l.loadConfig()
@@ -357,7 +370,7 @@ func checkScripts(cfg *Config) error {
 			err = errors.New("not an executable file")
 		}
 		if err != nil {
-			return fmt.Errorf("[[host]] at line %d: cert_validate_script = %s: %w", cfg.Rules[i].Line, script, err)
+			return fmt.Errorf("rule at line %d: cert_validate_script: %s: %w", cfg.Rules[i].Line, script, err)
 		}
 	}
 	return nil
@@ -566,6 +579,9 @@ func (m *CertManager) CertificateFor(rule *Rule, sni string) (*tls.Certificate, 
 // and the address it connected to.
 func (m *CertManager) CertificateForClient(rule *Rule, hello helloInfo, dialed netip.Addr) (*tls.Certificate, error) {
 	sni := hello.SNI
+	if rule.fixedCert != nil {
+		return rule.fixedCert, nil
+	}
 	if id := rule.LocalCA(); id != "" {
 		return m.localCertificate(rule, id, hello, dialed) // no placeholder: a name it doesn't issue for is refused
 	}
@@ -1599,4 +1615,10 @@ func (m *CertManager) RetryNow(domain string) bool {
 		}
 	}
 	return known
+}
+
+// hasLocalCA reports whether the CA in dir is open.
+func (m *CertManager) hasLocalCA(dir string) bool {
+	_, ok := m.localCAs.Load(dir)
+	return ok
 }

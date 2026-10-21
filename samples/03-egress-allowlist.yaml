@@ -18,51 +18,34 @@
 #> tracker.example.net        => DENY
 #> <none>                     => DENY
 
-[[listener]]
-name = https
-bind = 0.0.0.0
-port = 8443
+global:
+  max_connections: 256
 
-[global]
-max_connections = 256
+listeners:
+  - name: https
+    bind: [0.0.0.0]
+    port: 8443
 
-[[host]]
-listener = https
-pattern = github.com
-target_host = ${host}
-target_port = 443
+routes:
+  - listener: https
+    rules:
+      - domain: github.com
+        target: "${host}:443"
 
-[[host]]
-listener = https
-pattern = *.github.com
-target_host = ${host}
-target_port = 443
+      - domain: "*.github.com"
+        target: "${host}:443"
 
-[[host]]
-listener = https
-pattern = *.githubusercontent.com
-target_host = ${host}
-target_port = 443
+      - domain: "*.githubusercontent.com"
+        target: "${host}:443"
 
-[[host]]
-listener = https
-pattern = time.apple.com
-target_host = ${host}
-target_port = 443
+      - domain: time.apple.com
+        target: "${host}:443"
 
-[[host]]
-listener = https
-pattern = deb.debian.org
-target_host = ${host}
-target_port = 443
+      - domain: deb.debian.org
+        target: "${host}:443"
 
-[[host]]
-listener = https
-pattern = security.debian.org
-target_host = ${host}
-target_port = 443
+      - domain: security.debian.org
+        target: "${host}:443"
 
-[[host]]
-listener = https
-pattern = ANY
-action = deny
+      - domain: $anything_else
+        action: deny

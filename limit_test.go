@@ -37,7 +37,7 @@ func TestSpeedSettings(t *testing.T) {
 		"pattern=a.test\naction=deny\nmax_aggregated_speed=1MB":                            "max_aggregated_speed makes no sense on a deny rule",
 		"pattern=a.test\ntarget_host=x\ntarget_port=443\nmax_single_connection_speed=fast": "max_single_connection_speed: invalid rate",
 	} {
-		_, err := ParseConfig("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\n" + text + "\n")
+		_, err := parseFixture("[[listener]]\nname=default\nport=1\n[[host]]\nlistener=default\n" + text + "\n")
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", text, err, want)
 		}
@@ -108,7 +108,7 @@ func TestSpeedLimits(t *testing.T) {
 func TestBufferSizeIsClampedWithWarning(t *testing.T) {
 	for in, want := range map[string]int{"512": minBufferSize, "1048576": maxBufferSize, "65536": 65536} {
 		c := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nbuffer_size="+in+"\n")
-		warned := len(c.Warnings) == 1 && strings.Contains(c.Warnings[0], "line 5: buffer_size = "+in+" is outside 4096..131072; using "+strconv.Itoa(want))
+		warned := len(c.Warnings) == 1 && strings.Contains(c.Warnings[0], "buffer_size: "+in+" is outside 4096..131072; using "+strconv.Itoa(want))
 		if c.BufferSize != want || warned != (in != "65536") {
 			t.Errorf("buffer_size=%s: got %d, warnings %q", in, c.BufferSize, c.Warnings)
 		}

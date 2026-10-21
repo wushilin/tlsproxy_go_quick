@@ -41,6 +41,7 @@ func TestMain(m *testing.M) {
 	certAttemptBackoff = 50 * time.Millisecond // don't wait 5 s between ACME attempts in tests
 	pbkdf2Iterations = 1000                    // fast password hashing in tests
 	argon2Memory, argon2Passes, argon2Lanes = 64, 1, 1
+	defaultCARoot = testCARoot()             // not ./ca in the source tree
 	os.Setenv("PEBBLE_VA_NOSLEEP", "1")      // the in-process Pebble validates at once
 	os.Setenv("PEBBLE_WFE_NONCEREJECT", "0") // and doesn't reject good nonces on purpose
 	logMu.Unlock()
