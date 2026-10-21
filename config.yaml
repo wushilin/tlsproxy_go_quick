@@ -249,8 +249,9 @@ logging:
 #       force_host      the Host sent on (default the client's)
 #       tls_verify      false: an https:// target's certificate is not checked (default true)
 #     The target gets X-Forwarded-For / X-Real-IP (the client's address), X-Forwarded-Proto
-#     (https) and X-Forwarded-Host; whatever the client sent in those, or in Forwarded, is
-#     replaced.
+#     (https), X-Forwarded-Host, X-Forwarded-Port, X-Forwarded-Prefix (with strip_prefix),
+#     Forwarded (RFC 7239), X-Forwarded-By: tlsproxy_go_quick/<version> and Via; whatever
+#     the client sent in those (Via aside: it is added to) is replaced.
 #   {type: static_content, prefix: /assets/, base_dir: /opt/www/assets}
 #     The prefix (ending in /) stands for base_dir: /assets/a.css is base_dir/a.css.
 #     GET and HEAD. A folder is served by its index.html, else its index.htm, else

@@ -42,8 +42,11 @@ New:
   `{type: static_content, prefix: /assets/, base_dir: /folder}` (the prefix
   stands for the folder; no listings, no hidden files except `.well-known`,
   no symlinks out of it). The longest prefix wins; none is 404. The target
-  gets the client's own address in `X-Forwarded-For` / `X-Real-IP`, and
-  `X-Forwarded-Proto: https`; what the client sent in those is replaced.
+  gets the client's own address in `X-Forwarded-For` / `X-Real-IP`,
+  `X-Forwarded-Proto: https`, `X-Forwarded-Host`, `X-Forwarded-Port`,
+  `X-Forwarded-Prefix` (with `strip_prefix`), `Forwarded` (RFC 7239),
+  `X-Forwarded-By: tlsproxy_go_quick/<version>` and `Via`; what the client
+  sent in those is replaced (`Via` is added to).
   Clients get HTTP/2 if they ask. Each request is routed by its Host with the
   running configuration (a reload applies to the next request; a Host
   another rule serves gets 421).

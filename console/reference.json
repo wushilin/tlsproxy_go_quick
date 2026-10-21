@@ -290,7 +290,7 @@
   },
   {
     "section": "serve entries",
-    "about": "Each item of a rule's serve list. The client's address goes upstream as X-Forwarded-For; what it sent is replaced.",
+    "about": "Each item of a rule's serve list. A reverse_proxy target gets X-Forwarded-For/-Proto/-Host/-Port/-Prefix, X-Real-IP, Forwarded, X-Forwarded-By and Via; what the client sent in those is replaced (Via is added to).",
     "keys": [
       {
         "key": "type",

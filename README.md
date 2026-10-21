@@ -554,8 +554,13 @@ basic_auth:
 - **Forwarding headers are set, never trusted.** The target gets
   `X-Forwarded-For` and `X-Real-IP` (the client's address: the TCP peer's,
   or what a trusted PROXY header in front of the listener said),
-  `X-Forwarded-Proto: https` and `X-Forwarded-Host`. Whatever the client
-  sent in those, or in `Forwarded`, is replaced.
+  `X-Forwarded-Proto: https`, `X-Forwarded-Host` (the Host the client asked
+  for), `X-Forwarded-Port` (the port it connected to), `X-Forwarded-Prefix`
+  (the prefix `strip_prefix` took, e.g. `/api`), the same in RFC 7239 form
+  (`Forwarded: for=…;host=…;proto=https`), and who forwarded it:
+  `X-Forwarded-By: tlsproxy_go_quick/<version>` and `Via: 1.1 tlsproxy_go_quick`
+  (added to any `Via` already there). Whatever the client sent in the others
+  is replaced.
 - **HTTP/2** is offered to clients that ask for it; targets are spoken to in
   HTTP/1.1 (or HTTP/2 over `https://` when the target offers it). WebSocket
   upgrades and streamed responses pass through. An unreachable target gives

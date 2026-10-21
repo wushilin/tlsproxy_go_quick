@@ -82,7 +82,7 @@ var configReference = []sectionDoc{
 		{"max_single_connection_speed", "unlimited", "For each connection of this rule, each direction."},
 		{"serve", "(none)", "A list of entries: the rule answers HTTP itself instead of connecting to a target (needs cert; no target, upstream_* or proxy). The longest prefix wins; none = 404. See serve entries."},
 	}},
-	{"serve entries", "Each item of a rule's serve list. The client's address goes upstream as X-Forwarded-For; what it sent is replaced.", []keyDoc{
+	{"serve entries", "Each item of a rule's serve list. A reverse_proxy target gets X-Forwarded-For/-Proto/-Host/-Port/-Prefix, X-Real-IP, Forwarded, X-Forwarded-By and Via; what the client sent in those is replaced (Via is added to).", []keyDoc{
 		{"type", "(required)", "reverse_proxy or static_content."},
 		{"prefix", "(required)", "The request path it takes, starting with /. For /api/, a request for /api is redirected to /api/."},
 		{"target", "(required for reverse_proxy)", "http://host:port or https://host:port, no path."},

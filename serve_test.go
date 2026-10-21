@@ -249,8 +249,8 @@ user2=username=jill;password_plain=open sesame
 			}
 		}
 		// The client's address is the connection's; what it claims is replaced.
-		check("/x?q=1", "200 path=/x?q=1 host=www.test xff=127.0.0.1 proto=https fwd= auth=", "X-Forwarded-For", "6.6.6.6", "Forwarded", "for=6.6.6.6")
-		check("/api/v1/y", "200 path=/v1/y host=backend.lan xff=127.0.0.1 proto=https fwd= auth=")
+		check("/x?q=1", "200 path=/x?q=1 host=www.test xff=127.0.0.1 proto=https fwd=for=127.0.0.1;host=www.test;proto=https auth=", "X-Forwarded-For", "6.6.6.6", "Forwarded", "for=6.6.6.6")
+		check("/api/v1/y", "200 path=/v1/y host=backend.lan xff=127.0.0.1 proto=https fwd=for=127.0.0.1;host=www.test;proto=https auth=")
 		check("/api", "301 /api/")
 		check("/files/", "200 home")
 		check("/files/a.txt", "200 A")
@@ -265,8 +265,8 @@ user2=username=jill;password_plain=open sesame
 		check("/dead/", "502")
 		check("/private/z", "401")
 		check("/private/z", "401", "Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("jack:wrong")))
-		check("/private/z", "200 path=/private/z host=www.test xff=127.0.0.1 proto=https fwd= auth=", "Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("jack:pw")))
-		check("/private/z", "200 path=/private/z host=www.test xff=127.0.0.1 proto=https fwd= auth=", "Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("jill:open sesame")))
+		check("/private/z", "200 path=/private/z host=www.test xff=127.0.0.1 proto=https fwd=for=127.0.0.1;host=www.test;proto=https auth=", "Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("jack:pw")))
+		check("/private/z", "200 path=/private/z host=www.test xff=127.0.0.1 proto=https fwd=for=127.0.0.1;host=www.test;proto=https auth=", "Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("jill:open sesame")))
 		// A Host that another rule serves, on this connection: 421, so the
 		// client asks on a connection of its own.
 		check("/x", "421", "Host", "other.test")
@@ -423,7 +423,7 @@ func TestNoSNIServeEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if want := "path=/hello host=127.0.0.1 xff=127.0.0.2 proto=https fwd= auth="; string(body) != want {
+	if want := "path=/hello host=127.0.0.1 xff=127.0.0.2 proto=https fwd=for=127.0.0.2;host=127.0.0.1;proto=https auth="; string(body) != want {
 		t.Fatalf("%s\nwant %s", body, want)
 	}
 }
@@ -516,6 +516,49 @@ func TestServeRanges(t *testing.T) {
 		}
 		if resp, body := httpsGet(t, c, "https://www.test/", "Range", "bytes=3-6"); resp.StatusCode != 206 || body != "home" {
 			t.Errorf("h2=%v index.html range: %d %q", h2, resp.StatusCode, body)
+		}
+	}
+}
+
+// What a reverse_proxy tells its backend: the client, the name and port it
+// asked for, the prefix strip_prefix took, and who forwarded it. What the
+// client claimed in the same headers is replaced.
+func TestServeForwardingHeaders(t *testing.T) {
+	t.Parallel()
+	ca := newTestCA(t)
+	l, port := listen(t)
+	names := []string{"X-Forwarded-For", "X-Real-IP", "X-Forwarded-Proto", "X-Forwarded-Host", "X-Forwarded-Port",
+		"X-Forwarded-Prefix", "Forwarded", "X-Forwarded-By", "Via"}
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, n := range names {
+			fmt.Fprintf(w, "%s: %s\n", n, strings.Join(r.Header.Values(n), ", "))
+		}
+	}))
+	text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nca_root=" + testCARoot() + "\n" +
+		"[[host]]\nlistener=default\npattern=www.test\ncert=" + ca.localCA(t) +
+		fmt.Sprintf("\nservice_rule1 = type=reverse_proxy; prefix=/; target=http://127.0.0.1:%d\nservice_rule2 = type=reverse_proxy; prefix=/api/; target=http://127.0.0.1:%d; strip_prefix=true\n", port, port)
+	p := startProxyText(t, text, "")
+	_, proxyPort, _ := net.SplitHostPort(p.addr)
+	by := "tlsproxy_go_quick/" + strings.TrimPrefix(version, "v")
+	for _, h2 := range []bool{false, true} {
+		via := map[bool]string{false: "1.1", true: "2.0"}[h2] + " tlsproxy_go_quick"
+		c := serveClient(p, ca, h2)
+		spoof := []string{"X-Forwarded-For", "6.6.6.6", "X-Forwarded-Host", "evil", "X-Forwarded-Port", "1", "X-Forwarded-Prefix", "/evil", "Forwarded", "for=6.6.6.6", "X-Forwarded-By", "evil"}
+		for path, prefix := range map[string]string{"/x": "", "/api/x": "/api"} {
+			_, body := httpsGet(t, c, "https://www.test"+path, spoof...)
+			want := "X-Forwarded-For: 127.0.0.1\nX-Real-IP: 127.0.0.1\nX-Forwarded-Proto: https\nX-Forwarded-Host: www.test\n" +
+				"X-Forwarded-Port: " + proxyPort + "\nX-Forwarded-Prefix: " + prefix + "\nForwarded: for=127.0.0.1;host=www.test;proto=https\n" +
+				"X-Forwarded-By: " + by + "\nVia: " + via + "\n"
+			if body != want {
+				t.Errorf("h2=%v %s:\n%s\nwant\n%s", h2, path, body, want)
+			}
+		}
+	}
+	for client, host := range map[string]string{"2001:db8::1": "www.test:8443", "192.0.2.1": "a.test"} {
+		got := forwardedHeader(client, host)
+		want := map[string]string{"2001:db8::1": `for="[2001:db8::1]";host="www.test:8443";proto=https`, "192.0.2.1": "for=192.0.2.1;host=a.test;proto=https"}[client]
+		if got != want {
+			t.Errorf("Forwarded %s %s: %s, want %s", client, host, got, want)
 		}
 	}
 }

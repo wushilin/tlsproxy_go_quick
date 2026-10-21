@@ -511,6 +511,26 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 	return note
 }
 
+// forwardedHeader is RFC 7239's Forwarded for a request from client
+// (an address) to host: for=192.0.2.1;host=www.example.com;proto=https,
+// an IPv6 address bracketed and quoted, a host with a port quoted.
+func forwardedHeader(client, host string) string {
+	quote := func(v string) string {
+		if strings.ContainsAny(v, ":[]\"\\ ") {
+			return strconv.Quote(v)
+		}
+		return v
+	}
+	if strings.Contains(client, ":") {
+		client = "[" + client + "]"
+	}
+	out := "for=" + quote(client)
+	if host != "" {
+		out += ";host=" + quote(host)
+	}
+	return out + ";proto=https"
+}
+
 // staticDir is a route's base_dir, opened once. One that could not be
 // opened (not made yet, say) is tried again by a request, at most once a
 // second, so making the folder is enough: no reload needed.
@@ -703,13 +723,28 @@ func reverseProxy(rule *Rule, route *ServiceRoute, transport *http.Transport) *h
 			if err != nil {
 				client = pr.In.RemoteAddr
 			}
-			out.Header.Del("Forwarded") // RFC 7239: the client's own would be believed upstream
+			// What the client sent in these is replaced, never appended to:
+			// the backend would believe it.
 			out.Header.Set("X-Forwarded-For", client)
 			out.Header.Set("X-Real-IP", client)
 			out.Header.Set("X-Forwarded-Proto", "https")
+			out.Header.Del("X-Forwarded-Host")
 			if pr.In.Host != "" {
 				out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			}
+			out.Header.Del("X-Forwarded-Port")
+			if local, ok := pr.In.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+				if _, port, err := net.SplitHostPort(local.String()); err == nil {
+					out.Header.Set("X-Forwarded-Port", port)
+				}
+			}
+			out.Header.Del("X-Forwarded-Prefix")
+			if p := strings.TrimSuffix(route.Prefix, "/"); route.StripPrefix && p != "" {
+				out.Header.Set("X-Forwarded-Prefix", p) // what the path sent on lost
+			}
+			out.Header.Set("Forwarded", forwardedHeader(client, pr.In.Host)) // RFC 7239
+			out.Header.Set("X-Forwarded-By", serverName+"/"+strings.TrimPrefix(version, "v"))
+			out.Header.Add("Via", fmt.Sprintf("%d.%d %s", pr.In.ProtoMajor, pr.In.ProtoMinor, serverName))
 		},
 		// The response is this proxy's: its name replaces the upstream's, as
 		// nginx does.
