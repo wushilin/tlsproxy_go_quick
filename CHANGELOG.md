@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The console shows the proxy's version next to its name, once signed in.
+
 ## v1.5.1
 
 - The console's domain is optional. Unset, or `-console_domain none`, the

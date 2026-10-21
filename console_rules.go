@@ -128,6 +128,7 @@ type statusView struct {
 
 type consoleState struct {
 	Host      string         `json:"host"`
+	Version   string         `json:"version"` // this proxy's, for the header
 	Now       int64          `json:"now"`
 	Started   int64          `json:"started"`
 	Status    statusView     `json:"status"`
@@ -381,7 +382,7 @@ func (c *Console) state() consoleState {
 	}
 	host, _ := os.Hostname()
 	return consoleState{
-		Host: host, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, AuthGroups: authGroupNames(shown),
+		Host: host, Version: version, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, AuthGroups: authGroupNames(shown),
 		Status: statusView{Active: st.Active.Load(), Accepted: st.Accepted.Load(),
 			Completed: st.Completed.Load(), Denied: st.Denied.Load(), Failed: st.Failed.Load(), Rejected: st.Rejected.Load(),
 			MaxConnections: rt.cfg.MaxConnections, BytesUp: st.BytesUp.Load(), BytesDown: st.BytesDown.Load()},
