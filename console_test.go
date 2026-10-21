@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -212,16 +214,17 @@ func TestConsoleAuthAndRequestGuards(t *testing.T) {
 }
 
 // The console's settings come from flags and the environment, a flag
-// winning; domain and password are required.
+// winning; the password is required, the domain is not.
 func TestConsoleSettings(t *testing.T) {
 	for _, k := range []string{"CONSOLE_DOMAIN", "CONSOLE_PASSWORD", "CONSOLE_BIND", "CONSOLE_PORT", "CONSOLE_CERT"} {
 		t.Setenv(k, "")
 	}
 	for flags, want := range map[string]string{
-		"":                        "set -console_domain <name> (or $CONSOLE_DOMAIN) and $CONSOLE_PASSWORD, or run with -noconsole",
+		"":                        "needs a password: set $CONSOLE_PASSWORD",
 		"console_domain=a.test":   "needs a password: set $CONSOLE_PASSWORD",
 		"console_domain=*.test":   "needs a password",
 		"console_domain=10.0.0.1": "needs a password",
+		"console_domain=none":     "needs a password",
 	} {
 		f := map[string]string{}
 		if k, v, ok := strings.Cut(flags, "="); ok {
@@ -232,8 +235,22 @@ func TestConsoleSettings(t *testing.T) {
 		}
 	}
 	t.Setenv("CONSOLE_PASSWORD", "s3cret pass")
-	if _, err := ConsoleFromSettings(nil); err == nil || !strings.Contains(err.Error(), "needs its domain") {
-		t.Errorf("no domain: %v", err)
+	// No domain, none or $no_sni: clients without SNI, with a local CA's
+	// certificate. An IP address: the same, for that address.
+	for domain, want := range map[string]string{"": "", "none": "", "NONE": "", "$no_sni": "", "10.0.0.1": "10.0.0.1",
+		"[2001:DB8::1]": "2001:db8::1", "::ffff:10.0.0.2": "10.0.0.2"} {
+		c, err := ConsoleFromSettings(map[string]string{"console_domain": domain})
+		if err != nil || c.Domain != want || !c.NoSNI() || c.Cert != "local-ca" {
+			t.Errorf("%q: %+v %v", domain, c, err)
+		}
+	}
+	if c, err := ConsoleFromSettings(map[string]string{"console_domain": "none", "console_cert": "local-ca:ca002"}); err != nil || c.Cert != "local-ca:ca002" {
+		t.Errorf("none with another CA: %+v %v", c, err)
+	}
+	for domain, want := range map[string]string{"none": "ACME can't issue for $no_sni", "10.0.0.1": "ACME can't issue for 10.0.0.1"} {
+		if _, err := ConsoleFromSettings(map[string]string{"console_domain": domain, "console_cert": "auto"}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s with cert auto: %v", domain, err)
+		}
 	}
 	if _, err := ConsoleFromSettings(map[string]string{"console_domain": "*.test"}); err == nil || !strings.Contains(err.Error(), "not a host name") {
 		t.Errorf("a glob: %v", err)
@@ -817,5 +834,95 @@ routes:
 	want := []string{"$no_sni", "www.example.com", "a.test", "*.api.example.com", "*.example.com", "$anything_else"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// A console without a domain (none) is its listener's $no_sni rule: config.yaml
+// can't have one there, and with an IP address as its domain its
+// certificate is for that address.
+func TestConsoleNoSNIConfig(t *testing.T) {
+	t.Parallel()
+	con := &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: 8443, Cert: "local-ca"}
+	text := "global:\n  cert_root: " + strconv.Quote(testCARoot()) + "\nlisteners:\n  - {name: lan, port: 9000}\n"
+	cfg, err := LoadConfig(text+"routes:\n  - listener: lan\n    rules:\n      - {domain: $no_sni, action: deny}\n"+
+		"  - listener: $console\n    rules:\n      - {domain: www.test, action: deny}\n", con)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.ConsoleRule()
+	if r == nil || r.Kind != kindNone || r.Listener != "$console" || !r.Console || !r.Serves() {
+		t.Fatalf("its rule: %+v", r)
+	}
+	if d := cfg.ForListener(cfg.Listener("$console")).Route(""); d.Rule != r {
+		t.Fatal("no SNI on its listener is the console")
+	}
+	if d := cfg.ForListener(cfg.Listener("$console")).Route("www.test"); d.Rule == nil || d.Rule.Console {
+		t.Fatal("a name on its listener is the file's rule")
+	}
+	if _, err := LoadConfig(text+"routes:\n  - listener: $console\n    rules:\n      - {domain: $no_sni, action: deny}\n", con); err == nil ||
+		!strings.Contains(err.Error(), "answers clients without SNI") {
+		t.Fatalf("a $no_sni rule of the file's on its listener: %v", err)
+	}
+	ip := *con
+	ip.Domain = "10.9.8.7"
+	if cfg, err = LoadConfig(text, &ip); err != nil {
+		t.Fatal(err)
+	}
+	if r := cfg.ConsoleRule(); r.Kind != kindNone || len(r.certIPs) != 1 || r.certIPs[0].String() != "10.9.8.7" {
+		t.Fatalf("an IP address: %+v", r)
+	}
+	// A host name is what it was: a literal rule, and $no_sni stays the file's.
+	named := *con
+	named.Domain = "admin.test"
+	if cfg, err = LoadConfig(text+"routes:\n  - listener: $console\n    rules:\n      - {domain: $no_sni, action: deny}\n", &named); err != nil || cfg.ConsoleRule().Kind != kindLiteral {
+		t.Fatalf("a host name: %v", err)
+	}
+}
+
+// The console over TLS without SNI: a client by IP address gets a
+// certificate from the default CA for that address, signs in, and the
+// editor can't add a $no_sni rule to the console's listener. A host name in
+// the Host header is refused (DNS rebinding).
+func TestConsoleNoSNIOverTLS(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=0\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n"
+	os.WriteFile(path, []byte(text), 0o600)
+	for _, domain := range []string{"", "127.0.0.1"} {
+		con := &ConsoleConfig{Bind: "127.0.0.1", Binds: []string{"127.0.0.1"}, Port: freePort(t), Domain: domain, Cert: "local-ca", PasswordHash: mustHash(t, "pw")}
+		p := startProxyConsole(t, text, path, con)
+		waitForPort(t, con.Addrs()[0])
+		caPEM, err := os.ReadFile(filepath.Join(testCARoot(), defaultCAID, "ca_cert.pem"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool := x509.NewCertPool()
+		pool.AppendCertsFromPEM(caPEM)
+		tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}} // by IP: Go sends no SNI and checks the IP
+		t.Cleanup(tr.CloseIdleConnections)
+		jar, _ := cookiejar.New(nil)
+		c := &consoleClient{t: t, base: fmt.Sprintf("https://127.0.0.1:%d%s", con.Port, consolePath), http: &http.Client{Jar: jar, Timeout: T, Transport: tr}}
+		if code := c.login("pw"); code != 200 {
+			t.Fatalf("domain %q: sign-in by IP: %d", domain, code)
+		}
+		if code, _ := c.get("/api/status"); code != 200 {
+			t.Fatalf("domain %q: signed in: %d", domain, code)
+		}
+		c.host = "rebind.example"
+		if code, _ := c.get("/api/status"); code != 403 && code != http.StatusMisdirectedRequest { // routed elsewhere: 421
+			t.Errorf("domain %q: a host name in Host: %d", domain, code)
+		}
+		c.host = "127.0.0.2"
+		if code, _ := c.get("/api/status"); (domain == "") != (code == 200) {
+			t.Errorf("domain %q: Host 127.0.0.2: %d", domain, code)
+		}
+		c.host = ""
+		_, f := c.get("/api/config")
+		vals := map[string]any{"listener": "$console", "domain": "$no_sni", "action": "deny"}
+		if _, out := c.post("/api/rules/save", map[string]any{"line": 0, "baseHash": f["hash"], "baseMtime": f["mtime"], "values": vals}); out["ok"] == true ||
+			!strings.Contains(fmt.Sprint(out["error"]), "answers clients without SNI") {
+			t.Errorf("domain %q: a $no_sni rule on the console's listener: %v", domain, out)
+		}
+		_ = p
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,7 +76,7 @@ type Console struct {
 	mu          sync.Mutex
 	verifyMu    sync.Mutex // serialises deliberately expensive password checks
 	hash        string
-	domain      string // the only name requests may carry
+	domain      string // the only name requests may carry; "" = any IP address
 	sessions    map[string]*session
 	failures    int
 	lockedUntil time.Time
@@ -139,8 +140,16 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	})
 	c.handler = c.guard(root)
 	s.console = c
-	c.addr = "https://" + net.JoinHostPort(cfg.Domain, strconv.Itoa(cfg.Port))
-	logf("console: served at %s%s/ by listener %s on %s (cert: %s; password required)", c.addr, consolePath, cfg.ListenerName(), strings.Join(cfg.Addrs(), ", "), cfg.Cert)
+	host := cfg.Domain
+	if host == "" {
+		host = "<address>" // any of the listener's, by IP
+	}
+	c.addr = "https://" + net.JoinHostPort(host, strconv.Itoa(cfg.Port))
+	served := ""
+	if cfg.NoSNI() {
+		served = ", for clients without SNI"
+	}
+	logf("console: served at %s%s/ by listener %s on %s%s (cert: %s; password required)", c.addr, consolePath, cfg.ListenerName(), strings.Join(cfg.Addrs(), ", "), served, cfg.Cert)
 	return nil
 }
 
@@ -175,6 +184,21 @@ func fail(w http.ResponseWriter, status int, format string, a ...any) {
 	writeJSON(w, status, map[string]any{"ok": false, "error": fmt.Sprintf(format, a...)})
 }
 
+// knownHost reports whether a request's Host (no port, no brackets) is the
+// console's: its domain, or, without one, any IP address. A host name never
+// is then, so DNS rebinding can't reach it. c.mu is held.
+func (c *Console) knownHost(host string) bool {
+	if c.domain != "" {
+		if want, err := netip.ParseAddr(c.domain); err == nil {
+			got, err := netip.ParseAddr(host)
+			return err == nil && got.Unmap() == want
+		}
+		return host == c.domain
+	}
+	_, err := netip.ParseAddr(host)
+	return err == nil
+}
+
 // guard runs for every request: Host check, security headers, POST hygiene.
 func (c *Console) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +208,7 @@ func (c *Console) guard(next http.Handler) http.Handler {
 		}
 		host = strings.ToLower(strings.Trim(host, "[]"))
 		c.mu.Lock()
-		known := host == c.domain
+		known := c.knownHost(host)
 		c.mu.Unlock()
 		if !known {
 			// Its rule only routes its domain here; anything else is not a

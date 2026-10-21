@@ -3,12 +3,19 @@ package main
 // The web console's settings: given at start-up, never in config.yaml, so
 // nothing saved from the console can change them or lock it out.
 //
-//	-console_domain admin.example.com   or $CONSOLE_DOMAIN   (required)
+//	-console_domain admin.example.com   or $CONSOLE_DOMAIN   (default: none, see below)
 //	$CONSOLE_PASSWORD                    the password, or its $argon2id$ hash (required)
 //	-console_bind 0.0.0.0                or $CONSOLE_BIND     (default: all addresses)
 //	-console_port 443                    or $CONSOLE_PORT     (default 443)
-//	-console_cert auto                   or $CONSOLE_CERT     (auto | local-ca[:caNNN])
+//	-console_cert auto                   or $CONSOLE_CERT     (auto | local-ca[:caNNN]; default
+//	                                                           auto, local-ca without a host name)
 //	-noconsole                           no console at all
+//
+// Without a domain (or with none, or $no_sni) the console is its listener's
+// $no_sni rule: clients that send no name, by the address they connected to,
+// with a certificate from a local CA for that address. An IP address as the
+// domain is the same rule, its certificate for that address only (a client
+// sending it as SNI routes as one without SNI, see helloInfo.SNIIP).
 //
 // The console owns a listener named $console, whatever its port. Its
 // name, bind, port and the rule for the console's domain are
@@ -20,6 +27,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -30,13 +38,31 @@ type ConsoleConfig struct {
 	Bind         string   // normalised, as a listener's
 	Binds        []string // its addresses
 	Port         int
-	Domain       string // the name it is served under
+	Domain       string // the name it is served under; "" = clients without SNI, or an IP address
 	Cert         string // auto | local-ca[:caNNN]
 	PasswordHash string // what sign-ins are checked against
 
 	// certificate, when set, is served instead of one from Cert. Only
 	// tests set it, for a console in a test whose CAs are its own.
 	certificate *tls.Certificate
+}
+
+// NoSNI reports whether the console is its listener's $no_sni rule: no
+// domain, or an IP address.
+func (c *ConsoleConfig) NoSNI() bool { return c.Domain == "" || c.IP().IsValid() }
+
+// IP is the console's domain as an IP address, if it is one.
+func (c *ConsoleConfig) IP() netip.Addr {
+	a, _ := netip.ParseAddr(c.Domain)
+	return a
+}
+
+// Name is the console's domain for messages.
+func (c *ConsoleConfig) Name() string {
+	if c.Domain == "" {
+		return noSNI + " (clients without SNI)"
+	}
+	return c.Domain
 }
 
 // ListenerName is the name of the listener the console owns.
@@ -69,8 +95,8 @@ var (
 	consoleCertSetting   = consoleSetting{"console_cert", "CONSOLE_CERT"}
 )
 
-// consoleMissing is what to tell someone who started without them.
-const consoleMissing = "the web console needs its domain and password: set -console_domain <name> (or $CONSOLE_DOMAIN) and $CONSOLE_PASSWORD, or run with -noconsole"
+// consoleMissing is what to tell someone who started without a password.
+const consoleMissing = "the web console needs a password: set $CONSOLE_PASSWORD (the password, or a hash from tlsproxy --hash-password), and -console_domain <name> (or $CONSOLE_DOMAIN; without one it answers clients without SNI), or run with -noconsole"
 
 // ConsoleFromSettings reads the console's settings from flags (by name,
 // without the dash) and the environment. The password is hashed here,
@@ -79,15 +105,19 @@ func ConsoleFromSettings(flags map[string]string) (*ConsoleConfig, error) {
 	c := &ConsoleConfig{Bind: "0.0.0.0", Binds: []string{"0.0.0.0"}, Port: 443, Cert: "auto"}
 	c.Domain = strings.ToLower(strings.TrimSpace(consoleDomainSetting.value(flags)))
 	password := os.Getenv("CONSOLE_PASSWORD")
-	switch {
-	case c.Domain == "" && password == "":
+	if password == "" {
 		return nil, fmt.Errorf("%s", consoleMissing)
-	case c.Domain == "":
-		return nil, fmt.Errorf("the web console needs its domain: set -console_domain <name> (or $CONSOLE_DOMAIN), or run with -noconsole")
-	case password == "":
-		return nil, fmt.Errorf("the web console needs a password: set $CONSOLE_PASSWORD (the password, or a hash from tlsproxy --hash-password), or run with -noconsole")
-	case !isHostName(c.Domain):
-		return nil, fmt.Errorf("console domain %q is not a host name like admin.example.com (no * and no IP address)", c.Domain)
+	}
+	if c.Domain == "none" || c.Domain == noSNI {
+		c.Domain = ""
+	}
+	if a, err := netip.ParseAddr(strings.Trim(c.Domain, "[]")); err == nil && a.Zone() == "" {
+		c.Domain = a.Unmap().String()
+	} else if c.Domain != "" && !isHostName(c.Domain) {
+		return nil, fmt.Errorf("console domain %q is not a host name like admin.example.com (no *), an IP address, or none (clients without SNI)", c.Domain)
+	}
+	if c.NoSNI() {
+		c.Cert = "local-ca" // ACME needs a host name; ca001 always exists
 	}
 	if v := consoleBindSetting.value(flags); v != "" {
 		binds, err := parseBinds(v)
@@ -111,6 +141,9 @@ func ConsoleFromSettings(flags map[string]string) (*ConsoleConfig, error) {
 		c.Cert = v
 		if strings.EqualFold(v, "auto") {
 			c.Cert = "auto"
+		}
+		if c.NoSNI() && c.Cert == "auto" {
+			return nil, fmt.Errorf("console cert auto needs a host name as -console_domain: ACME can't issue for %s. Use local-ca (the default here)", c.Name())
 		}
 	}
 	if strings.HasPrefix(password, "$argon2id$") || strings.HasPrefix(password, hashPrefix+"$") {
@@ -187,24 +220,41 @@ func (cfg *Config) placeConsoleListener(con *ConsoleConfig) error {
 }
 
 // addConsoleRule adds the console's rule to its listener once config.yaml's
-// rules are built. A rule there for the console's exact domain is an error.
+// rules are built. A rule there for the console's exact domain (its $no_sni,
+// for a console without a host name) is an error.
 func (cfg *Config) addConsoleRule(con *ConsoleConfig) error {
 	if con == nil {
 		return nil
 	}
 	name := con.ListenerName()
 	for _, r := range cfg.Rules {
-		if r.Listener == name && r.Kind == kindLiteral && literalName(r.Source) == con.Domain {
+		if r.Listener != name {
+			continue
+		}
+		if con.NoSNI() && r.Kind == kindNone {
+			return fmt.Errorf("rule at line %d: the web console answers clients without SNI (%s) on listener %s, so %s can't have a rule of its own there. Start the console with -console_domain <name>, or move this rule to another listener", r.Line, con.Name(), name, noSNI)
+		}
+		if !con.NoSNI() && r.Kind == kindLiteral && literalName(r.Source) == con.Domain {
 			return fmt.Errorf("rule at line %d: %s is the web console's domain on listener %s, so it can't have a rule of its own there. Use another name, or start the console with another -console_domain", r.Line, con.Domain, name)
 		}
 	}
-	pattern, cert := con.Domain, con.Cert
-	if con.certificate != nil {
-		cert = "local-ca" // passes the checks; the certificate is con's own
+	raw := rawRule{listener: &name, cert: &con.Cert, console: true}
+	pattern := con.Domain
+	if con.NoSNI() {
+		pattern = noSNI
 	}
-	rule, err := buildRule(cfg, rawRule{listener: &name, pattern: &pattern, cert: &cert, console: true})
+	raw.pattern = &pattern
+	if ip := con.IP(); ip.IsValid() {
+		only := ip.String() // its certificate, and the only address sent as SNI it takes
+		raw.certDomains = &only
+	}
+	if con.certificate != nil {
+		cert := "local-ca" // passes the checks; the certificate is con's own
+		raw.cert = &cert
+	}
+	rule, err := buildRule(cfg, raw)
 	if err != nil {
-		return fmt.Errorf("the web console (%s): %v", con.Domain, err)
+		return fmt.Errorf("the web console (%s): %v", con.Name(), err)
 	}
 	rule.fixedCert = con.certificate
 	cfg.Rules = append(cfg.Rules, rule)

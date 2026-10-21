@@ -105,10 +105,10 @@ var configReference = []sectionDoc{
 		{"compress_after", "3", "Generations above this number are gzip-compressed."},
 	}},
 	{"console", "The web console is not in this file: it is set at start-up, so nothing saved from it can change it. On by default; -noconsole turns it off.", []keyDoc{
-		{"-console_domain", "$CONSOLE_DOMAIN (required)", "The name it is served under, as a rule of its listener that this file can't override."},
+		{"-console_domain", "$CONSOLE_DOMAIN, or none", "The name it is served under, as a rule of its listener that this file can't override. Unset or none: that listener's $no_sni (clients by IP address), with a local CA's certificate; an IP address: the same, for that address."},
 		{"$CONSOLE_PASSWORD", "(required)", "Its password, hashed at start-up, or a hash from tlsproxy --hash-password."},
 		{"-console_bind", "$CONSOLE_BIND, or all addresses", "Where it listens."},
 		{"-console_port", "$CONSOLE_PORT, or 443", "Its port. The console's listener is $console on any port; its bind and port are reserved."},
-		{"-console_cert", "$CONSOLE_CERT, or auto", "auto (needs acme_agree_tos: true) or local-ca / local-ca:ca002."},
+		{"-console_cert", "$CONSOLE_CERT, or auto (local-ca without a host name)", "auto (needs acme_agree_tos: true and a host name) or local-ca / local-ca:ca002."},
 	}},
 }

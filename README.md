@@ -1031,15 +1031,21 @@ tlsproxy config.yaml -noconsole                     # no console at all
 
 | setting | default | meaning |
 |---|---|---|
-| `-console_domain` or `$CONSOLE_DOMAIN` | (required) | the name it is served under, as a rule of its listener that `config.yaml` can't override. A host name: no `*`, no IP address |
+| `-console_domain` or `$CONSOLE_DOMAIN` | none | the name it is served under, as a rule of its listener that `config.yaml` can't override: a host name (no `*`). Unset or `none`: the console is that listener's `$no_sni` rule, for clients without SNI (by IP address), with a certificate from a local CA for the address the client connected to. An IP address: the same, with a certificate for that address only (a client sending it as SNI gets there too) |
 | `$CONSOLE_PASSWORD` | (required) | the password, hashed at start-up, or a hash: `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>` (argon2id, 64 MiB, 3 passes) from `tlsproxy --hash-password`, or `pbkdf2-sha256$<iterations>$<salt>$<hash>` from older versions. Only in the environment, never a flag, so it is not in the process list |
 | `-console_bind` or `$CONSOLE_BIND` | 0.0.0.0 (all IPv4 addresses) | where it listens; several addresses separated by `;` or `,` |
 | `-console_port` or `$CONSOLE_PORT` | 443 | its port |
-| `-console_cert` or `$CONSOLE_CERT` | auto | `auto` (ACME; needs `acme_agree_tos: true` in `config.yaml`) or `local-ca` (the default CA, `ca001`, always there) / `local-ca:ca002` (must exist) |
+| `-console_cert` or `$CONSOLE_CERT` | auto; local-ca without a host name | `auto` (ACME; needs `acme_agree_tos: true` in `config.yaml`, and a host name as the domain) or `local-ca` (the default CA, `ca001`, always there) / `local-ca:ca002` (must exist) |
 | `-noconsole` | | no console; together with any of the flags above it is an error |
 
-Without a domain and a password the proxy refuses to start and says what is
-missing. A flag wins over its variable. Flags take one dash or two, and
+Without a password the proxy refuses to start and says so. Without a
+domain, the console's listener's `$no_sni` is the console's: a rule of
+`config.yaml` for `$no_sni` on that listener is an error (one on another
+listener is fine), and the console can't edit, stop or delete its rule. Run
+it this way on a listener of its own, reached by IP:
+`CONSOLE_PASSWORD=... tlsproxy config.yaml -console_bind 10.0.0.2 -console_port 9443`
+and open `https://10.0.0.2:9443/` (trust `ca001`'s certificate, or accept
+the warning). A flag wins over its variable. Flags take one dash or two, and
 `-flag value` or `-flag=value`, after the config file's name:
 `tlsproxy [config.yaml] [-noconsole] [-console_domain x] ... [--test <sni>...]`.
 A `--test` dry run doesn't need the console's settings (without them it
