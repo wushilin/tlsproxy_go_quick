@@ -77,7 +77,7 @@ func startProxyConsole(t *testing.T, text, path string, con *ConsoleConfig) *pro
 			live.close()
 		}
 		srv.listenersMu.Unlock()
-		srv.runtime.Load().serve.retire()
+		srv.stopServing()
 	})
 	return &proxyUnderTest{addr: l.Addr().String(), srv: srv}
 }

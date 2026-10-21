@@ -345,7 +345,7 @@ func TestServeFolders(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{
 		"html/index.html": "from html", "html/index.htm": "not this", "htm/index.htm": "from htm",
-		"list/a b.txt": "x", "list/<i>.png": "y", "list/.secret": "z", "list/sub/f": "", "none/f": "",
+		"list/a b.txt": "x", "list/a&b.png": "y", "list/.secret": "z", "list/sub/f": "", "none/f": "",
 	} {
 		os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0o755)
 		os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
@@ -379,12 +379,12 @@ func TestServeFolders(t *testing.T) {
 			t.Errorf("%s: Server %q", url, sv)
 		}
 		if want == "200 listing" {
-			for _, in := range []string{`href="a%20b.txt"`, "&lt;i&gt;.png", `href="sub/"`, `data-kind="image"`} {
+			for _, in := range []string{`href="a%20b.txt"`, ">a&amp;b.png<", `href="sub/"`, `data-kind="image"`} {
 				if !strings.Contains(body, in) {
 					t.Errorf("listing lacks %s", in)
 				}
 			}
-			if strings.Contains(body, "secret") || strings.Contains(body, "<i>") {
+			if strings.Contains(body, "secret") || strings.Contains(body, ">a&b.png<") {
 				t.Error("listing shows a hidden file or an unescaped name")
 			}
 			if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'none'") {

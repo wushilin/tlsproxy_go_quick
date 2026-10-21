@@ -94,6 +94,11 @@ type Server struct {
 	nextID  atomic.Uint64
 
 	configPath string               // "" when the config did not come from a file
+
+	// retiring are serve states a reload replaced, still open for the
+	// requests using them; stopServing closes them at once.
+	retiringMu sync.Mutex
+	retiring   map[*serveState]bool
 	reloadNow  chan chan<- []string // poked by the console after a save; the reply says what failed
 	console    *Console
 
@@ -528,7 +533,7 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 	rt.serve = s.newServeState(cfg)
 	s.stats.prepare(cfg) // before it goes live: connections only read these counters
 	s.runtime.Store(rt)
-	old.serve.retire()
+	s.retire(old.serve)
 	problems = append(problems, s.syncListeners(cfg)...) // after the store: a new listener's connections need its config
 	extra := ""
 	if rt.pool != old.pool {

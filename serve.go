@@ -140,7 +140,7 @@ func (s *Server) newServeState(cfg *Config) *serveState {
 			switch route.Type {
 			case routeStatic:
 				d := &staticDir{path: route.BaseDir}
-				if _, err := d.handler(); err != nil {
+				if _, _, err := d.open(); err != nil {
 					errorf("rule at line %d: %s: base_dir: %v; its requests are answered 503 until it exists", r.Line, route.Key, err)
 				}
 				st.dirs[route] = d
@@ -155,21 +155,56 @@ func (s *Server) newServeState(cfg *Config) *serveState {
 // retire lets go of a state the configuration no longer uses: its web
 // servers take no new connections at once, its folders and idle upstream
 // connections are closed once requests still using them have had a minute.
-func (st *serveState) retire() {
+func (s *Server) retire(st *serveState) {
 	if st == nil {
 		return
 	}
 	for _, w := range st.web {
 		w.Close()
 	}
+	s.retiringMu.Lock()
+	if s.retiring == nil {
+		s.retiring = map[*serveState]bool{}
+	}
+	s.retiring[st] = true
+	s.retiringMu.Unlock()
 	time.AfterFunc(time.Minute, func() {
-		for _, d := range st.dirs {
-			d.close()
-		}
-		for _, t := range st.transports {
-			t.CloseIdleConnections()
-		}
+		s.retiringMu.Lock()
+		delete(s.retiring, st)
+		s.retiringMu.Unlock()
+		st.close()
 	})
+}
+
+// stopServing closes every serve state at once, the current one and those
+// still retiring: nothing is left open (Windows can't remove an open folder).
+func (s *Server) stopServing() {
+	s.retiringMu.Lock()
+	all := []*serveState{s.runtime.Load().serve}
+	for st := range s.retiring {
+		all = append(all, st)
+	}
+	s.retiring = nil
+	s.retiringMu.Unlock()
+	for _, st := range all {
+		st.close()
+	}
+}
+
+// close lets go of everything a state holds, now.
+func (st *serveState) close() {
+	if st == nil {
+		return
+	}
+	for _, w := range st.web {
+		w.Close()
+	}
+	for _, d := range st.dirs {
+		d.close()
+	}
+	for _, t := range st.transports {
+		t.CloseIdleConnections()
+	}
 }
 
 // webErrorLog sends net/http's own messages to the error log.
@@ -463,12 +498,12 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 	}
 	switch route.Type {
 	case routeStatic:
-		dir := rt.serve.dirs[route]
-		if _, err := dir.handler(); err != nil {
+		root, files, err := rt.serve.dirs[route].open()
+		if err != nil {
 			http.Error(w, "base_dir is not available", http.StatusServiceUnavailable)
 			return note + fmt.Sprintf(" (base_dir: %v)", err)
 		}
-		note += serveFile(w, r, route, dir)
+		note += serveFile(w, r, route, root, files)
 	case routeProxy:
 		rt.serve.proxies[route].ServeHTTP(w, r)
 		note += " -> " + route.Target.Scheme + "://" + route.TargetAddr()
@@ -480,39 +515,46 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 // opened (not made yet, say) is tried again by a request, at most once a
 // second, so making the folder is enough: no reload needed.
 type staticDir struct {
-	path  string
-	mu    sync.Mutex
-	root  *os.Root
-	files http.Handler
-	err   error
-	tried time.Time
+	path   string
+	mu     sync.Mutex
+	root   *os.Root
+	files  http.Handler
+	err    error
+	tried  time.Time
+	closed bool // by close: never opened again
 }
 
-func (d *staticDir) handler() (http.Handler, error) {
+// open is the folder and its file server, opening it if it isn't yet.
+func (d *staticDir) open() (*os.Root, http.Handler, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.files == nil && time.Since(d.tried) >= time.Second {
+	if d.files == nil && !d.closed && time.Since(d.tried) >= time.Second {
 		d.tried = time.Now()
 		if d.root, d.err = os.OpenRoot(d.path); d.err == nil {
 			d.files = http.FileServer(rootDir{d.root})
 		}
 	}
-	return d.files, d.err
+	if d.closed && d.files == nil {
+		return nil, nil, os.ErrClosed
+	}
+	return d.root, d.files, d.err
 }
 
+// close closes the folder; a request still using it gets errors, not a crash.
 func (d *staticDir) close() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.root != nil {
+	if d.root != nil && !d.closed {
 		d.root.Close()
 	}
+	d.closed = true
 }
 
 // serveFile answers from a route's base_dir, the prefix standing for it:
 // GET and HEAD only, no hidden files (a path part starting with "."),
 // except .well-known at its top. A folder is served by its index.html, else
 // its index.htm, else a listing if the route allows one, else 403.
-func serveFile(w http.ResponseWriter, r *http.Request, route *ServiceRoute, dir *staticDir) string {
+func serveFile(w http.ResponseWriter, r *http.Request, route *ServiceRoute, root *os.Root, files http.Handler) string {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -529,13 +571,13 @@ func serveFile(w http.ResponseWriter, r *http.Request, route *ServiceRoute, dir 
 	if name == "" {
 		name = "."
 	}
-	if info, err := dir.root.Stat(name); err == nil && info.IsDir() {
+	if info, err := root.Stat(name); err == nil && info.IsDir() {
 		if !strings.HasSuffix(r.URL.Path, "/") {
 			http.Redirect(w, r, (&url.URL{Path: r.URL.Path + "/", RawQuery: r.URL.RawQuery}).String(), http.StatusMovedPermanently)
 			return " (to the folder)"
 		}
 		for _, index := range []string{"index.html", "index.htm"} {
-			f, err := dir.root.Open(path.Join(name, index))
+			f, err := root.Open(path.Join(name, index))
 			if err != nil {
 				continue
 			}
@@ -549,7 +591,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, route *ServiceRoute, dir 
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return " (a folder without index.html; directory_listing is off)"
 		}
-		if err := serveListing(w, r, dir.root, name); err != nil {
+		if err := serveListing(w, r, root, name); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return fmt.Sprintf(" (listing: %v)", err)
 		}
@@ -563,7 +605,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, route *ServiceRoute, dir 
 	r2.URL = new(url.URL)
 	*r2.URL = *r.URL
 	r2.URL.Path, r2.URL.RawPath = rest, ""
-	dir.files.ServeHTTP(w, r2)
+	files.ServeHTTP(w, r2)
 	return ""
 }
 
