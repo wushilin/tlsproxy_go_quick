@@ -11,11 +11,15 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 )
 
 type authUserView struct {
-	Name  string `json:"name"`
-	Plain bool   `json:"plain"` // written with password_plain: setting a password hashes it
+	Name     string `json:"name"`
+	Plain    bool   `json:"plain"` // written with password_plain: setting a password hashes it
+	Disabled bool   `json:"disabled"`
+	Expires  string `json:"expires,omitempty"` // when it stops working, RFC 3339 UTC; "" = never
+	Expired  bool   `json:"expired"`
 }
 
 type authUseView struct {
@@ -51,7 +55,12 @@ func authGroupViews(cfg *Config) []authGroupView {
 		}
 		slices.Sort(users)
 		for _, u := range users {
-			v.Users = append(v.Users, authUserView{Name: u, Plain: a.Users[u].hash == ""})
+			cred := a.Users[u]
+			uv := authUserView{Name: u, Plain: cred.hash == "", Disabled: cred.disabled}
+			if !cred.expires.IsZero() {
+				uv.Expires, uv.Expired = cred.expires.UTC().Format(time.RFC3339), !time.Now().Before(cred.expires)
+			}
+			v.Users = append(v.Users, uv)
 		}
 		for _, r := range cfg.Rules {
 			for _, s := range r.Routes {
@@ -103,7 +112,8 @@ func (c *Console) authSave(w http.ResponseWriter, r *http.Request) {
 			}
 			what := map[string]string{"add_group": "basic_auth group %s added", "rename_group": "basic_auth group %s renamed",
 				"delete_group": "basic_auth group %s deleted", "add_user": "basic_auth %s: user added", "delete_user": "basic_auth %s: user deleted",
-				"set_password": "basic_auth %s: password set"}[req.Op]
+				"set_password": "basic_auth %s: password set", "set_disabled": "basic_auth %s: user enabled or disabled",
+				"set_expiry": "basic_auth %s: user's expiry set"}[req.Op]
 			c.commit(w, r, onDisk, full, cfg, fmt.Sprintf(what, req.Group))
 			return
 		}

@@ -287,11 +287,14 @@ routes:
 # name (unique) and users, a list of {username, password_hash} or {username,
 # password_plain}. tlsproxy --hash-password prints an argon2id hash; argon2id
 # hashes from other tools and the older pbkdf2-sha256$... work too (quote a
-# hash: it starts with $). A password a browser sends is checked once and
-# remembered in memory for 5 minutes.
+# hash: it starts with $). A user may also have disabled: true (refused, at
+# once) and expires: 2026-12-31 (through the end of that day, UTC) or an RFC
+# 3339 time; no expires = never. A password a browser sends is checked once
+# and remembered in memory for 5 minutes.
 #
 # basic_auth:
 #   - name: team
 #     users:
 #       - {username: jack, password_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."}
-#       - {username: jill, password_plain: "open sesame"}
+#       - {username: jill, password_plain: "open sesame", expires: 2026-12-31}
+#       - {username: joe, password_hash: "...", disabled: true}

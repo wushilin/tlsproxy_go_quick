@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const editFile = `# top comment
@@ -221,5 +222,61 @@ basic_auth:
 	one, _, _ := edit(authEdit{Op: "delete_user", Group: "team", User: "jack"}, fakeHash)
 	if _, _, err := editBasicAuth(one, authEdit{Op: "delete_user", Group: "team", User: "jill"}, fakeHash); err == nil || !strings.Contains(err.Error(), "only user") {
 		t.Fatalf("the last user: %v", err)
+	}
+}
+
+// A user can be disabled and given an expiry; a new password keeps both.
+func TestBasicAuthDisableAndExpiry(t *testing.T) {
+	text := "listeners:\n  - {name: a, port: 1}\nbasic_auth:\n  - name: team\n    users:\n      - {username: jack, password_plain: x}\n"
+	fakeHash := func(p string) (string, error) { return hashPassword(p) }
+	got, _, err := editBasicAuth(text, authEdit{Op: "set_disabled", Group: "team", User: "jack", Disabled: true}, fakeHash)
+	if err == nil {
+		got, _, err = editBasicAuth(got, authEdit{Op: "set_expiry", Group: "team", User: "jack", Expires: "2031-01-02"}, fakeHash)
+	}
+	if err == nil {
+		got, _, err = editBasicAuth(got, authEdit{Op: "set_password", Group: "team", User: "jack", Password: "n"}, fakeHash)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mustParse(t, got)
+	u := c.BasicAuth["team"].Users["jack"]
+	if !u.disabled || !u.expires.Equal(time.Date(2031, 1, 3, 0, 0, 0, 0, time.UTC)) || u.hash == "" || u.plain != "" {
+		t.Fatalf("disabled, expiring at the end of 2031-01-02 UTC, with a hash: %+v\n%s", u, got)
+	}
+	if !strings.Contains(got, "disabled: true") || !strings.Contains(got, "expires:") {
+		t.Fatalf("written:\n%s", got)
+	}
+	got, _, _ = editBasicAuth(got, authEdit{Op: "set_disabled", Group: "team", User: "jack", Disabled: false}, fakeHash)
+	got, _, _ = editBasicAuth(got, authEdit{Op: "set_expiry", Group: "team", User: "jack"}, fakeHash)
+	if strings.Contains(got, "disabled") || strings.Contains(got, "expires") {
+		t.Fatalf("enabled and never expiring: the keys go\n%s", got)
+	}
+	if _, _, err := editBasicAuth(got, authEdit{Op: "set_expiry", Group: "team", User: "jack", Expires: "soon"}, fakeHash); err == nil {
+		t.Fatal("a bad expiry accepted")
+	}
+
+	// What the check says, for the log.
+	a := newAuthChecker()
+	ba := &BasicAuth{Users: map[string]credential{
+		"on":   {plain: "p"},
+		"off":  {plain: "p", disabled: true},
+		"old":  {plain: "p", expires: time.Now().Add(-time.Minute)},
+		"soon": {plain: "p", expires: time.Now().Add(time.Hour)},
+	}}
+	for user, want := range map[string]string{"on": "", "off": "disabled", "old": "expired", "soon": "", "nobody": "no user"} {
+		ok, why := a.check(ba, user, "p")
+		if ok != (want == "") || !strings.Contains(why, want) {
+			t.Errorf("%s: %v %q, want %q", user, ok, why, want)
+		}
+	}
+	if ok, why := a.check(ba, "on", "wrong"); ok || !strings.Contains(why, "wrong password") {
+		t.Errorf("wrong password: %v %q", ok, why)
+	}
+	for v, want := range map[string]string{"2026-12-31": "", "2026-12-31T18:00:00+08:00": "", "31/12/2026": "expires must be", "never": ""} {
+		_, err := ParseConfig(text[:len(text)-2] + ", expires: \"" + v + "\"}\n")
+		if (want == "") != (err == nil) || err != nil && !strings.Contains(err.Error(), want) {
+			t.Errorf("expires %s: %v", v, err)
+		}
 	}
 }

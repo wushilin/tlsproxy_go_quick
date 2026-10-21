@@ -316,7 +316,7 @@ option is missing from it, from `config.yaml` or from this README):
 | `listeners:` (a list) | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `routes:` (a list) | `listener` · `rules` |
 | each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `basic_auth`) |
-| `basic_auth:` (a list) | `name` · `users`, a list of (`username` with `password_hash` or `password_plain`) |
+| `basic_auth:` (a list) | `name` · `users`, a list of (`username` with `password_hash` or `password_plain`; `disabled`, `expires`) |
 | `logging:` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | the web console (not in the file) | `-console_domain` / `$CONSOLE_DOMAIN` · `$CONSOLE_PASSWORD` · `-console_bind` / `$CONSOLE_BIND` · `-console_port` / `$CONSOLE_PORT` · `-console_cert` / `$CONSOLE_CERT` · `-noconsole` |
 
@@ -562,7 +562,12 @@ basic_auth:
   list of `{username, password_hash}` or `{username, password_plain}` (quote
   a hash: it starts with `$`). `tlsproxy --hash-password` prints an argon2id
   hash; argon2id hashes from other tools and the older `pbkdf2-sha256` format
-  work too. A browser sends the password with every request, so one that
+  work too. A user with `disabled: true` is refused even with the right
+  password, at once; one with `expires: 2026-12-31` signs in through the end
+  of that day (UTC), or give an RFC 3339 time (`2026-12-31T18:00:00+08:00`);
+  no `expires` is never. The log says why a sign-in was refused (no user,
+  wrong password, disabled, expired); the client only gets `401`. A browser
+  sends the password with every request, so one that
   matched is remembered (in memory) for 5 minutes, and at most two hashes are
   worked out at once. The same name twice, or the same user twice in an
   item, is a load error; an item no serve entry uses is a warning.
@@ -1137,7 +1142,10 @@ written to it (and every change to the file shows up in the console).
   add or delete a user (a group keeps at least one), and set a user's
   password. A password typed here is hashed in the proxy (argon2id) before
   it is written as `password_hash`, replacing a `password_plain`; no password
-  or hash is ever sent back to the page. Saved like every other edit.
+  or hash is ever sent back to the page. Each user is a row of a table: its
+  password kind, its status (active, disabled, expired), when it expires
+  (never by default), and its buttons: Set password, Disable / Enable, Set
+  expiry, Delete. Saved like every other edit.
 - **Certificates**: every certificate in use, both those the proxy manages
   (`cert: auto`) and those your CAs issued (`cert: local-ca`): status (`ok`,
   `expiring`, `expired`, `missing`, `failing`), issuer, validity, days left,

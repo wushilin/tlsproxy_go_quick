@@ -95,7 +95,7 @@ var configReference = []sectionDoc{
 	}},
 	{"basic_auth", "A list of user groups that serve entries can ask for (basic_auth: <name>). A password a browser sends is checked once and remembered for 5 minutes.", []keyDoc{
 		{"name", "(required)", "What basic_auth: in a serve entry names; unique."},
-		{"users", "(at least one)", "A list of {username, password_hash} (argon2id, or pbkdf2-sha256; make one with tlsproxy --hash-password) or {username, password_plain}."},
+		{"users", "(at least one)", "A list of {username, password_hash} (argon2id, or pbkdf2-sha256; make one with tlsproxy --hash-password) or {username, password_plain}, each optionally with disabled: true and expires: 2026-12-31 (through that day, UTC) or an RFC 3339 time (default: never)."},
 	}},
 	{"logging", "Where the two log streams go: activity (stdout) and problems (stderr).", []keyDoc{
 		{"stdout", "the process's stdout", "File for activity: accepted, route, connected, closed, stats, reloads."},

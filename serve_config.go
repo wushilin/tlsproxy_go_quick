@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -199,9 +200,24 @@ type BasicAuth struct {
 	Users map[string]credential // by username
 }
 
-// credential is one user's password: plain, or a hash checkPassword reads.
+// credential is one user's password, plain or a hash checkPassword reads,
+// and whether the user may sign in at all.
 type credential struct {
 	plain, hash string
+	disabled    bool
+	expires     time.Time // zero: never
+}
+
+// parseExpiry reads a user's expires: a date (the user may sign in through
+// the end of that day, UTC) or an RFC 3339 time.
+func parseExpiry(v string) (time.Time, error) {
+	if d, err := time.Parse(time.DateOnly, v); err == nil {
+		return d.Add(24 * time.Hour), nil
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("expires must be a date like 2026-12-31 (through the end of that day, UTC) or a time like 2026-12-31T18:00:00+08:00, got %q", v)
 }
 
 // addUser adds one item of a basic_auth's users.
@@ -218,8 +234,23 @@ func addUser(a *BasicAuth, opts [][2]string) error {
 			cred.plain = v
 		case "password_hash":
 			cred.hash = v
+		case "disabled":
+			b, err := parseBool(v)
+			if err != nil {
+				return fmt.Errorf("disabled: %v", err)
+			}
+			cred.disabled = b
+		case "expires":
+			if v == "" || strings.EqualFold(v, "never") {
+				continue
+			}
+			t, err := parseExpiry(v)
+			if err != nil {
+				return err
+			}
+			cred.expires = t
 		default:
-			return fmt.Errorf("unknown key %q in a user (username, password_plain, password_hash)", k)
+			return fmt.Errorf("unknown key %q in a user (username, password_plain, password_hash, disabled, expires)", k)
 		}
 	}
 	switch {

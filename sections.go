@@ -536,11 +536,30 @@ func valueText(v any) string {
 
 // authEdit is one change to the basic_auth groups, from the console.
 type authEdit struct {
-	Op       string // add_group, rename_group, delete_group, add_user, delete_user, set_password
+	Op       string // add_group, rename_group, delete_group, add_user, delete_user, set_password, set_disabled, set_expiry
 	Group    string
 	NewName  string // rename_group
 	User     string
 	Password string // add_group (its first user), add_user, set_password: hashed before it is written
+	Disabled bool   // set_disabled
+	Expires  string // set_expiry: a date or RFC 3339 time; "" = never
+}
+
+// setUserKey sets (or with "" removes) one key of a user, keeping the rest.
+func setUserKey(u *yaml.Node, key, value string, style yaml.Style) {
+	for i := 0; i+1 < len(u.Content); i += 2 {
+		if u.Content[i].Value == key {
+			if value == "" {
+				u.Content = slices.Delete(u.Content, i, i+2)
+			} else {
+				u.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Style: style}
+			}
+			return
+		}
+	}
+	if value != "" {
+		u.Content = append(u.Content, scalar(key), &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Style: style})
+	}
 }
 
 // authGroup finds the basic_auth item called name.
@@ -685,10 +704,29 @@ func editBasicAuth(text string, e authEdit, hash func(string) (string, error)) (
 		if err != nil {
 			return "", nil, err
 		}
-		old := users.Content[i]
-		u := userNode(e.User, h)
-		u.LineComment, u.HeadComment = old.LineComment, old.HeadComment
-		users.Content[i] = u // password_plain, if it was one, is gone
+		u := users.Content[i]
+		setUserKey(u, "password_plain", "", 0) // a plain one, if it was, is gone
+		setUserKey(u, "password_hash", h, yaml.DoubleQuotedStyle)
+	case "set_disabled":
+		users, i := findUser()
+		if i < 0 {
+			return "", nil, fmt.Errorf("%s has no user %s any more; reload and try again", e.Group, e.User)
+		}
+		setUserKey(users.Content[i], "disabled", map[bool]string{true: "true", false: ""}[e.Disabled], 0)
+		if e.Disabled {
+			mapGet(users.Content[i], "disabled").Tag = "!!bool"
+		}
+	case "set_expiry":
+		users, i := findUser()
+		if i < 0 {
+			return "", nil, fmt.Errorf("%s has no user %s any more; reload and try again", e.Group, e.User)
+		}
+		if e.Expires = strings.TrimSpace(e.Expires); e.Expires != "" {
+			if _, err := parseExpiry(e.Expires); err != nil {
+				return "", nil, err
+			}
+		}
+		setUserKey(users.Content[i], "expires", e.Expires, 0)
 	default:
 		return "", nil, fmt.Errorf("unknown change %q", e.Op)
 	}

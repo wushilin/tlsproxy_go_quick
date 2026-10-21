@@ -49,8 +49,10 @@ New:
   (its basic auth chosen from the existing groups), and saves through the
   YAML tree: comments elsewhere in the file are kept. A **Basic auth** page
   adds, renames (with the serve entries that use it) and deletes groups, and
-  adds, deletes and sets the password of users; passwords are hashed in the
-  proxy and never sent back to the page.
+  adds, deletes, disables and sets the password and expiry of users;
+  passwords are hashed in the proxy and never sent back to the page.
+- A `basic_auth` user can have `disabled: true` and `expires:` (a date,
+  through the end of that day UTC, or an RFC 3339 time; default never).
 - `cert: local-ca` serves clients without SNI (`domain: NONE`, or `ANY`):
   a certificate for the IP address they connected to, or with IP addresses
   in `cert_domains`, one certificate for all of them (a `NONE` rule may add

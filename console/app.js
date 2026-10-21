@@ -3237,8 +3237,9 @@ function loadAuth() {
   return getJSON("api/auth").then(renderAuth);
 }
 
-// Each group is a card: its users, each with Set password and Delete, and
-// the serve entries that use it.
+// Each group is a card: a table of its users (password, status, expiry and
+// their buttons, aligned), the serve entries that use it, and the group's
+// own buttons.
 function renderAuth(d) {
   authFile = d.file;
   const editable = !!(d.file && d.file.editable);
@@ -3253,33 +3254,11 @@ function renderAuth(d) {
     return;
   }
   for (const g of d.groups) {
-    const card = el("div", "ca-card");
+    const card = el("div", "ca-card auth-card");
     const main = el("div", "ca-main");
     const head = el("div", "ca-head");
     head.append(el("span", "ca-name", g.name), el("span", "chip t-muted", `${g.users.length} user${g.users.length === 1 ? "" : "s"}`));
     if (g.line) head.title = `basic_auth at line ${g.line} of the config file`;
-    main.appendChild(head);
-    for (const u of g.users) {
-      const line = el("div", "ca-line auth-user");
-      line.append(el("span", "mono", u.name));
-      if (u.plain) {
-        const c = el("span", "chip warn", "plain password");
-        c.title = "Written as password_plain in the file: setting a password here replaces it with a hash";
-        line.append(c);
-      }
-      const [pw] = actionButton("Set password", "");
-      pw.disabled = !editable;
-      pw.addEventListener("click", () => openAuthDialog({ op: "set_password", group: g.name, user: u.name }));
-      const del = armedButton("Delete", () => authChange({ op: "delete_user", group: g.name, user: u.name }, `Deleted ${u.name} from ${g.name}`));
-      del.disabled = !editable || g.users.length === 1;
-      del.title = g.users.length === 1 ? "A group needs a user: delete the group instead" : `Delete ${u.name}`;
-      line.append(pw, del);
-      main.appendChild(line);
-    }
-    const used = el("div", "ca-line ca-facts");
-    used.append(el("span", "ca-k", "used by"), el("span", "", g.usedBy.length
-      ? g.usedBy.map((x) => `${x.rule} ${x.prefix}` + (x.line ? ` (line ${x.line})` : "")).join(", ") : "no serve entry"));
-    main.appendChild(used);
     const act = el("div", "ca-actions");
     const [add] = actionButton("Add user", "");
     add.disabled = !editable;
@@ -3288,13 +3267,72 @@ function renderAuth(d) {
     ren.disabled = !editable;
     ren.title = "Its serve entries are renamed with it";
     ren.addEventListener("click", () => openAuthDialog({ op: "rename_group", group: g.name }));
-    const del = armedButton("Delete", () => authChange({ op: "delete_group", group: g.name }, `Deleted ${g.name}`));
-    del.disabled = !editable || g.usedBy.length > 0;
-    del.title = g.usedBy.length ? "Used by a serve entry: change it first" : `Delete the group ${g.name}`;
-    act.append(add, ren, del);
-    card.append(main, act);
+    const delGroup = armedButton("Delete group", () => authChange({ op: "delete_group", group: g.name }, `Deleted ${g.name}`));
+    delGroup.disabled = !editable || g.usedBy.length > 0;
+    delGroup.title = g.usedBy.length ? "Used by a serve entry: change it first" : `Delete the group ${g.name}`;
+    act.append(add, ren, delGroup);
+    head.appendChild(act);
+    main.appendChild(head);
+
+    const table = el("table", "grid auth-users");
+    const thead = el("thead");
+    const hr = el("tr");
+    for (const h of ["User", "Password", "Status", "Expires", ""]) hr.appendChild(el("th", "", h));
+    thead.appendChild(hr);
+    const tbody = el("tbody");
+    for (const u of g.users) {
+      const tr = el("tr");
+      tr.appendChild(el("td", "mono", u.name));
+      const pw = el("td");
+      pw.appendChild(u.plain ? Object.assign(el("span", "chip warn", "plain"), { title: "Written as password_plain: setting a password replaces it with a hash" }) : el("span", "chip", "hash"));
+      tr.appendChild(pw);
+      const status = el("td");
+      status.appendChild(u.disabled ? el("span", "chip bad", "disabled") : u.expired ? el("span", "chip bad", "expired") : el("span", "chip ok", "active"));
+      tr.appendChild(status);
+      const exp = el("td", "mono", u.expires ? fmtExpiry(u.expires) : "never");
+      if (u.expires) exp.title = u.expires;
+      tr.appendChild(exp);
+      const btns = el("td", "auth-btns");
+      const [setPw] = actionButton("Set password", "");
+      setPw.disabled = !editable;
+      setPw.addEventListener("click", () => openAuthDialog({ op: "set_password", group: g.name, user: u.name }));
+      const [toggle] = actionButton(u.disabled ? "Enable" : "Disable", "");
+      toggle.disabled = !editable;
+      toggle.title = u.disabled ? `Let ${u.name} sign in again` : `Refuse ${u.name}, even with the right password (at once)`;
+      toggle.addEventListener("click", () => {
+        toggle.disabled = true;
+        authChange({ op: "set_disabled", group: g.name, user: u.name, disabled: !u.disabled }, `${u.disabled ? "Enabled" : "Disabled"} ${u.name}`).catch(() => {});
+      });
+      const [setExp] = actionButton("Set expiry", "");
+      setExp.disabled = !editable;
+      setExp.addEventListener("click", () => openAuthDialog({ op: "set_expiry", group: g.name, user: u.name, expires: u.expires }));
+      const del = armedButton("Delete", () => authChange({ op: "delete_user", group: g.name, user: u.name }, `Deleted ${u.name} from ${g.name}`).catch(() => {}));
+      del.disabled = !editable || g.users.length === 1;
+      del.title = g.users.length === 1 ? "A group needs a user: delete the group instead" : `Delete ${u.name}`;
+      btns.append(setPw, toggle, setExp, del);
+      tr.appendChild(btns);
+      tbody.appendChild(tr);
+    }
+    table.append(thead, tbody);
+    const scroll = el("div", "scroll");
+    scroll.appendChild(table);
+    main.appendChild(scroll);
+
+    const used = el("div", "ca-line ca-facts");
+    used.append(el("span", "ca-k", "used by"), el("span", "", g.usedBy.length
+      ? g.usedBy.map((x) => `${x.rule} ${x.prefix}` + (x.line ? ` (line ${x.line})` : "")).join(", ") : "no serve entry"));
+    main.appendChild(used);
+    card.append(main);
     list.appendChild(card);
   }
+}
+
+// fmtExpiry shows when a user stops working: the last day for a date (it
+// is stored as the moment after it ends), the time otherwise.
+function fmtExpiry(iso) {
+  const t = new Date(iso);
+  if (iso.endsWith("T00:00:00Z")) return new Date(t - 1).toISOString().slice(0, 10) + " (end of day, UTC)";
+  return t.toLocaleString();
 }
 
 // armedButton is a delete that asks for a second click.
@@ -3330,26 +3368,33 @@ function authChange(change, done) {
 
 function openAuthDialog(change) {
   authDlg = change;
-  const titles = { add_group: "Add a group", add_user: `Add a user to ${change.group}`, set_password: `Set ${change.user}'s password`, rename_group: `Rename ${change.group}` };
+  const titles = { add_group: "Add a group", add_user: `Add a user to ${change.group}`, set_password: `Set ${change.user}'s password`, rename_group: `Rename ${change.group}`, set_expiry: `When ${change.user} expires` };
   setText($("auth-dlg-title"), titles[change.op]);
   setText($("auth-dlg-hint"), {
     add_group: "A group needs its first user. The password is hashed in the proxy before it is written.",
     add_user: "The password is hashed in the proxy before it is written.",
     set_password: "The new password replaces the old one; a browser signed in with the old one is let in for up to 5 more minutes.",
     rename_group: "The serve entries that use it are renamed with it.",
+    set_expiry: "From the next day on, the user is refused even with the right password. Never: no expiry.",
   }[change.op]);
-  const needs = { add_group: ["group", "user", "pass"], add_user: ["user", "pass"], set_password: ["pass"], rename_group: ["group"] }[change.op];
+  const needs = { add_group: ["group", "user", "pass"], add_user: ["user", "pass"], set_password: ["pass"], rename_group: ["group"], set_expiry: ["exp"] }[change.op];
   $("auth-f-group").hidden = !needs.includes("group");
   $("auth-f-user").hidden = !needs.includes("user");
   $("auth-f-pass").hidden = $("auth-f-pass2").hidden = !needs.includes("pass");
+  $("auth-f-exp").hidden = $("auth-f-never").hidden = !needs.includes("exp");
+  const day = change.expires && change.expires.endsWith("T00:00:00Z") ? new Date(new Date(change.expires) - 1).toISOString().slice(0, 10) : "";
+  $("auth-exp").value = day;
+  $("auth-never").checked = !change.expires;
+  $("auth-exp").disabled = !change.expires;
   $("auth-group").value = change.op === "rename_group" ? change.group : "";
   for (const id of ["auth-user", "auth-pass", "auth-pass2"]) $(id).value = "";
   setText($("auth-dlg-error"), "");
   $("auth-dlg").showModal();
-  $(needs[0] === "group" ? "auth-group" : needs[0] === "user" ? "auth-user" : "auth-pass").focus();
+  $({ group: "auth-group", user: "auth-user", pass: "auth-pass", exp: "auth-never" }[needs[0]]).focus();
 }
 
 $("auth-add-group").addEventListener("click", () => openAuthDialog({ op: "add_group" }));
+$("auth-never").addEventListener("change", () => { $("auth-exp").disabled = $("auth-never").checked; if (!$("auth-never").checked) $("auth-exp").focus(); });
 $("auth-dlg-cancel").addEventListener("click", () => $("auth-dlg").close());
 $("auth-dlg").addEventListener("close", () => { for (const id of ["auth-pass", "auth-pass2"]) $(id).value = ""; });
 $("auth-dlg-form").addEventListener("submit", (ev) => {
@@ -3364,13 +3409,18 @@ $("auth-dlg-form").addEventListener("submit", (ev) => {
     if (!user || user.includes(":")) return setText($("auth-dlg-error"), "A username is required, without a colon.");
     c.user = user;
   }
+  if (!$("auth-f-exp").hidden) {
+    if (!$("auth-never").checked && !$("auth-exp").value) return setText($("auth-dlg-error"), "Choose a day, or Never.");
+    c.expires = $("auth-never").checked ? "" : $("auth-exp").value;
+  }
   if (!$("auth-f-pass").hidden) {
     if (!pass) return setText($("auth-dlg-error"), "The password must not be empty.");
     if (pass !== $("auth-pass2").value) return setText($("auth-dlg-error"), "The two passwords differ.");
     c.password = pass;
   }
   $("auth-dlg-save").disabled = true;
-  const done = { add_group: `Added ${c.group}`, add_user: `Added ${c.user} to ${c.group}`, set_password: `Set ${c.user}'s password`, rename_group: `Renamed ${authDlg.group} to ${c.newName}` }[c.op];
+  const done = { add_group: `Added ${c.group}`, add_user: `Added ${c.user} to ${c.group}`, set_password: `Set ${c.user}'s password`,
+    rename_group: `Renamed ${authDlg.group} to ${c.newName}`, set_expiry: c.expires ? `${c.user} expires after ${c.expires}` : `${c.user} never expires` }[c.op];
   authChange(c, done)
     .then(() => $("auth-dlg").close())
     .catch((e) => setText($("auth-dlg-error"), e.message))

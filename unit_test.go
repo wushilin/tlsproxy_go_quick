@@ -633,7 +633,7 @@ var parserNotOptions = map[string]bool{"global": true, "logging": true, "console
 	// a rule's keys before config.yaml: refused, with the key to use
 	"pattern": true, "target_host": true, "target_port": true, "proxy_version": true,
 	// a user's keys, documented under users
-	"username": true, "password_plain": true, "password_hash": true}
+	"username": true, "password_plain": true, "password_hash": true, "disabled": true, "expires": true}
 
 // Every option the parser accepts must appear in the complete-reference sample,
 // in the commented config.toml and in the README, so documentation can't drift.

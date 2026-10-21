@@ -177,4 +177,5 @@ basic_auth:
   - name: team
     users:
       - {username: jack, password_hash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$ZVrRXqxlLcWfcXCnMyv0m4Rpvh/bnCi7"}
-      - {username: jill, password_plain: "open sesame"}
+      - {username: jill, password_plain: "open sesame", expires: 2026-12-31}   # through the end of that day, UTC
+      - {username: joe, password_plain: "x", disabled: true}                 # refused, even with the right password

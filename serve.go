@@ -453,13 +453,14 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 	note := fmt.Sprintf(" via %s", route.Key)
 	if route.auth != nil {
 		user, password, ok := r.BasicAuth()
-		if !ok || !s.auth.check(route.auth, user, password) {
+		why := "no credentials"
+		if ok {
+			ok, why = s.auth.check(route.auth, user, password)
+		}
+		if !ok {
 			w.Header().Set("WWW-Authenticate", `Basic realm="`+strings.ReplaceAll(rule.Source, `"`, "")+`", charset="UTF-8"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
-			if !ok {
-				return note + " (basic_auth: no credentials)"
-			}
-			return note + fmt.Sprintf(" (basic_auth: wrong password, or no user %q)", user)
+			return note + " (basic_auth: " + why + ")"
 		}
 		r.Header.Del("Authorization") // the password stays here: it is not the backend's
 		note += " user=" + user
@@ -637,13 +638,24 @@ func newAuthChecker() *authChecker {
 	return &authChecker{good: map[[32]byte]time.Time{}, sem: make(chan struct{}, 2)}
 }
 
-func (a *authChecker) check(ba *BasicAuth, user, password string) bool {
+// check says whether user may in with password, and if not why, for the
+// log (the client is told nothing more than 401). A disabled or expired user
+// is refused before any hash is worked out.
+func (a *authChecker) check(ba *BasicAuth, user, password string) (bool, string) {
 	cred, ok := ba.Users[user]
-	if !ok {
-		return false
+	switch {
+	case !ok:
+		return false, fmt.Sprintf("no user %q", user)
+	case cred.disabled:
+		return false, fmt.Sprintf("user %q is disabled", user)
+	case !cred.expires.IsZero() && !time.Now().Before(cred.expires):
+		return false, fmt.Sprintf("user %q expired on %s", user, cred.expires.UTC().Format(time.RFC3339))
 	}
 	if cred.hash == "" {
-		return subtle.ConstantTimeCompare([]byte(cred.plain), []byte(password)) == 1
+		if subtle.ConstantTimeCompare([]byte(cred.plain), []byte(password)) == 1 {
+			return true, ""
+		}
+		return false, fmt.Sprintf("wrong password for %q", user)
 	}
 	key := sha256.Sum256([]byte(cred.hash + "\x00" + user + "\x00" + password))
 	now := time.Now()
@@ -651,18 +663,19 @@ func (a *authChecker) check(ba *BasicAuth, user, password string) bool {
 	until, hit := a.good[key]
 	a.mu.Unlock()
 	if hit && now.Before(until) {
-		return true
+		return true, ""
 	}
 	a.sem <- struct{}{}
 	good := checkPassword(cred.hash, password)
 	<-a.sem
-	if good {
-		a.mu.Lock()
-		if len(a.good) >= authRememberMax {
-			clear(a.good)
-		}
-		a.good[key] = now.Add(authRemember)
-		a.mu.Unlock()
+	if !good {
+		return false, fmt.Sprintf("wrong password for %q", user)
 	}
-	return good
+	a.mu.Lock()
+	if len(a.good) >= authRememberMax {
+		clear(a.good)
+	}
+	a.good[key] = now.Add(authRemember)
+	a.mu.Unlock()
+	return true, ""
 }
