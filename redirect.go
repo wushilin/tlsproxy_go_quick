@@ -127,7 +127,7 @@ func writeRedirectResponse(w io.Writer, status int, location string, keepAlive b
 		conn = "keep-alive"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\nServer: %s\r\n", status, http.StatusText(status), serverName)
 	if location != "" {
 		fmt.Fprintf(&b, "Location: %s\r\n", location)
 	}

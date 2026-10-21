@@ -55,6 +55,10 @@ New:
   filterable, light or dark; hidden files left out), else `403`. A
   `base_dir` that is missing at load is tried again on request, so making
   it later needs no reload.
+- What the proxy answers itself (the console, serve entries, the port-80
+  redirect) says `Server: tlsproxy_go_quick`; a reverse_proxy response's
+  `Server` header is replaced with it. The directory listing links to the
+  project on GitHub.
 - The config editor's *Save & apply* validates first, as *Validate* does:
   an invalid file is not saved and the result points at its line; a valid
   one is saved and its settings tree and warnings are shown under the

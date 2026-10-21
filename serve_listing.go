@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+// serverName is what this proxy calls itself in a Server header and on its
+// own pages.
+const serverName = "tlsproxy_go_quick"
+
+// repoURL is where it comes from, linked from the listing page.
+const repoURL = "https://github.com/wushilin/tlsproxy_go_quick"
+
 // maxListing caps the entries one listing shows; the rest are counted.
 const maxListing = 5000
 
@@ -50,6 +57,8 @@ type listingData struct {
 	Files   int
 	Total   string
 	Hidden  int // more than maxListing: not shown
+	Server  string
+	Repo    string
 }
 
 // serveListing writes the listing of name, a folder in root, for r.
@@ -63,7 +72,7 @@ func serveListing(w http.ResponseWriter, r *http.Request, root *os.Root, name st
 	if err != nil {
 		return err
 	}
-	d := listingData{Host: r.Host}
+	d := listingData{Host: r.Host, Server: serverName, Repo: repoURL}
 	var total int64
 	for _, e := range all {
 		n := e.Name()

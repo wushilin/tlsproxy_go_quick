@@ -382,6 +382,7 @@ func (s *Server) webFor(rt *Runtime, listener string) *webServer {
 type webHandler struct{ s *Server }
 
 func (h webHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Server", serverName)
 	sc, _ := r.Context().Value(servedKey{}).(*servedConn)
 	if sc == nil {
 		http.Error(w, "not a served connection", http.StatusInternalServerError)
@@ -667,6 +668,12 @@ func reverseProxy(rule *Rule, route *ServiceRoute, transport *http.Transport) *h
 			if pr.In.Host != "" {
 				out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			}
+		},
+		// The response is this proxy's: its name replaces the upstream's, as
+		// nginx does.
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Set("Server", serverName)
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			errorf("rule at line %d: %s: %s %s: upstream %s: %v", rule.Line, route.Key, r.Method, r.URL.RequestURI(), route.Target, err)

@@ -375,6 +375,9 @@ func TestServeFolders(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: %s, want %s", url, got, want)
 		}
+		if sv := resp.Header.Get("Server"); sv != serverName {
+			t.Errorf("%s: Server %q", url, sv)
+		}
 		if want == "200 listing" {
 			for _, in := range []string{`href="a%20b.txt"`, "&lt;i&gt;.png", `href="sub/"`, `data-kind="image"`} {
 				if !strings.Contains(body, in) {
@@ -386,6 +389,9 @@ func TestServeFolders(t *testing.T) {
 			}
 			if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'none'") {
 				t.Error("listing without its CSP")
+			}
+			if !strings.Contains(body, `href="`+repoURL+`"`) {
+				t.Error("listing without the link to the repository")
 			}
 		}
 	}
