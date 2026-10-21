@@ -1054,11 +1054,10 @@ function paintListener(lr, l, now, file) {
   lr.editBtn.disabled = busy || !editable;
   lr.editBtn.title = !editable ? "Editing is off: see the note above"
     : "Edit this listener in the config file";
-  // The console's listener can't be stopped; its own listener (line 0) isn't in the file at all.
-  const own = !!l.console && !l.line;
+  // The console's listener can't be stopped or deleted; Edit changes its options only.
   lr.toggleBtn.hidden = !!l.console;
-  lr.delBtn.hidden = !!l.redirect || own;
-  lr.addBtn.hidden = lr.editBtn.hidden = !!l.redirect || own;
+  lr.delBtn.hidden = !!l.redirect || !!l.console; // the console's listener stays
+  lr.addBtn.hidden = lr.editBtn.hidden = !!l.redirect;
   lr.delBtn.disabled = busy || !editable;
   lr.delBtn.title = editable ? "Delete this listener from the config file (only once no rule uses it)" : "Editing is off: see the note above";
   if (!editable && armedLDeletes.has(l.name)) disarmListenerDelete(l.name);
@@ -1936,6 +1935,7 @@ function lFormValues() {
   const orig = led.l ? led.l.values || {} : {};
   const v = {};
   for (const [k, id] of Object.entries(L_FIELDS)) {
+    if (led.l && led.l.console && (k === "bind" || k === "port")) continue; // not the file's to set
     const now = val(id);
     const o = orig[k] ?? "";
     if (now === listText(o).trim()) v[k] = o; // keep the file's spelling when unchanged
@@ -1950,7 +1950,8 @@ function lQuickChecks(v) {
   if (!v.name) out.push([0, "The name is required."]);
   else if (!LISTENER_NAME_RE.test(v.name)) out.push([0, "The name may use letters, digits, spaces and - _ @ # ~ ( ) [ ] < > \" ' (up to 64, no space at either end)."]);
   else if (others.includes(v.name.toLowerCase())) out.push([0, `There is already a listener called ${v.name}.`]);
-  if (!v.port) out.push([0, "The port is required."]);
+  if (led.l && led.l.console) { /* its bind and port are the console's */ }
+  else if (!v.port) out.push([0, "The port is required."]);
   else if (!/^\d+$/.test(v.port) || +v.port < 1 || +v.port > 65535) out.push([0, "The port must be a number from 1 to 65535."]);
   for (const [k, label] of [["max_connections", "Max connections"], ["handshake_timeout", "The handshake timeout"],
     ["idle_timeout", "The idle timeout"], ["half_close_timeout", "The half-close timeout"]]) {
@@ -2037,13 +2038,21 @@ function openListenerEditor(l) {
     name: v.name ?? (l ? l.name : ""), bind: v.bind ?? (l ? l.bind : ""), port: v.port ?? (l ? String(l.port) : ""),
   };
   for (const [k, id] of Object.entries(L_FIELDS)) $(id).value = listText(start[k] ?? v[k] ?? "");
+  // The console's listener: its name, bind and port come from the console's
+  // settings; only its options are edited here.
+  const fixed = !!(l && l.console);
+  for (const id of ["l-name", "l-bind", "l-port"]) {
+    $(id).disabled = fixed;
+    $(id).title = fixed ? "Set at start-up by the console's settings (-console_bind, -console_port)" : "";
+  }
   setText($("lst-title"), l ? `Edit listener ${l.name}` : "Add listener");
   setText($("lst-save"), l ? "Save" : "Add listener");
   setText($("lst-hint"), `Saved to ${s.file.path} (previous version kept as a backup) and applied at once: the port opens or moves right away.`);
   setText($("lst-preview-title"), `Will be written to ${s.file.path}`);
   lShowStep(0);
   $("lst-editor").showModal();
-  $("l-name").focus();
+  if (fixed) lShowStep(1); // nothing to change on the first step
+  else $("l-name").focus();
   lOnFormChange();
 }
 

@@ -661,7 +661,7 @@ func TestConsoleOverTLS(t *testing.T) {
 	text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nreload_interval=0\n[[host]]\nlistener=default\npattern=ANY\naction=deny\n"
 	os.WriteFile(path, []byte(text), 0o600)
 	con := testConsole(t, freePort(t), "pw")
-	startProxyConsole(t, text, path, con)
+	p := startProxyConsole(t, text, path, con)
 	waitForPort(t, con.Addrs()[0])
 	c, tr := consoleClientFor(t, con)
 	if code := c.login("pw"); code != 200 {
@@ -702,5 +702,32 @@ func TestConsoleOverTLS(t *testing.T) {
 	tr.CloseIdleConnections()
 	if code, _ := c.get("/api/status"); code != 200 {
 		t.Fatalf("after the save: %d", code)
+	}
+
+	// Its options: not in the file yet (line 0), so saving them adds an
+	// entry with its name and the options, never bind or port.
+	_, cfg = c.get("/api/config")
+	vals := map[string]any{"name": "console_http", "max_connections": "77"}
+	if _, out := c.post("/api/listeners/save", map[string]any{"line": 0, "baseHash": cfg["hash"], "baseMtime": cfg["mtime"], "values": vals}); out["ok"] != true {
+		t.Fatalf("its options: %v", out)
+	}
+	written, _ := os.ReadFile(path)
+	if !strings.Contains(string(written), "- name: console_http\n    max_connections: 77\n") {
+		t.Fatalf("written as:\n%s", written)
+	}
+	if l := p.srv.runtime.Load().cfg.Listener("console_http"); l == nil || l.MaxConnections != 77 || !l.Console {
+		t.Fatalf("applied: %+v", l)
+	}
+	_, st = c.get("/api/state")
+	var line float64
+	for _, l := range st["listeners"].([]any) {
+		if l := l.(map[string]any); l["name"] == "console_http" {
+			line = l["line"].(float64)
+		}
+	}
+	_, cfg = c.get("/api/config")
+	if _, out := c.post("/api/listeners/delete", map[string]any{"line": line, "baseHash": cfg["hash"], "baseMtime": cfg["mtime"]}); out["ok"] == true ||
+		!strings.Contains(out["error"].(string), "can't be deleted") {
+		t.Fatalf("deleting the console's listener: %v", out)
 	}
 }

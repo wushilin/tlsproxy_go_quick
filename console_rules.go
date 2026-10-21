@@ -693,6 +693,10 @@ func (c *Console) listenerChange(req listenerEditRequest, del bool) (onDisk []by
 				if l.Line != req.Line {
 					continue
 				}
+				if l.Console {
+					err = fmt.Errorf("listener %s is the web console's: it can't be deleted (its options can be edited)", l.Name)
+					return
+				}
 				var held []string
 				for _, r := range cur.Rules {
 					if r.Listener == l.Name && !r.Console { // the console moves to a listener of its own
