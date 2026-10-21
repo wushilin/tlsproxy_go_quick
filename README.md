@@ -701,7 +701,7 @@ routes:
 
 | per rule | default | meaning |
 |---|---|---|
-| `cert` | (none) | `auto`: issue and renew via ACME. `local-ca` or `local-ca:ca002`: your own CA issues a certificate per name, or per IP address for clients without SNI (see [Your own CA](#your-own-ca-cert--local-ca)); the CA must exist (made on the CAs page). None: pass through |
+| `cert` | (none) | `auto`: issue and renew via ACME. `local-ca` or `local-ca:ca002`: your own CA issues a certificate per name, or per IP address for clients without SNI (see [Your own CA](#your-own-ca-cert--local-ca)); the CA must exist (made on the Certificates page). None: pass through |
 | `cert_domains` | from a literal domain | a list of exact names to issue. Required when `domain` has a `*` or is `$anything_else`, unless a `cert_validate_script` decides (start-up error otherwise). Each must match the domain. No wildcards: TLS-ALPN-01 can't issue them |
 | `cert_validate_script` | (none) | decides about names that match the domain but are not in `cert_domains`; see below. Must exist and be executable at start-up and on reload |
 | `cert_validate_args` | `["${host}"]` | the script's arguments, a list of strings. Each is fixed text with `${1}`, `${2}`, ... and `${host}` filled in as in `target`, e.g. `["--customer", "aaa-${1}", "${host}"]`. One argument stays one argument, spaces and all |
@@ -817,7 +817,7 @@ routes:
   reused.
 - **Each CA's `config.yaml`** is written when the CA is made, read again
   whenever it changes (a broken edit keeps the previous settings, logged and
-  shown on the CAs page), and editable there with *Settings*:
+  shown on the Certificates page, one sub-tab per CA), and editable there with *Settings*:
 
   ```yaml
   ca:                       # how the CA was made: fixed, can't be changed
@@ -844,7 +844,7 @@ routes:
   ```
 
   A `config.toml` from before v1.5.0 is not read: the CA keeps its default
-  settings, and the log and the CAs page say to write `config.yaml`.
+  settings, and the log and the Certificates page say to write `config.yaml`.
 
   `ca` is set by *Generate* (common name, organisation, key, hash,
   validity) and checked against the CA certificate on every read: an edit
@@ -860,7 +860,7 @@ routes:
   name's lock, so racing handshakes for a new name get one certificate
   between them. Making, renewing or deleting a CA and saving its settings
   hold that CA's lock; choosing a new CA's id holds the `cert_root`'s.
-- **Clients must trust the CA**: download its certificate from the CAs page
+- **Clients must trust the CA**: download its certificate from its sub-tab on the Certificates page
   (the private key is never offered) and add it to their trust store.
 - **`cert_domains` says which names get a certificate**: host names or globs
   written like domains (`["*.dev.abc.com", "*.prod.abc.com", "*.abc.com"]`; a `*`
@@ -1083,7 +1083,7 @@ Session cookies are always `Secure`.
 With `cert: auto` the CA validates the console's name on public port 443, so
 a console on another port gets its certificate only if that name also reaches
 port 443 here; otherwise use `-console_cert local-ca` (make the CA on the
-CAs page first) or keep the placeholder.
+Certificates page first) or keep the placeholder.
 
 The console's settings are read once, at start-up: a change needs a restart.
 `config.yaml` follows hot reload as usual, and every version of it is loaded
@@ -1383,7 +1383,7 @@ test (`TLSPROXY_LIVE=1`) goes out to the internet.
   background, at start-up, `renew_before_days`), the CA renewing itself with
   the same key, foreign certificates archived and old archives pruned,
   imported intermediates served with their chain, refusals, the CA's
-  `config.yaml` (what `certificates` changes, `ca` locked), and the console's CAs page.
+  `config.yaml` (what `certificates` changes, `ca` locked), and the console's Certificates page (a sub-tab per CA).
 - **Unit:** ClientHello parsing (every prefix of a fragmented hello,
   post-quantum sizes, malformed input), config parsing and errors, routing,
   LRU eviction order and caps, a denial flood that cannot evict allowed

@@ -25,7 +25,7 @@ package main
 //	                                   never used, deleted after 14 days
 //
 // The default CA, ca001, is made at start-up when cert_root has none; others
-// are made on the console's CAs page (generated, or an existing one pasted
+// are made on the console's Certificates page (generated, or an existing one pasted
 // in), and a rule naming one that doesn't exist is a config error. A self-signed CA's
 // certificate is renewed before it expires, with the same key and subject, so
 // what it issued stays valid. A host name has no "_", so neither the CA files

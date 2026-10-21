@@ -51,8 +51,11 @@ New:
 - `basic_auth`: users (`username` with `password_hash` (argon2id or
   pbkdf2-sha256) or `password_plain`) that a serve entry asks for with
   `basic_auth: <name>`. A matched password is remembered for 5 minutes.
-- The console's rule editor has *Serve it here*, one row per serve entry
-  (its basic auth chosen from the existing groups), and saves through the
+- The console's rule editor has *Serve it here*, one card per serve entry:
+  the prefix and target (or folder), the Host header on a row of its own,
+  *strip the prefix* and *verify the target's certificate* as checkboxes,
+  who may use it (anyone, or the users of a basic_auth group), and an example
+  of where a request goes. It saves through the
   YAML tree: comments elsewhere in the file are kept. A **Basic auth** page
   adds, renames (with the serve entries that use it) and deletes groups, and
   adds, deletes, disables and sets the password and expiry of users;
@@ -65,6 +68,10 @@ New:
   host names). An IP address sent as SNI is routed as no SNI and refused
   unless `cert_domains` lists it (it used to be a bad ClientHello).
   `cert: auto` on `NONE` stays an error, now pointing at `local-ca`.
+- The console's Certificates and CAs pages are one **Certificates** page
+  with a sub-tab per issuer (ACME, then each CA): the issuer on top, the
+  certificates it issued in a table below; *+ New CA* and *Import CA…* sit
+  in the sub-tab bar. The address remembers the sub-tab (`#certs/ca002`).
 - `$console` in `listeners` and `routes` names the console's listener
   whatever its port (`https` or `console_http`), so moving the console
   needs no edit; the console writes it so. Without a console it is an error.

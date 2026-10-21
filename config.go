@@ -1331,7 +1331,7 @@ func tlsSettings(cfg *Config, rule *Rule, r rawRule) error {
 	rule.Cert = *r.cert
 	if _, local := localCARef(rule.Cert); !local && !strings.EqualFold(rule.Cert, "auto") {
 		return fmt.Errorf("cert: %s: a certificate directory is no longer supported. Use cert: auto (ACME), or cert: local-ca: "+
-			"import the CA that issued your certificate (its certificate and key) on the console's CAs page, and the proxy issues per name", rule.Cert)
+			"import the CA that issued your certificate (its certificate and key) on the console's Certificates page, and the proxy issues per name", rule.Cert)
 	}
 	rule.UpstreamTLS, rule.UpstreamTLSVerify = true, true
 	var err error

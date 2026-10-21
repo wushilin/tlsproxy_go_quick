@@ -253,7 +253,7 @@ func (c *caConfig) text() string {
 		return "[" + strings.Join(out, ", ") + "]"
 	}
 	return fmt.Sprintf(`# Settings of this CA, read again whenever this file changes. A mistake keeps
-# the previous settings; the console's CAs page and the log say what is wrong.
+# the previous settings; the console's Certificates page and the log say what is wrong.
 
 ca:
   # The CA itself. Name and key are set when the CA is made and kept afterwards:
@@ -346,7 +346,7 @@ func (l *localCA) loadConfig() {
 	fi, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		if _, old := os.Stat(filepath.Join(l.dir, caConfigOld)); old == nil {
-			msg := fmt.Sprintf("%s is no longer read: write its settings as %s (YAML: ca: and certificates:, key: value; see the console's CAs page for the form)", filepath.Join(l.dir, caConfigOld), path)
+			msg := fmt.Sprintf("%s is no longer read: write its settings as %s (YAML: ca: and certificates:, key: value; see the console's Certificates page for the form)", filepath.Join(l.dir, caConfigOld), path)
 			if cur := l.conf.Load(); cur == nil || cur.err != msg {
 				errorf("cert: CA %s: %s; the defaults are in use", l.id, msg)
 			}

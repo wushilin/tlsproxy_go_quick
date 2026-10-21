@@ -135,7 +135,7 @@ routes:
 
       # Terminate TLS with your own CA (ca002 in cert_root): a certificate per name,
       # issued the first time a client asks and renewed automatically. Clients must
-      # trust the CA (download it from the console's CAs page).
+      # trust the CA (download it from the console's Certificates page).
       - domain: "*.lab.internal"
         cert: local-ca:ca002
         cert_domains: [git.lab.internal, "*.ci.lab.internal"] # optional: names or globs; any other name is refused

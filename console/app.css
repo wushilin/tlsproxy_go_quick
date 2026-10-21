@@ -836,12 +836,40 @@ textarea.pem {
 textarea.pem:focus { outline: 2px solid var(--focus); outline-offset: 0; border-color: transparent; }
 .ca-set-text { flex: 1; min-height: 360px; white-space: pre; }
 .serve-rows { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; }
-.serve-row { display: grid; grid-template-columns: 9em 1fr 2fr auto; gap: 6px 8px; align-items: end; padding: 10px; border: 1px solid var(--line-strong); border-radius: 8px; }
-.serve-row .more { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 8px; }
+.serve-row { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); }
+.serve-head { display: flex; align-items: center; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.serve-head .serve-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-3); font-size: 12px; }
+.serve-grid { display: grid; grid-template-columns: minmax(8em, 1fr) 2fr; gap: 10px; }
+.serve-opts { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 6px; background: var(--surface-2); }
+.serve-opts[hidden] { display: none; }
+.serve-row .check { font-weight: 400; color: var(--fg); }
+.serve-row .check[hidden] { display: none; }
+.serve-row .hint { font-size: 11.5px; }
 .serve-row select, .serve-row input[type=text] { height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--fg); font: 13px var(--font-mono); min-width: 0; }
-@media (max-width: 640px) { .serve-row, .serve-row .more { grid-template-columns: 1fr; } }
+.serve-opts input[type=text] { background: var(--surface); }
+.serve-head select { font-family: inherit; font-weight: 600; }
+@media (max-width: 640px) { .serve-grid { grid-template-columns: 1fr; } }
 .auth-card .ca-head { justify-content: space-between; }
 .auth-users td { vertical-align: middle; padding: 6px 12px; }
 .auth-users th { padding: 6px 12px; }
 .auth-btns { display: flex; gap: 6px; justify-content: flex-end; }
 .auth-btns .act, .auth-card .ca-actions .act { height: 28px; padding: 0 10px; }
+
+/* ---------- certificates: one sub-tab per issuer ---------- */
+.subtabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; align-items: center; }
+.subtab {
+  height: 32px; padding: 0 14px; border-radius: 8px; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--fg-2); font-size: var(--t-small); font-weight: 600;
+}
+.subtab:hover { color: var(--fg); border-color: var(--line-strong); }
+.subtab[aria-selected="true"] { color: var(--tx); background: var(--surface); border-color: var(--tx); }
+.subtab .n { margin-left: 6px; font-weight: 400; color: var(--fg-3); }
+.subtabs .spacer { flex: 1; }
+.cert-table td { vertical-align: middle; white-space: normal; }
+.cert-table td.names { min-width: 12em; }
+.cert-table .also { display: block; font-size: 11.5px; color: var(--fg-3); }
+.cert-table td.notes { max-width: 28em; font-size: 12.5px; }
+.cert-table td.notes.bad { color: var(--danger); }
+.cert-table td.acts { text-align: right; white-space: nowrap; }
+.cert-table td.acts .act { height: 28px; padding: 0 10px; }
+.empty-row { padding: 18px 16px; margin: 0; color: var(--fg-3); }

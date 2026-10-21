@@ -25,7 +25,7 @@ const RATE_MAX_SAMPLES = 64;
 const HISTORY_POINTS = 120; // two minutes at one sample per second
 const MAX_ROWS = 200;
 const ARM_MS = 3000;
-const TABS = ["rules", "flows", "certs", "ca", "auth", "log", "config"];
+const TABS = ["rules", "flows", "certs", "auth", "log", "config"];
 
 const ui = {
   state: null,
@@ -1466,48 +1466,79 @@ const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "strip_prefix", "for
 
 function serveRow(e) {
   const row = el("div", "serve-row");
-  const field = (label, input) => { const l = el("label", "field"); l.append(el("span", "", label), input); return l; };
+  const field = (label, input, cls, hint) => {
+    const l = el("label", "field" + (cls ? " " + cls : ""));
+    l.append(el("span", "", label), input);
+    if (hint) l.appendChild(el("em", "hint", hint));
+    return l;
+  };
   const text = (cls, value, placeholder) => {
     const i = el("input");
     i.type = "text"; i.className = cls; i.value = value || ""; i.placeholder = placeholder || ""; i.spellcheck = false;
     return i;
   };
+  const check = (cls, label, on) => {
+    const l = el("label", "check");
+    const c = el("input");
+    c.type = "checkbox"; c.className = cls; c.checked = on;
+    l.append(c, document.createTextNode(" " + label));
+    return [l, c];
+  };
+
+  // Head: what it is, and Remove.
+  const head = el("div", "serve-head");
   const type = el("select", "s-type");
-  for (const [v, t] of [["reverse_proxy", "reverse proxy"], ["static_content", "static files"]]) {
+  for (const [v, t] of [["reverse_proxy", "Reverse proxy"], ["static_content", "Static files"]]) {
     const o = el("option", "", t); o.value = v; type.appendChild(o);
   }
   type.value = e.type === "static_content" ? "static_content" : "reverse_proxy";
-  const where = text("s-where", e.type === "static_content" ? e.base_dir : e.target, "");
+  type.setAttribute("aria-label", "Type");
+  const summary = el("span", "serve-sum mono");
   const remove = el("button", "btn btn-quiet", "Remove");
   remove.type = "button";
   remove.addEventListener("click", () => { row.remove(); onFormChange(); });
-  row.append(field("Type", type), field("Prefix", text("s-prefix", e.prefix, "/api/")), field("", where), remove);
-  const more = el("div", "more");
-  const strip = el("select", "s-strip");
-  for (const [v, t] of [["", "keep the prefix"], ["true", "strip the prefix"]]) { const o = el("option", "", t); o.value = v; strip.appendChild(o); }
-  strip.value = String(e.strip_prefix) === "true" ? "true" : "";
-  const verify = el("select", "s-verify");
-  for (const [v, t] of [["", "verify https:// (default)"], ["false", "don't verify"]]) { const o = el("option", "", t); o.value = v; verify.appendChild(o); }
-  verify.value = String(e.tls_verify) === "false" ? "false" : "";
+  head.append(type, summary, remove);
+
+  // Where: the prefix, and what serves it.
+  const prefix = text("s-prefix", e.prefix, "/");
+  const where = text("s-where", e.type === "static_content" ? e.base_dir : e.target, "");
+  const whereField = field("", where, "grow");
+  const main = el("div", "serve-grid");
+  main.append(field("Path prefix", prefix, "", "the longest matching prefix serves a request"), whereField);
+
+  // Reverse proxy options, one per row.
+  const opts = el("div", "serve-opts");
+  const host = text("s-host", e.force_host, "unset: the Host the client sent");
+  const hostField = field("Host header sent to the target", host, "wide");
+  const [stripL, strip] = check("s-strip", "Strip the prefix before forwarding", String(e.strip_prefix) === "true");
+  const [verifyL, verify] = check("s-verify", "Verify the target's certificate (https:// targets)", String(e.tls_verify) !== "false");
+  opts.append(hostField, stripL, verifyL);
+
+  // Access.
   const auth = el("select", "s-auth");
   const groups = (ui.state && ui.state.authGroups) || [];
   for (const g of ["", ...groups, ...(e.basic_auth && !groups.includes(e.basic_auth) ? [e.basic_auth] : [])]) {
-    const o = el("option", "", g === "" ? "none" : groups.includes(g) ? g : `${g} (no such group)`);
+    const o = el("option", "", g === "" ? "Anyone (no basic auth)" : groups.includes(g) ? `Users of ${g}` : `${g} (no such group)`);
     o.value = g;
     auth.appendChild(o);
   }
   auth.value = e.basic_auth || "";
-  auth.title = groups.length ? "Ask for a user of this basic_auth group" : "No basic_auth group yet: add one on the Basic auth page";
-  more.append(field("Path sent on", strip), field("Host sent on", text("s-host", e.force_host, "the client's")),
-    field("Target certificate", verify), field("Basic auth", auth));
-  row.append(more);
+  const authField = field("Who may use it", auth, "", groups.length ? "" : "no basic_auth group yet: add one on the Basic auth page");
+
+  row.append(head, main, opts, authField);
   const sync = () => {
     const proxy = type.value === "reverse_proxy";
-    where.previousSibling.textContent = proxy ? "Target" : "Folder";
+    whereField.firstChild.textContent = proxy ? "Target URL" : "Folder";
     where.placeholder = proxy ? "http://127.0.0.1:8080" : "/opt/www/site";
-    for (const n of [strip, verify, more.querySelector(".s-host")]) n.closest(".field").hidden = !proxy;
+    opts.hidden = !proxy;
+    verifyL.hidden = !/^https:/i.test(where.value.trim());
+    // An example request and where it goes: a static folder, like a proxy
+    // with strip_prefix, gets the path after the prefix.
+    const path = (prefix.value.trim() || "/").replace(/\/$/, "") + "/x";
+    const sent = !proxy || strip.checked ? "/x" : path;
+    summary.textContent = `${path} → ${(where.value.trim() || "…").replace(/\/$/, "")}${sent}`;
   };
-  type.addEventListener("change", sync);
+  for (const n of [type, prefix, where, strip]) n.addEventListener(n.tagName === "SELECT" || n.type === "checkbox" ? "change" : "input", sync);
   sync();
   return row;
 }
@@ -1520,9 +1551,9 @@ function readServe() {
     if (e.type === "static_content") e.base_dir = q(".s-where");
     else {
       e.target = q(".s-where");
-      if (q(".s-strip")) e.strip_prefix = "true";
+      if (row.querySelector(".s-strip").checked) e.strip_prefix = "true";
       if (q(".s-host")) e.force_host = q(".s-host");
-      if (q(".s-verify")) e.tls_verify = "false";
+      if (!row.querySelector(".s-verify").checked) e.tls_verify = "false";
     }
     if (q(".s-auth")) e.basic_auth = q(".s-auth");
     for (const k of Object.keys(e)) if (e[k] === "") delete e[k];
@@ -1552,13 +1583,13 @@ function localCAOf(cert) {
 function localCAValue(id) { return id === "ca001" ? "local-ca" : `local-ca:${id}`; }
 
 // fillCASelect lists the CAs that exist for the rule editor. A new one is
-// made on the CAs page, never from here.
+// made on the Certificates page, never from here.
 function fillCASelect(selected) {
   const sel = $("f-cert-ca");
   return getJSON("api/cas").then((d) => {
     sel.replaceChildren();
     if (!d.cas.length) {
-      const o = el("option", "", "no CA yet: make one on the CAs page");
+      const o = el("option", "", "no CA yet: make one on the Certificates page");
       o.value = "";
       sel.appendChild(o);
     }
@@ -1667,7 +1698,7 @@ function quickChecks(v) {
       else if (e.type === "reverse_proxy" && !e.target) out.push([1, `Entry ${i + 1}: a reverse proxy needs its target, http://host:port.`]);
       else if (e.type === "static_content" && !e.base_dir) out.push([1, `Entry ${i + 1}: static files need their folder.`]);
     });
-    if (radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the CAs page first."]);
+    if (radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the Certificates page first."]);
   } else if (v.action !== "deny") {
     const host = val("f-target-host");
     if (!host) out.push([1, "A target host is required for an allow rule."]);
@@ -1679,7 +1710,7 @@ function quickChecks(v) {
     const port = val("f-target-port");
     if (!port) out.push([1, "A target port is required for an allow rule."]);
     else if ((!/^\d+$/.test(port) || +port < 1 || +port > 65535)) out.push([1, "The target port must be a number from 1 to 65535."]);
-    if (radio("f-tls") === "terminate" && radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the CAs page first."]);
+    if (radio("f-tls") === "terminate" && radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the Certificates page first."]);
     for (const [id, label] of [["f-agg", "aggregated speed"], ["f-conn", "per-connection speed"]]) {
       const s = val(id);
       if (s && !RATE_RE.test(s)) out.push([2, `The ${label} needs a number and a unit, like 1Gbit or 15MiB/s.`]);
@@ -2145,6 +2176,11 @@ $("collapse-all").addEventListener("click", () => {
 // ---------- tabs ----------
 
 function selectTab(name, force) {
+  // certs/ca002: a sub-tab of the Certificates page; the CAs page is gone into it.
+  let [base, sub] = String(name || "").split("/");
+  if (base === "ca") base = "certs";
+  if (base === "certs" && sub) certSub = sub;
+  name = base;
   if (!TABS.includes(name)) name = "rules";
   if (!force && ui.tab === "config" && name !== "config" && cfgDirty() &&
       !confirm("Leave the config editor? Your unsaved text stays in this page until you reload it.")) {
@@ -2154,12 +2190,12 @@ function selectTab(name, force) {
   ui.tab = name;
   for (const b of document.querySelectorAll(".tab")) b.setAttribute("aria-selected", String(b.dataset.tab === name));
   for (const t of TABS) $("tab-" + t).hidden = t !== name;
-  const hash = name === "rules" ? "" : "#" + name;
+  const hash = name === "rules" ? "" : name === "certs" ? "#certs/" + certSub : "#" + name;
   if (location.hash !== hash) history.replaceState(null, "", hash || location.pathname + location.search);
   clearInterval(ui.pageTimer);
   ui.pageTimer = 0;
   const every = { certs: 10000, log: 2000 }[name];
-  const load = { certs: loadCerts, ca: loadCAs, auth: loadAuth, log: loadLog, config: loadConfigOnce }[name];
+  const load = { certs: loadCerts, auth: loadAuth, log: loadLog, config: loadConfigOnce }[name];
   if (load) {
     const run = () => { if (!document.hidden) load().catch((e) => { if (e.status !== 401) pageError(name, e); }); };
     run();
@@ -2605,86 +2641,68 @@ $("ref").addEventListener("click", (ev) => { if (ev.target === $("ref")) $("ref"
 
 let caNext = "";
 
-function loadCAs() {
-  return getJSON("api/cas").then(renderCAs);
-}
+const loadCAs = () => loadCerts(); // every CA change redraws the Certificates page
 
-// Each CA is a card: who it is and until when on top, what it issues in the
-// middle, where it is used and its fingerprint below, actions on the right.
-function renderCAs(d) {
-  caNext = d.next;
-  setText($("ca-meta"), `in ${d.caRoot}`);
-  const list = $("cas");
-  list.replaceChildren();
-  if (!d.cas.length) {
-    const empty = el("div", "empty");
-    const img = el("img");
-    img.src = "logo-sleep.svg";
-    img.alt = "";
-    empty.append(img, el("span", "", "No CA yet. The default CA, ca001, is made when the proxy starts; generate or import more here."));
-    list.appendChild(empty);
-    return;
+// caCard is a CA's card for its sub-tab: who it is and until when, what it
+// issues, where it is used, its fingerprint, and its actions.
+function caCard(ca) {
+  const card = el("div", "ca-card" + (ca.error ? " broken" : ""));
+  const main = el("div", "ca-main");
+  const head = el("div", "ca-head");
+  head.append(el("span", "chip mono", ca.id), el("span", "ca-name", ca.name || "—"));
+  if (ca.id === "ca001") head.appendChild(Object.assign(el("span", "chip", "default"), { title: "Made at start-up; plain cert: local-ca is this CA" }));
+  if (!ca.error) {
+    head.appendChild(el("span", ca.selfSigned ? "chip" : "chip tls", ca.selfSigned ? "self-signed root" : `intermediate of ${ca.issuer}`));
+    head.appendChild(el("span", "chip t-muted", ca.keyType));
+    const exp = el("span", ca.daysLeft < 30 ? "chip bad" : "chip ok", `until ${ca.notAfter} · ${ca.daysLeft} days`);
+    exp.title = ca.selfSigned ? "Renewed with the same key before it expires" : "Issued elsewhere: import a renewed one before it expires";
+    head.appendChild(exp);
   }
-  for (const ca of d.cas) {
-    const card = el("div", "ca-card" + (ca.error ? " broken" : ""));
-    const main = el("div", "ca-main");
-    const head = el("div", "ca-head");
-    head.append(el("span", "chip mono", ca.id), el("span", "ca-name", ca.name || "—"));
-    if (!ca.error) {
-      head.appendChild(el("span", ca.selfSigned ? "chip" : "chip tls", ca.selfSigned ? "self-signed root" : `intermediate of ${ca.issuer}`));
-      head.appendChild(el("span", "chip t-muted", ca.keyType));
-      const exp = el("span", ca.daysLeft < 30 ? "chip bad" : "chip ok", `until ${ca.notAfter} · ${ca.daysLeft} days`);
-      exp.title = ca.selfSigned ? "Renewed with the same key before it expires" : "Issued elsewhere: import a renewed one before it expires";
-      head.appendChild(exp);
-    }
-    main.appendChild(head);
-    if (ca.error) {
-      main.appendChild(el("div", "ca-line bad", ca.error));
-    } else {
-      const issues = el("div", "ca-line");
-      issues.append(el("span", "ca-k", "issues"), el("span", "", ca.settings || "—"));
-      main.appendChild(issues);
-      if (ca.configError) main.appendChild(el("div", "ca-line bad", `config.yaml: ${ca.configError} (previous settings in use)`));
-      const facts = el("div", "ca-line ca-facts");
-      facts.append(el("span", "ca-k", "issued"), el("span", "", `${ca.issued} certificate${ca.issued === 1 ? "" : "s"}`),
-        el("span", "ca-k", "used by"), el("span", "", ca.rules.length ? ca.rules.map((l) => "line " + l).join(", ") : "no rule"));
-      main.appendChild(facts);
-      const fp = el("div", "ca-line");
-      const v = el("span", "mono ca-fp", ca.fingerprint.match(/.{2}/g).join(":"));
-      fp.append(el("span", "ca-k", "SHA-256"), v);
-      main.appendChild(fp);
-    }
-    const act = el("div", "ca-actions");
-    if (!ca.error) {
-      const dl = el("a", "btn btn-quiet", "Download certificate");
-      dl.href = `api/cas/cert?id=${encodeURIComponent(ca.id)}`;
-      dl.title = "The CA certificate, for clients to trust (the key is never offered)";
-      const [set] = actionButton("Settings", "");
-      set.title = "Edit what this CA issues (its config.yaml)";
-      set.addEventListener("click", () => openCASettings(ca.id));
-      act.append(dl, set);
-    }
-    const [del, delLabel] = actionButton("Delete", "danger");
-    del.disabled = ca.rules.length > 0;
-    del.title = ca.rules.length ? "Used by a rule: change the rule first" : "Move this CA to the archive (deleted after 14 days)";
-    let armed = 0;
-    del.addEventListener("click", () => {
-      if (!armed) {
-        del.classList.add("armed");
-        setText(delLabel, "Confirm delete");
-        armed = setTimeout(() => { armed = 0; del.classList.remove("armed"); setText(delLabel, "Delete"); }, ARM_MS);
-        return;
-      }
-      clearTimeout(armed);
-      del.disabled = true;
-      api("api/cas/delete", { id: ca.id })
-        .then(() => { toast(`Deleted ${ca.id}: moved to the archive`); return loadCAs(); })
-        .catch((e) => { del.disabled = false; toast(`Could not delete ${ca.id}: ${e.message}`, true); });
-    });
-    act.appendChild(del);
-    card.append(main, act);
-    list.appendChild(card);
+  main.appendChild(head);
+  if (ca.error) {
+    main.appendChild(el("div", "ca-line bad", ca.error));
+  } else {
+    const issues = el("div", "ca-line");
+    issues.append(el("span", "ca-k", "issues"), el("span", "", ca.settings || "—"));
+    main.appendChild(issues);
+    if (ca.configError) main.appendChild(el("div", "ca-line bad", `config.yaml: ${ca.configError} (previous settings in use)`));
+    const facts = el("div", "ca-line ca-facts");
+    facts.append(el("span", "ca-k", "used by"), el("span", "", ca.rules.length ? ca.rules.map((l) => "line " + l).join(", ") : "no rule"));
+    main.appendChild(facts);
+    const fp = el("div", "ca-line");
+    fp.append(el("span", "ca-k", "SHA-256"), el("span", "mono ca-fp", ca.fingerprint.match(/.{2}/g).join(":")));
+    main.appendChild(fp);
   }
+  const act = el("div", "ca-actions");
+  if (!ca.error) {
+    const dl = el("a", "btn btn-quiet", "Download certificate");
+    dl.href = `api/cas/cert?id=${encodeURIComponent(ca.id)}`;
+    dl.title = "The CA certificate, for clients to trust (the key is never offered)";
+    const [set] = actionButton("Settings", "");
+    set.title = "Edit what this CA issues (its config.yaml)";
+    set.addEventListener("click", () => openCASettings(ca.id));
+    act.append(dl, set);
+  }
+  const [del, delLabel] = actionButton("Delete", "danger");
+  del.disabled = ca.rules.length > 0;
+  del.title = ca.rules.length ? "Used by a rule: change the rule first" : "Move this CA to the archive (deleted after 14 days)";
+  let armed = 0;
+  del.addEventListener("click", () => {
+    if (!armed) {
+      del.classList.add("armed");
+      setText(delLabel, "Confirm delete");
+      armed = setTimeout(() => { armed = 0; del.classList.remove("armed"); setText(delLabel, "Delete"); }, ARM_MS);
+      return;
+    }
+    clearTimeout(armed);
+    del.disabled = true;
+    api("api/cas/delete", { id: ca.id })
+      .then(() => { toast(`Deleted ${ca.id}: moved to the archive`); certSub = "acme"; return loadCerts(); })
+      .catch((e) => { del.disabled = false; toast(`Could not delete ${ca.id}: ${e.message}`, true); });
+  });
+  act.appendChild(del);
+  card.append(main, act);
+  return card;
 }
 
 $("ca-generate").addEventListener("click", () => {
@@ -2702,7 +2720,7 @@ $("ca-gen-form").addEventListener("submit", (ev) => {
   const [alg, bits] = $("ca-gen-key").value.split(":");
   api("api/cas/generate", { commonName: val("ca-gen-name"), organization: val("ca-gen-org"), keyAlgorithm: alg, keyBits: +bits,
     hashAlgorithm: $("ca-gen-hash").value, validityDays: Math.round(+$("ca-gen-years").value * 365) || 3650 })
-    .then((d) => { $("ca-gen").close(); toast(`Generated ${d.id}`); return loadCAs(); })
+    .then((d) => { $("ca-gen").close(); toast(`Generated ${d.id}`); certSub = d.id; return loadCAs(); })
     .catch((e) => setText($("ca-gen-error"), e.message))
     .finally(() => { $("ca-gen-save").disabled = false; });
 });
@@ -2749,7 +2767,7 @@ $("ca-imp-form").addEventListener("submit", (ev) => {
   ev.preventDefault();
   $("ca-imp-save").disabled = true;
   api("api/cas/import", { cert: $("ca-imp-cert").value, key: $("ca-imp-key").value })
-    .then((d) => { $("ca-imp").close(); toast(`Imported as ${d.id}`); return loadCAs(); })
+    .then((d) => { $("ca-imp").close(); toast(`Imported as ${d.id}`); certSub = d.id; return loadCAs(); })
     .catch((e) => setText($("ca-imp-error"), e.message))
     .finally(() => { $("ca-imp-save").disabled = false; });
 });
@@ -2761,28 +2779,35 @@ const CERT_STATUS = { ok: "chip ok", expiring: "chip warn", missing: "chip warn"
 let certData = null;
 let certFilter = "";
 
+let certSub = "acme"; // the issuer whose sub-tab shows: acme, or a CA's id
+let caData = null;
+
 function loadCerts() {
-  return getJSON("api/certs").then((d) => { certData = d; renderCerts(d); });
+  return Promise.all([getJSON("api/certs"), getJSON("api/cas")]).then(([d, cas]) => {
+    certData = d;
+    caData = cas;
+    caNext = cas.next;
+    renderCerts();
+  });
 }
 
 $("cert-filter").addEventListener("input", (ev) => {
   certFilter = ev.target.value.trim().toLowerCase();
-  if (certData) renderCerts(certData);
+  if (certData) renderCerts();
 });
 
-// certMatches: the filter against the name, every name in the certificate,
-// the CA and the status.
+// certMatches: the filter against the name, every name in the certificate
+// and the status.
 function certMatches(c) {
   if (!certFilter) return true;
-  return [c.Name, ...(c.Names || []), c.Source === "auto" ? "acme" : c.CA, c.Status]
-    .some((s) => s && s.toLowerCase().includes(certFilter));
+  return [c.Name, ...(c.Names || []), c.Status].some((s) => s && s.toLowerCase().includes(certFilter));
 }
 
 // removeButton archives the certificate after a second click to confirm.
 function removeButton(c) {
   const [b, label] = actionButton("Remove", "danger");
   b.title = c.Source === "auto"
-    ? "Move it to cert_path's _archive (deleted after 14 days) and request a new one"
+    ? "Move it to acme's _archive (deleted after 14 days) and request a new one"
     : `Move it to CA ${c.CA}'s _archive (deleted after 14 days); a new one is issued when a client asks for it`;
   let armed = 0;
   b.addEventListener("click", () => {
@@ -2801,54 +2826,94 @@ function removeButton(c) {
   return b;
 }
 
-function renderCerts(d) {
-  setText($("cert-meta"), `automatic ones live in ${d.certPath || "—"} · ${d.acmeDirectory || ""}`);
-  const list = $("certs");
-  list.replaceChildren();
+// ofIssuer is whether a certificate is the current sub-tab's.
+const ofIssuer = (c, sub) => (sub === "acme" ? c.Source === "auto" : c.Source === "local-ca" && c.CA === sub);
+
+// renderCerts draws the Certificates page: the sub-tabs, the issuer on top,
+// its certificates in a table.
+function renderCerts() {
+  const d = certData, cas = (caData && caData.cas) || [];
   const all = d.certs || [];
-  const certs = all.filter(certMatches);
-  if (!certs.length) {
-    const empty = el("div", "empty");
-    const img = el("img");
-    img.src = "logo-sleep.svg";
-    img.alt = "";
-    empty.append(img, el("span", "", all.length ? `No certificate matches “${certFilter}”.` : "No rule terminates TLS, so there are no certificates."));
-    list.appendChild(empty);
-    return;
+  if (certSub !== "acme" && !cas.some((ca) => ca.id === certSub)) certSub = "acme";
+  if (ui.tab === "certs" && location.hash !== "#certs/" + certSub) history.replaceState(null, "", "#certs/" + certSub);
+
+  const bar = $("cert-subtabs");
+  bar.replaceChildren();
+  const subtab = (id, label, title) => {
+    const b = el("button", "subtab", label);
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(id === certSub));
+    b.title = title;
+    b.appendChild(el("span", "n", String(all.filter((c) => ofIssuer(c, id)).length)));
+    b.addEventListener("click", () => { certSub = id; renderCerts(); });
+    bar.appendChild(b);
+  };
+  let host = "";
+  try { host = new URL(d.acmeDirectory).host; } catch (_) { /* no directory */ }
+  subtab("acme", /letsencrypt\.org$/.test(host) ? "ACME · Let's Encrypt" : "ACME", `Automatic certificates (cert: auto) from ${d.acmeDirectory || "the ACME directory"}`);
+  for (const ca of cas) subtab(ca.id, `${ca.id} · ${ca.name || ca.error || ""}`, `Certificates CA ${ca.id} issued (cert: local-ca${ca.id === "ca001" ? "" : ":" + ca.id})`);
+  bar.appendChild(el("span", "spacer"));
+  for (const [id, label] of [["ca-generate", "+ New CA"], ["ca-import", "Import CA…"]]) {
+    const b = el("button", "btn" + (id === "ca-generate" ? " btn-add" : ""), label);
+    b.type = "button";
+    b.addEventListener("click", () => $(id).click());
+    bar.appendChild(b);
   }
-  for (const c of certs) {
-    const card = el("div", "ca-card" + (c.LastError ? " broken" : ""));
+
+  // The issuer.
+  const issuer = $("cert-issuer");
+  issuer.replaceChildren();
+  if (certSub === "acme") {
+    const card = el("div", "ca-card");
     const main = el("div", "ca-main");
     const head = el("div", "ca-head");
-    head.append(el("span", "ca-name mono", c.Name), el("span", CERT_STATUS[c.Status] || "chip", c.Status));
-    head.appendChild(el("span", c.Source === "auto" ? "chip tls" : "chip", c.Source === "auto" ? "ACME" : `local CA ${c.CA}`));
-    if (c.NotAfter) {
-      const exp = el("span", c.DaysLeft < 8 ? "chip bad" : c.DaysLeft < 30 ? "chip warn" : "chip ok", `until ${c.NotAfter} · ${c.DaysLeft} days`);
-      if (c.RenewFrom) exp.title = `Renewed automatically from ${c.RenewFrom}`;
-      head.appendChild(exp);
-    }
+    head.append(el("span", "ca-name", "Automatic certificates"), el("span", "chip tls", "ACME"), el("span", "chip t-muted", "TLS-ALPN-01"));
     main.appendChild(head);
-    if (c.Names && c.Names.length && c.Names.join(", ") !== c.Name) {
-      const names = el("div", "ca-line");
-      names.append(el("span", "ca-k", "names"), el("span", "mono", c.Names.join(", ")));
-      main.appendChild(names);
+    for (const [k, v] of [["directory", d.acmeDirectory || "—"], ["folder", d.certPath || "—"]]) {
+      const line = el("div", "ca-line");
+      line.append(el("span", "ca-k", k), el("span", "mono", v));
+      main.appendChild(line);
     }
-    const facts = el("div", "ca-line ca-facts");
-    facts.append(el("span", "ca-k", "issuer"), el("span", "", c.Issuer || "—"),
-      el("span", "ca-k", "renews from"), el("span", "num", c.RenewFrom || "—"),
-      el("span", "ca-k", "used by"), el("span", "", (c.RuleLines || []).map((l) => "line " + l).join(", ") || "no rule"));
-    main.appendChild(facts);
-    if (c.LastError) {
-      main.appendChild(el("div", "ca-line bad", `Last attempt failed: ${c.LastError}`));
-      const next = el("div", "ca-line");
-      next.append(el("span", "ca-k", "next attempt"), el("span", "num", c.NextAttempt || "—"));
-      main.appendChild(next);
-    } else if (c.Detail) {
-      main.appendChild(el("div", "ca-line", c.Detail));
-    }
-    if (c.Dir) main.appendChild(el("div", "ca-line mono ca-fp", c.Dir));
+    main.appendChild(el("div", "ca-line", "Issued for the names of rules with cert: auto, renewed before they expire. The CA validates on public port 443; this proxy answers its challenges on any listener."));
     card.appendChild(main);
-    const act = el("div", "ca-actions");
+    issuer.appendChild(card);
+    setText($("cert-note"), "A failed request is retried after 6 hours; Retry now skips the wait. Remove moves a certificate to the archive (deleted after 14 days) and requests a new one.");
+  } else {
+    issuer.appendChild(caCard(cas.find((ca) => ca.id === certSub)));
+    setText($("cert-note"), `A rule uses this CA with cert: local-ca${certSub === "ca001" ? "" : ":" + certSub}. Certificates are issued the first time a client asks for a name, kept in the CA's folder, and renewed automatically; anything in the folder the CA did not issue is moved to its _archive and deleted after 14 days. A self-signed CA is renewed with the same key, so what it issued stays valid. Clients must trust the CA: download its certificate above. Private keys never leave the proxy.`);
+  }
+
+  // Its certificates.
+  const mine = all.filter((c) => ofIssuer(c, certSub));
+  const rows = mine.filter(certMatches);
+  setText($("cert-list-title"), certSub === "acme" ? "Automatic certificates" : `Issued by ${certSub}`);
+  setText($("cert-meta"), `${mine.length} certificate${mine.length === 1 ? "" : "s"}`);
+  const body = $("certs");
+  body.replaceChildren();
+  $("certs-empty").hidden = rows.length > 0;
+  setText($("certs-empty"), mine.length ? `No certificate matches “${certFilter}”.`
+    : certSub === "acme" ? "No rule has cert: auto." : "Nothing issued yet: a certificate is made the first time a client asks for a name of a rule using this CA.");
+  for (const c of rows) {
+    const tr = el("tr");
+    const names = el("td", "names");
+    names.appendChild(el("span", "mono", c.Name));
+    if (c.Names && c.Names.length && c.Names.join(", ") !== c.Name) names.appendChild(el("span", "also mono", c.Names.join(", ")));
+    if (c.Dir) names.title = c.Dir;
+    tr.appendChild(names);
+    const st = el("td");
+    st.appendChild(el("span", CERT_STATUS[c.Status] || "chip", c.Status));
+    tr.appendChild(st);
+    const until = el("td", "num");
+    if (c.NotAfter) until.appendChild(el("span", c.DaysLeft < 8 ? "chip bad" : c.DaysLeft < 30 ? "chip warn" : "chip ok", `${c.NotAfter} · ${c.DaysLeft} d`));
+    else until.textContent = "—";
+    tr.appendChild(until);
+    tr.appendChild(el("td", "num", c.RenewFrom || "—"));
+    tr.appendChild(el("td", "", (c.RuleLines || []).map((l) => "line " + l).join(", ") || "no rule"));
+    const notes = el("td", "notes" + (c.LastError ? " bad" : ""));
+    notes.textContent = c.LastError ? `Last attempt failed: ${c.LastError}` + (c.NextAttempt ? ` · next ${c.NextAttempt}` : "") : (c.Detail || "");
+    tr.appendChild(notes);
+    const act = el("td", "acts");
     if (c.Source === "auto" && c.LastError) {
       const [b] = actionButton("Retry now", "");
       b.addEventListener("click", () => {
@@ -2860,8 +2925,8 @@ function renderCerts(d) {
       act.appendChild(b);
     }
     if (c.Removable) act.appendChild(removeButton(c));
-    if (act.childElementCount) card.appendChild(act);
-    list.appendChild(card);
+    tr.appendChild(act);
+    body.appendChild(tr);
   }
 }
 

@@ -20,7 +20,6 @@
       <button class="tab" type="button" role="tab" data-tab="rules" aria-selected="true" aria-controls="tab-rules">Listeners</button>
       <button class="tab" type="button" role="tab" data-tab="flows" aria-selected="false" aria-controls="tab-flows">Flow log</button>
       <button class="tab" type="button" role="tab" data-tab="certs" aria-selected="false" aria-controls="tab-certs">Certificates</button>
-      <button class="tab" type="button" role="tab" data-tab="ca" aria-selected="false" aria-controls="tab-ca">CAs</button>
       <button class="tab" type="button" role="tab" data-tab="auth" aria-selected="false" aria-controls="tab-auth">Basic auth</button>
       <button class="tab" type="button" role="tab" data-tab="log" aria-selected="false" aria-controls="tab-log">Log</button>
       <button class="tab" type="button" role="tab" data-tab="config" aria-selected="false" aria-controls="tab-config">Config file</button>
@@ -104,34 +103,29 @@
     </section>
 
     <!-- ================= Certificates ================= -->
+    <!-- One sub-tab per issuer: ACME, then each local CA. -->
     <section id="tab-certs" class="page" role="tabpanel" aria-label="Certificates" hidden>
+      <div class="subtabs" id="cert-subtabs" role="tablist" aria-label="Issuers"></div>
+      <!-- Opened from the sub-tab bar's New CA / Import CA buttons. -->
+      <button id="ca-generate" type="button" hidden></button>
+      <button id="ca-import" type="button" hidden></button>
+      <div class="panel" id="cert-issuer"></div>
       <div class="panel">
         <div class="panel-head">
-          <h2>Certificates</h2>
+          <h2 id="cert-list-title">Certificates</h2>
           <span class="sub mono" id="cert-meta"></span>
           <div class="search">
             <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-            <input id="cert-filter" type="search" placeholder="Filter by name, CA or status" aria-label="Filter certificates">
+            <input id="cert-filter" type="search" placeholder="Filter by name or status" aria-label="Filter certificates">
           </div>
         </div>
-        <div class="ca-list" id="certs"></div>
+        <div class="scroll"><table class="grid cert-table">
+          <thead><tr><th>Name</th><th>Status</th><th>Valid until</th><th>Renews from</th><th>Used by</th><th>Notes</th><th></th></tr></thead>
+          <tbody id="certs"></tbody>
+        </table></div>
+        <p class="empty-row" id="certs-empty" hidden></p>
       </div>
-    </section>
-
-    <!-- ================= Certificate authorities ================= -->
-    <section id="tab-ca" class="page" role="tabpanel" aria-label="Certificate authorities" hidden>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Certificate authorities</h2>
-          <span class="sub mono" id="ca-meta"></span>
-          <div class="toolbar-actions">
-            <button class="btn btn-add" type="button" id="ca-generate"><span aria-hidden="true">+</span> Generate CA</button>
-            <button class="btn" type="button" id="ca-import">Import CA…</button>
-          </div>
-        </div>
-        <div class="ca-list" id="cas"></div>
-      </div>
-      <p class="page-note">A rule terminates TLS with one of these by <code>cert: local-ca:ca002</code> (plain <code>cert: local-ca</code> is ca001, the default CA, made at start-up when there is none). Certificates are issued the first time a client asks for a name, kept in the CA's folder, and renewed automatically; anything in a folder that the CA did not issue is moved to its <code>_archive</code> and deleted after 14 days. A self-signed CA is renewed with the same key, so what it issued stays valid. Clients must trust the CA: download its certificate here. Private keys never leave the proxy.</p>
+      <p class="page-note" id="cert-note"></p>
     </section>
 
     <!-- ================= Basic auth ================= -->

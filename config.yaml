@@ -203,7 +203,7 @@ logging:
 #             local-ca   your own CA: plain local-ca is ca001, the default CA, made at start-up when
 #                        cert_root has none ("Local CA", 20 years; the log names its ca_cert.pem to install).
 #                        local-ca:ca002 and on must exist (generate or import them on the console's
-#                        CAs page). One certificate per name,
+#                        Certificates page). One certificate per name,
 #                        issued the first time a client asks, renewed before it expires (checked every 6 h);
 #                        anything in the folder that the CA did not issue is moved to _archive and
 #                        deleted after 14 days. Clients must trust the CA. cert_domains, if set: names

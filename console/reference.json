@@ -234,7 +234,7 @@
       {
         "key": "cert",
         "default": "(pass through)",
-        "meaning": "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in cert_root, made on the CAs page, issuing one certificate per name on first use)."
+        "meaning": "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in cert_root, made on the Certificates page, issuing one certificate per name on first use)."
       },
       {
         "key": "cert_domains",

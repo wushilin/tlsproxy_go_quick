@@ -243,7 +243,7 @@ func (m *CertManager) Apply(cfg *Config) error {
 // Check reports whether cfg's local CAs and scripts can be used, without
 // changing anything (the console validates unsaved text with it).
 func (m *CertManager) Check(cfg *Config) error {
-	// Every CA a rule names must exist (made on the CAs page) and load.
+	// Every CA a rule names must exist (made on the Certificates page) and load.
 	for i := range cfg.Rules {
 		if id := cfg.Rules[i].LocalCA(); id != "" {
 			dir := filepath.Join(cfg.CARoot, id)
@@ -259,7 +259,7 @@ func (m *CertManager) Check(cfg *Config) error {
 }
 
 // openLocalCAs opens every CA a rule of cfg uses; each must exist already
-// (made on the CAs page). One already open stays open: its certificates are
+// (made on the Certificates page). One already open stays open: its certificates are
 // kept.
 func (m *CertManager) openLocalCAs(cfg *Config) error {
 	// The default CA, whether a rule uses it or not: made if missing, then

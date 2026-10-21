@@ -70,7 +70,7 @@ var configReference = []sectionDoc{
 		{"domain", "(required)", "A host name with * wildcards (a * never crosses a dot; as a whole label it is exactly one label), $no_sni for clients that send no name, or $anything_else for every name no other rule takes (checked last)."},
 		{"action", "allow", "allow or deny. deny answers with a TLS access_denied alert."},
 		{"target", "(required for allow)", "host:port to connect to; an IPv6 host in brackets, [2001:db8::1]:443. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces."},
-		{"cert", "(pass through)", "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in cert_root, made on the CAs page, issuing one certificate per name on first use)."},
+		{"cert", "(pass through)", "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in cert_root, made on the Certificates page, issuing one certificate per name on first use)."},
 		{"cert_domains", "the literal domain", "A list. cert: auto: exact names to issue. cert: local-ca: names or globs (*.dev.example.com, several) that get a certificate; any other name is refused (default: every name the rule matches). With $no_sni or $anything_else it may list IP addresses: a client without a host name gets one certificate for all of them (and a $no_sni rule's names), otherwise one for the address it connected to; an IP address a client sends as SNI must be listed."},
 		{"cert_validate_script", "(none)", "cert: auto: a script that decides per name not in cert_domains; exit 0 = issue."},
 		{"cert_validate_args", "[\"${host}\"]", "The script's arguments, a list of strings with ${1}, ${host} ... filled in."},
