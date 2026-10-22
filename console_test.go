@@ -690,6 +690,9 @@ func TestConsoleOverTLS(t *testing.T) {
 		t.Fatalf("sign-in over TLS: %d", code)
 	}
 	_, st := c.get("/api/state")
+	if st["version"] != version || version == "" {
+		t.Errorf("the state's version: %v, want %s", st["version"], version)
+	}
 	var consoleRule map[string]any
 	for _, l := range st["listeners"].([]any) {
 		lv := l.(map[string]any)

@@ -117,6 +117,10 @@ code { font-family: var(--font-mono); font-size: .92em; }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .mark { width: 28px; height: 28px; flex: none; }
 .brand .name { font-weight: 650; font-size: var(--t-lead); letter-spacing: -.01em; }
+.brand .ver {
+  flex: none; font-size: 11px; font-weight: 600; color: var(--tx);
+  padding: 1px 7px; border-radius: 999px; background: var(--tx-soft);
+}
 .host {
   font-size: var(--t-small); color: var(--fg-2);
   padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px;

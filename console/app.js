@@ -704,6 +704,7 @@ function forgetConn(id) {
 function applyState(s) {
   ui.skew = Date.now() - s.now;
   ui.state = s;
+  if (s.version) { $("ver").hidden = false; setText($("ver"), s.version); $("ver").title = `tlsproxy_go_quick ${s.version}`; }
   if (s.host) { $("host").hidden = false; setText($("host"), s.host); document.title = `${s.host} · tlsproxy`; }
   if (!ui.total) ui.total = new Ring(HISTORY_POINTS);
   meter("st").add(s.now, s.status.bytesUp);
