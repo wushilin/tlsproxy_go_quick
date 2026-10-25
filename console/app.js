@@ -20,7 +20,13 @@
 // patterns from the file) only ever reach the page through textContent.
 
 const $ = (id) => document.getElementById(id);
-const RATE_WINDOW_MS = 1500;
+// A rate is the bytes moved over the last RATE_WINDOW_MS, then smoothed with
+// a time constant of RATE_SMOOTH_MS. A trickle (a write a second, or less)
+// moves a whole write in or out of a short window at every poll and read
+// 0, 800 or 1600 b/s in turn; five seconds and the smoothing hold it steady.
+const RATE_WINDOW_MS = 5000;
+const RATE_SMOOTH_MS = 2000;
+const RATE_STALE_MS = 1500; // no sample for this long: the stream (or polling) stopped
 const RATE_MAX_SAMPLES = 64;
 const HISTORY_POINTS = 120; // two minutes at one sample per second
 const MAX_ROWS = 200;
@@ -108,21 +114,38 @@ const serverNow = () => Date.now() - ui.skew;
 // ---------- bounded data structures ----------
 
 class RateMeter {
-  constructor() { this.s = []; }
+  constructor() { this.s = []; this.smoothed = null; this.smoothedAt = 0; }
   add(t, v) {
     const s = this.s;
     if (s.length && v < s[s.length - 1][1]) s.length = 0; // counter restarted
     s.push([t, v]);
     while (s.length > RATE_MAX_SAMPLES || (s.length > 2 && t - s[0][0] > RATE_WINDOW_MS)) s.shift();
   }
-  rate(now) {
+  // windowed is the rate over the window: oldest sample to newest. Once no
+  // sample has come for RATE_STALE_MS the span grows with the clock instead,
+  // so an ended stream decays to 0 (and a live one is not read low between
+  // two polls).
+  windowed(now) {
     const s = this.s;
     while (s.length > 1 && now - s[0][0] > RATE_WINDOW_MS) s.shift();
     if (s.length < 2) return 0;
     const [t0, v0] = s[0];
     const [t1, v1] = s[s.length - 1];
-    const dt = Math.max(now, t1) - t0; // keeps growing once pushes stop
+    const dt = Math.max(now - RATE_STALE_MS, t1) - t0;
     return dt > 0 ? ((v1 - v0) * 1000) / dt : 0;
+  }
+  // rate is windowed, smoothed exponentially over time: however often it is
+  // asked, the smoothing follows the clock, not the number of calls.
+  rate(now) {
+    const r = this.windowed(now);
+    if (this.smoothed === null || now <= this.smoothedAt) {
+      if (this.smoothed === null) { this.smoothed = r; this.smoothedAt = now; }
+      return this.smoothed;
+    }
+    const a = 1 - Math.exp(-(now - this.smoothedAt) / RATE_SMOOTH_MS);
+    this.smoothed += a * (r - this.smoothed);
+    this.smoothedAt = now;
+    return this.smoothed;
   }
 }
 
