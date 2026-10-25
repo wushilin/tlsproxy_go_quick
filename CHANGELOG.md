@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.5.2
 
 - The console shows the proxy's version next to its name, once signed in.
 - Busy streams are batched: when a read comes back short in the middle of a
