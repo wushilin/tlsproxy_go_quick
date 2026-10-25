@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"unsafe"
 )
 
 const (
@@ -108,6 +109,45 @@ func (m *spliceMover) read() (int, error) {
 		return 0, errNoSplice
 	}
 	return 0, m.opError("read", m.from, err)
+}
+
+// topUp splices what the socket holds into the room left in the pipe. The
+// callback never asks to wait: EAGAIN just means nothing more came.
+func (m *spliceMover) topUp(int) (int, error) {
+	room := m.size - m.queued
+	if room <= 0 {
+		return 0, nil
+	}
+	var n int64
+	var serr error
+	err := m.src.Read(func(fd uintptr) bool {
+		n, serr = spliceRetry(int(fd), m.pipe[1], room)
+		return true
+	})
+	if err == nil {
+		err = serr
+	}
+	switch {
+	case err == nil && n == 0:
+		return 0, io.EOF
+	case err == nil:
+		m.queued += int(n)
+		return int(n), nil
+	case err == syscall.EAGAIN:
+		return 0, nil
+	}
+	return 0, m.opError("read", m.from, err)
+}
+
+// waiting is the socket's receive queue, from one ioctl.
+func (m *spliceMover) waiting() int {
+	n := int32(-1)
+	m.src.Control(func(fd uintptr) {
+		if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TIOCINQ, uintptr(unsafe.Pointer(&n))); e != 0 {
+			n = -1
+		}
+	})
+	return int(n)
 }
 
 func (m *spliceMover) write(int) (int, error) {

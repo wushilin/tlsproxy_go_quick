@@ -1,8 +1,19 @@
 # Changelog
 
-## Unreleased
+## v1.5.2
 
 - The console shows the proxy's version next to its name, once signed in.
+- Busy streams are batched: when a read comes back short in the middle of a
+  stream, the direction waits 5 ms and moves what arrived meanwhile with it,
+  for far fewer wake-ups and system calls per byte. Spliced, copied and
+  terminated connections alike; a request waiting for its reply is not held.
+  `low_latency: true` in `global` turns it off. `short_read_delay_us` is
+  replaced by it and now ignored, with a log line.
+- Console: rates (per connection, rule, listener and total) are measured
+  over a rolling 5 seconds and smoothed, instead of 1.5 seconds. A slow
+  connection (a write a second, or less) read 0, 667 or 1,290 b/s in turn
+  before; it reads its real rate now, and a live stream is no longer read
+  about 10% low between two polls.
 
 ## v1.5.1
 

@@ -16,7 +16,7 @@ import (
 )
 
 // version is set at build time: -ldflags "-X main.version=v1.2.0".
-var version = "v1.5.1"
+var version = "v1.5.2"
 
 const usage = `usage: %[1]s [config.yaml] [-noconsole] [-console_domain <name>] [-console_bind <addr>] [-console_port <n>] [-console_cert <auto|local-ca[:caNNN]>] [--test <sni>...]
        %[1]s --hash-password    (reads a password from stdin, prints an argon2id hash for $CONSOLE_PASSWORD or basic_auth)

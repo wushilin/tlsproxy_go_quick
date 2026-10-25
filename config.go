@@ -59,7 +59,7 @@ type Config struct {
 	DenyCacheSize     int
 	ReloadInterval    time.Duration // 0 = never
 	StatsInterval     time.Duration // 0 = never
-	ShortReadDelay    time.Duration // pause after a short read so data batches up; 0 = off
+	LowLatency        bool          // never hold a short read back to batch it (see linger.go)
 	Splice            bool          // relay passed-through connections with splice(2) (Linux only)
 	RememberNonce     bool          // refuse a ClientHello this proxy itself forwarded seconds ago (a loop)
 	Log               LogConfig     // the [logging] section
@@ -717,10 +717,10 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 					cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("line %d: buffer_size: %d is outside %d..%d; using %d", lineno, cfg.BufferSize, minBufferSize, maxBufferSize, clamped))
 					cfg.BufferSize = clamped
 				}
-			case "short_read_delay_us":
-				var us int
-				err = count(&us)
-				cfg.ShortReadDelay = time.Duration(us) * time.Microsecond
+			case "low_latency":
+				if cfg.LowLatency, err = parseBool(value); err != nil {
+					err = fail("low_latency: %v", err)
+				}
 			case "splice":
 				if cfg.Splice, err = parseBool(value); err != nil {
 					err = fail("splice: %v", err)
@@ -775,8 +775,9 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 				cfg.AcmeDirectory = value
 			case "acme_ca_file":
 				cfg.AcmeCAFile = value
-			case "io_model", "worker_threads":
-				// Legacy tuning knobs; goroutines make them moot.
+			case "io_model", "worker_threads", "short_read_delay_us":
+				// Legacy tuning knobs: goroutines make the first two moot,
+				// lingering (low_latency) replaces the pause after a short read.
 				cfg.Ignored = append(cfg.Ignored, key)
 			default:
 				return fail("unknown key %q in global", key)
@@ -1602,9 +1603,9 @@ func (r *Rule) LocalCA() string {
 
 // Describe summarises the settings for the startup / reload log line.
 func (c *Config) Describe() string {
-	return fmt.Sprintf("%d listener(s), %d rules (max_connections=%d, idle_timeout=%ds, half_close_timeout=%ds, buffer_size=%d, buffer_pool_max_idle=%d, allow_cache_size=%d, deny_cache_size=%d, short_read_delay_us=%d, splice=%t)",
+	return fmt.Sprintf("%d listener(s), %d rules (max_connections=%d, idle_timeout=%ds, half_close_timeout=%ds, buffer_size=%d, buffer_pool_max_idle=%d, allow_cache_size=%d, deny_cache_size=%d, low_latency=%t, splice=%t)",
 		len(c.Listeners), len(c.Rules), c.MaxConnections, int(c.IdleTimeout.Seconds()), int(c.HalfCloseTimeout.Seconds()),
-		c.BufferSize, c.BufferPoolMaxIdle, c.AllowCacheSize, c.DenyCacheSize, c.ShortReadDelay.Microseconds(), c.Splice)
+		c.BufferSize, c.BufferPoolMaxIdle, c.AllowCacheSize, c.DenyCacheSize, c.LowLatency, c.Splice)
 }
 
 // AutoDomains lists every name that needs an automatic certificate.

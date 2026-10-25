@@ -342,10 +342,7 @@ func TestNonePatternMatchesOnlyMissingSNI(t *testing.T) {
 
 func TestConfigIgnoresLegacyKeys(t *testing.T) {
 	c := mustParse(t, "[[listener]]\nname=default\nport=443\n[global]\nio_model=events\nworker_threads=4\nshort_read_delay_us=50\n")
-	if c.ShortReadDelay != 50*time.Microsecond {
-		t.Fatal(c.ShortReadDelay)
-	}
-	if !reflect.DeepEqual(c.Ignored, []string{"io_model", "worker_threads"}) {
+	if !reflect.DeepEqual(c.Ignored, []string{"io_model", "worker_threads", "short_read_delay_us"}) {
 		t.Fatal(c.Ignored)
 	}
 }

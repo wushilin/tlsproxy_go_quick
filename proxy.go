@@ -1210,6 +1210,11 @@ func (r *relay) dirState(d direction) *atomic.Int32 {
 // it did deliver (fewer only with an error).
 type mover interface {
 	read() (int, error)
+	// topUp adds what arrived since the read to the have bytes held, up to
+	// chunk() in all, without waiting for more, and says how much it added.
+	topUp(have int) (int, error)
+	// waiting is how many bytes the source socket holds, -1 if it can't tell.
+	waiting() int
 	write(n int) (int, error)
 	chunk() int
 	close()
@@ -1226,10 +1231,43 @@ type bufferMover struct {
 	from, to duplex
 	pool     *BufferPool
 	buf      []byte
+	records  bool // from is TLS: a read returns one record, not all there is
+}
+
+func newBufferMover(from, to duplex, pool *BufferPool, chunk int) *bufferMover {
+	_, records := from.(*tls.Conn)
+	return &bufferMover{from: from, to: to, pool: pool, buf: pool.Get()[:chunk], records: records}
 }
 
 func (m *bufferMover) read() (int, error) { return m.from.Read(m.buf) }
 
+// topUp reads under a deadline of topUpWait: a read can't be made
+// non-blocking, but one with data waiting returns at once. A socket read takes
+// all there is; TLS hands over a record per read, so it reads until a read
+// times out or the buffer is full. A timeout is no error: it means nothing
+// more came. TLS state survives a read timeout (only write timeouts break it),
+// and the relay sets its own read deadline again before the next read.
+func (m *bufferMover) topUp(have int) (int, error) {
+	m.from.SetReadDeadline(time.Now().Add(topUpWait))
+	defer m.from.SetReadDeadline(time.Time{})
+	got := 0
+	for have+got < len(m.buf) {
+		n, err := m.from.Read(m.buf[have+got:])
+		got += n
+		if err != nil {
+			if isTimeout(err) {
+				err = nil
+			}
+			return got, err
+		}
+		if !m.records {
+			break
+		}
+	}
+	return got, nil
+}
+
+func (m *bufferMover) waiting() int             { return -1 }
 func (m *bufferMover) write(n int) (int, error) { return m.to.Write(m.buf[:n]) }
 func (m *bufferMover) chunk() int               { return len(m.buf) }
 func (m *bufferMover) close()                   { m.pool.Put(m.buf) }
@@ -1257,7 +1295,7 @@ func (r *relay) pump(d direction) {
 		m = newSpliceMover(from, to, chunk)
 	}
 	if m == nil {
-		m = &bufferMover{from: from, to: to, pool: r.pool, buf: r.pool.Get()[:chunk]}
+		m = newBufferMover(from, to, r.pool, chunk)
 	} else {
 		r.c.spliced.Add(1)
 	}
@@ -1265,6 +1303,7 @@ func (r *relay) pump(d direction) {
 		r.stats.flows.emit("route", r.c)
 	}
 	defer func() { m.close() }()
+	b := batcher{off: r.cfg.LowLatency}
 	idle := r.cfg.IdleTimeout
 	for {
 		if idle > 0 {
@@ -1275,9 +1314,12 @@ func (r *relay) pump(d direction) {
 		n, err := m.read()
 		if err == errNoSplice {
 			m.close()
-			m = &bufferMover{from: from, to: to, pool: r.pool, buf: r.pool.Get()[:chunk]}
+			m = newBufferMover(from, to, r.pool, chunk)
 			r.c.spliced.Add(-1)
 			continue
+		}
+		if n > 0 && err == nil {
+			n, err = b.batch(m, n)
 		}
 		if n > 0 {
 			if limits[0] != nil || limits[1] != nil || limits[2] != nil || limits[3] != nil {
@@ -1311,12 +1353,6 @@ func (r *relay) pump(d direction) {
 					r.endDirection(d, stoppedReading[d], false)
 				}
 				return
-			}
-			// Optional coalescing: after a short read the socket is drained;
-			// pausing lets more data queue, so the next read is bigger (fewer
-			// syscalls and goroutine wake-ups per byte).
-			if n < m.chunk() && r.cfg.ShortReadDelay > 0 && err == nil {
-				time.Sleep(r.cfg.ShortReadDelay)
 			}
 		}
 		if err == nil {

@@ -68,8 +68,9 @@ global:
 #                               #   (a name or ${host} target pointing here). Terminated TLS: not covered
 
 # --- Throughput tuning ------------------------------------------------------------
-#   short_read_delay_us: 0      # (default: 0 = off) pause N microseconds after a short read so
-#                               #   data batches up: less CPU per GiB, more latency per round trip
+#   low_latency: false          # (default: false) never hold a short read back. Off, a busy stream
+#                               #   that arrives a little at a time waits 5 ms to move in bigger
+#                               #   chunks, for much less CPU; replies to requests are not held
 #   splice: true                # (default: true) on Linux, relay passed-through connections with
 #                               #   splice(2): bytes go socket -> kernel pipe -> socket, never copied
 #                               #   into the proxy. Terminated TLS is always copied. Ignored elsewhere
@@ -101,8 +102,9 @@ global:
 #                               #   certificate requested. Not the local one, which may answer with LAN addresses
 
 # --- Compatibility ---------------------------------------------------------------
-# io_model and worker_threads are legacy keys of global. They are accepted and
-# ignored (with a log line), so older config files keep loading.
+# io_model, worker_threads and short_read_delay_us (replaced by low_latency's
+# batching) are legacy keys of global. They are accepted and ignored (with a
+# log line), so older config files keep loading.
 
 # --- Logging -------------------------------------------------------------------
 # Two streams: normal activity ("stdout": accepted / route / connected / closed,
