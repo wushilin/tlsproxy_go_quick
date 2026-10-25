@@ -35,7 +35,7 @@ global:
   max_handshakes_per_ip: 32         # per source, connections still sending their ClientHello; default 64, 0 = unlimited
   buffer_size: 32768                # bytes moved per step (4096..131072); pipe size when spliced, else two pooled buffers
   buffer_pool_max_idle: 2048        # free buffers kept for reuse; default 2 x max_connections
-  short_read_delay_us: 0            # microseconds to pause after a short read; 0 = off (little gain in Go)
+  low_latency: false                # true: never hold a short read back to batch a busy stream (5 ms)
   splice: true                      # Linux: relay passed-through connections in the kernel (zero copy)
   http_to_https_redirect: true      # port 80 too: redirect every http:// request to https://; default false
   remember_nonce: true              # refuse a ClientHello this proxy forwarded itself <10 s ago (a loop); default true
@@ -59,6 +59,7 @@ global:
   # Legacy keys, accepted so older config files keep loading, and ignored:
   io_model: events
   worker_threads: 4
+  short_read_delay_us: 50           # replaced by lingering: see low_latency
 
 logging:
   stdout: /var/log/tlsproxy/stdout.log    # activity; unset = the process's stdout

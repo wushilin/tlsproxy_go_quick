@@ -3,6 +3,12 @@
 ## Unreleased
 
 - The console shows the proxy's version next to its name, once signed in.
+- Busy streams are batched: when a read comes back short in the middle of a
+  stream, the direction waits 5 ms and moves what arrived meanwhile with it,
+  for far fewer wake-ups and system calls per byte. Spliced, copied and
+  terminated connections alike; a request waiting for its reply is not held.
+  `low_latency: true` in `global` turns it off. `short_read_delay_us` is
+  replaced by it and now ignored, with a log line.
 
 ## v1.5.1
 

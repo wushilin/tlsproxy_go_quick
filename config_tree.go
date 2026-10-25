@@ -129,7 +129,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		item(g, "buffer_pool_max_idle", strconv.Itoa(cfg.BufferPoolMaxIdle)),
 		item(g, "allow_cache_size", strconv.Itoa(cfg.AllowCacheSize)),
 		item(g, "deny_cache_size", strconv.Itoa(cfg.DenyCacheSize)),
-		item(g, "short_read_delay_us", strconv.Itoa(int(cfg.ShortReadDelay/time.Microsecond))),
+		item(g, "low_latency", strconv.FormatBool(cfg.LowLatency)),
 		item(g, "reload_interval", secs(cfg.ReloadInterval, "never (console saves only)")),
 		item(g, "stats_interval", secs(cfg.StatsInterval, "never")),
 	} {

@@ -34,7 +34,7 @@ var configReference = []sectionDoc{
 		{"splice", "true", "Linux: relay passed-through connections with splice(2), without copying them through the proxy."},
 		{"remember_nonce", "true", "Remember a hash of every ClientHello passed through for 10 seconds (at most 1M, newest win) and refuse one that comes in again: it is this proxy's own connection come back (a name or ${host} target that points at this machine), which would otherwise loop until max_connections. Terminated connections are not covered."},
 		{"http_to_https_redirect", "false", "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the HTTPS listeners' rules decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."},
-		{"short_read_delay_us", "0", "Pause N microseconds after a short read so data batches up. 0 = off."},
+		{"low_latency", "false", "Never hold a short read back to batch it. Off, a busy stream that arrives a little at a time waits 5 ms to move in bigger chunks, for much less CPU; replies to requests are not held."},
 		{"allow_cache_size", "4096", "Cached allowed name → target decisions. 0 = off."},
 		{"deny_cache_size", "4096", "Cached denied names, kept apart from the allowed ones. 0 = off."},
 		{"reload_interval", "5", "Check the file every N seconds and apply changes (minimum 5). 0 = only on console saves."},
@@ -49,6 +49,7 @@ var configReference = []sectionDoc{
 		{"dns_resolvers", "required with cert: auto and public_ip_address", "A list of public DNS servers for that check, IP or IP:port: three attempts, each the next server in turn, 3 s each; no answer means no certificate is requested. E.g. [1.1.1.1, 8.8.8.8, 2606:4700:4700::1111]."},
 		{"io_model", "", "Legacy: accepted and ignored."},
 		{"worker_threads", "", "Legacy: accepted and ignored."},
+		{"short_read_delay_us", "", "Legacy: accepted and ignored; replaced by lingering, see low_latency."},
 	}},
 	{"listeners", "A list of ports, each with its own rules; at least one is required. Overrides apply to that listener only. With the web console on, its listener, $console, may be listed by name with options only: no bind or port.", []keyDoc{
 		{"name", "(required)", "Up to 64 letters, digits, spaces and -_@#~()[]<>\"'; unique ignoring case. What listener: in routes refers to."},

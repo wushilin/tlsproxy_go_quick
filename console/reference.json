@@ -64,9 +64,9 @@
         "meaning": "Also listen on port 80 (every address the listeners use) and answer each plain HTTP request with a redirect to the same URL on https://: 301 for GET and HEAD, 308 for other methods. Every name is redirected; the HTTPS listeners' rules decide from there. The listener is named http-to-https-redirect (a reserved name); the console can stop and start it."
       },
       {
-        "key": "short_read_delay_us",
-        "default": "0",
-        "meaning": "Pause N microseconds after a short read so data batches up. 0 = off."
+        "key": "low_latency",
+        "default": "false",
+        "meaning": "Never hold a short read back to batch it. Off, a busy stream that arrives a little at a time waits 5 ms to move in bigger chunks, for much less CPU; replies to requests are not held."
       },
       {
         "key": "allow_cache_size",
@@ -137,6 +137,11 @@
         "key": "worker_threads",
         "default": "",
         "meaning": "Legacy: accepted and ignored."
+      },
+      {
+        "key": "short_read_delay_us",
+        "default": "",
+        "meaning": "Legacy: accepted and ignored; replaced by lingering, see low_latency."
       }
     ]
   },

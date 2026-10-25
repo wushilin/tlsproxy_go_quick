@@ -305,20 +305,21 @@ with its default, and a test keeps that file in step with the code:
 | `deny_cache_size`      | 4096    | separate LRU cache of denied SNIs (0 = off)                          |
 | `reload_interval`      | 5       | check the config file every N seconds and apply changes; minimum 5, 0 = never |
 | `stats_interval`       | 60      | log a one-line state summary every N seconds; 0 = never              |
-| `short_read_delay_us`  | 0       | pause N µs after a short read so data batches up. Measured in Go: a few percent more throughput at best, +37 µs (50) or +210 µs (200) per round trip, so leave it off unless your box shows otherwise |
+| `low_latency`          | false   | never hold a short read back to batch it. Off, a busy stream that arrives a little at a time waits 5 ms per chunk to move in bigger ones, for much less CPU; see [Batching busy streams](#batching-busy-streams) |
 | `splice`               | true    | Linux only: relay passed-through connections with `splice(2)`, see [Zero-copy relaying](#zero-copy-relaying-linux) |
 | `http_to_https_redirect` | false | also listen on port 80 and redirect every plain HTTP request to `https://`, see [HTTP to HTTPS redirect](#http-to-https-redirect) |
 | `remember_nonce` | true | refuse a connection that is this proxy's own, come back to it: see [Loop detection](#loop-detection-remember_nonce) |
 
-The legacy keys `io_model` and `worker_threads` are accepted and ignored (with
-a log line), so older config files keep loading.
+The legacy keys `io_model`, `worker_threads` and `short_read_delay_us` (replaced
+by [batching](#batching-busy-streams)) are accepted and ignored (with a log
+line), so older config files keep loading.
 All options, by section, with a complete example in
 [`samples/12-everything.yaml`](samples/12-everything.yaml) (a test fails if an
 option is missing from it, from `config.yaml` or from this README):
 
 | section | options |
 |---|---|
-| `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `short_read_delay_us` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` |
+| `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `low_latency` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` `short_read_delay_us` |
 | `listeners:` (a list) | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `routes:` (a list) | `listener` · `rules` |
 | each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `basic_auth`) |
@@ -1282,6 +1283,30 @@ Measured on a 4 KiB-page arm64 Linux VM: one stream through loopback
 reached 3,430 MiB/s spliced against 2,260 MiB/s buffered, and the whole test
 (client, backend and proxy together) used 0.65 instead of 0.95 CPU-seconds
 per GiB.
+
+### Batching busy streams
+
+A stream that arrives a few packets at a time costs a wake-up, a read and a
+write (or two splices) per chunk, however small the chunk. So when a read
+comes back short in the middle of a stream, the proxy waits 5 ms, tops the
+chunk up once with what arrived meanwhile, and moves it all at once. This
+applies to every connection, spliced, copied or terminated, and each
+direction decides on its own, from its own reads:
+
+- A read that fills the chunk moves at once. A spliced chunk from a network
+  card holds one packet per pipe slot (16 packets, about 23 KB, in a 64 KiB
+  pipe), locally `buffer_size`; the proxy measures which every 100 ms. When a
+  wait fills the chunk, the stream is fast enough without it, and reads that
+  size move at once from then on (this keeps terminated TLS, which reads one
+  record of at most 16 KiB at a time, at full speed).
+- A wait that catches nothing turns waiting off: nothing kept arriving, as
+  with a request waiting for its reply. Every 100 ms it is tried again, so
+  one message in 100 ms may be held 5 ms.
+- Reads more than 5 ms apart are separate messages and never wait.
+
+`low_latency: true` in `global` turns this off, when those 5 ms matter more
+than CPU. It replaces `short_read_delay_us`, which paused after every short
+read, replies included.
 
 ## Design notes
 

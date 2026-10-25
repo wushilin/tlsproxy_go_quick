@@ -25,12 +25,12 @@ type proxyUnderTest struct {
 }
 
 // startProxy starts the proxy with rules (appended after [global]) on a free port.
-func startProxy(t *testing.T, global, rules string) *proxyUnderTest {
+func startProxy(t testing.TB, global, rules string) *proxyUnderTest {
 	t.Helper()
 	return startProxyText(t, "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nmax_handshakes_per_ip=0\n"+global+"\n"+rules, "")
 }
 
-func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
+func startProxyText(t testing.TB, text, path string) *proxyUnderTest {
 	t.Helper()
 	return startProxyConsole(t, text, path, nil)
 }
@@ -38,7 +38,7 @@ func startProxyText(t *testing.T, text, path string) *proxyUnderTest {
 // startProxyConsole is startProxyText with a console (nil for none). The
 // text may be in the tests' compact form (see yamlFixture): the file at
 // path, if it holds that text, is rewritten as the YAML that is loaded.
-func startProxyConsole(t *testing.T, text, path string, con *ConsoleConfig) *proxyUnderTest {
+func startProxyConsole(t testing.TB, text, path string, con *ConsoleConfig) *proxyUnderTest {
 	t.Helper()
 	original := text
 	if !strings.Contains(text, "ca_root") && !strings.Contains(text, "cert_root") { // the run's shared CAs (see testCA.localCA)
@@ -82,7 +82,7 @@ func startProxyConsole(t *testing.T, text, path string, con *ConsoleConfig) *pro
 	return &proxyUnderTest{addr: l.Addr().String(), srv: srv}
 }
 
-func listen(t *testing.T) (net.Listener, int) {
+func listen(t testing.TB) (net.Listener, int) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -93,7 +93,7 @@ func listen(t *testing.T) (net.Listener, int) {
 }
 
 // backend runs handler for every accepted connection.
-func backend(t *testing.T, handler func(*net.TCPConn)) int {
+func backend(t testing.TB, handler func(*net.TCPConn)) int {
 	l, port := listen(t)
 	go func() {
 		for {
