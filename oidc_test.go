@@ -816,7 +816,7 @@ oidc:
 		{"wrongsecret", "redirect URIs", "warn", "no serve entry uses it yet; register the URI of each site you will use it on: https://www.test:1/.tlsproxy/oidc/callback"},
 		{"nocafile", "discovery", "fail", "certificate"},
 		{"certvspost", "client authentication", "fail", "would use private_key_jwt; the provider offers client_secret_post"},
-		{"down", "discovery", "fail", "connection refused"},
+		{"down", "discovery", "fail", "dial tcp"}, // refused, in each system's words
 	}
 	for _, w := range want {
 		c := find(w.name, w.what)
