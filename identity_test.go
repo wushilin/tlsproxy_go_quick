@@ -59,7 +59,7 @@ func TestIdentityConfig(t *testing.T) {
 	}
 	for entry, want := range map[string]string{
 		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret_file: ` + short + `}`:    "at least 32 characters",
-		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret_file: /nonexistent/key}`: "no such file",
+		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret_file: /nonexistent/key}`: "identity_secret_file: open", // each system words the rest its own way
 		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", identity_secret_file: ` + good + `}`:                       "needs oidc: <name> or basic_auth",
 		`{type: static_content, prefix: /, base_dir: /tmp, basic_auth: team, identity_secret_file: ` + good + `}`:                  "only applies to type: reverse_proxy",
 	} {

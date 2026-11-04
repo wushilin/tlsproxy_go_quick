@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.6.0
 
 - Sign-in with OpenID Connect for serve entries: `oidc: <name>` names an
   item of the new `oidc` section (issuer, client id and secret), and a

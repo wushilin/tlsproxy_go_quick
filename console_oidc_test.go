@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -72,7 +73,7 @@ func TestConsoleOIDCPage(t *testing.T) {
 	if len(secretFiles) != 1 || !strings.HasSuffix(secretFiles[0], ".secret") {
 		t.Fatalf("files: %v", secretFiles)
 	}
-	if st, _ := os.Stat(filepath.Join(dir, secretFiles[0])); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(filepath.Join(dir, secretFiles[0])); st.Mode().Perm() != 0o600 && runtime.GOOS != "windows" { // no Unix modes there
 		t.Errorf("secret file mode %v", st.Mode().Perm())
 	}
 	_, list := c.get("/api/auth")
@@ -177,7 +178,7 @@ func TestConsoleIdentitySecret(t *testing.T) {
 		t.Fatalf("generate: %v", a)
 	}
 	st, err := os.Stat(a["path"].(string))
-	if err != nil || st.Mode().Perm() != 0o600 {
+	if err != nil || st.Mode().Perm() != 0o600 && runtime.GOOS != "windows" { // no Unix modes there
 		t.Fatalf("file: %v %v", st, err)
 	}
 	if s, err := readIdentitySecret(a["path"].(string)); err != nil || string(s) != a["secret"] {
