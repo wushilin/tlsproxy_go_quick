@@ -148,15 +148,35 @@ func TestBufferTopUpReadsEveryTLSRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, b := net.Pipe()
-	defer a.Close()
+	// A real connection, so the records wait in the socket's buffer: over
+	// net.Pipe, which has none, the writer only gets on while the top-up
+	// reads, and a busy machine loses that race.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	b, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer b.Close()
+	a, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
 	srv := tls.Server(a, &tls.Config{Certificates: []tls.Certificate{cert}})
 	cli := tls.Client(b, &tls.Config{RootCAs: ca.pool, ServerName: "a.test"})
+	written := make(chan error, 1)
 	go func() {
 		for range 8 {
-			cli.Write(make([]byte, 1000)) // one record each
+			if _, err := cli.Write(make([]byte, 1000)); err != nil { // one record each
+				written <- err
+				return
+			}
 		}
+		written <- nil
 	}()
 	m := newBufferMover(srv, srv, NewBufferPool(65536, 0), 65536)
 	defer m.close()
@@ -164,7 +184,9 @@ func TestBufferTopUpReadsEveryTLSRecord(t *testing.T) {
 	if err != nil || n != 1000 {
 		t.Fatalf("read %d, %v", n, err)
 	}
-	time.Sleep(20 * time.Millisecond) // the other seven records arrive
+	if err := <-written; err != nil { // the other seven records have arrived
+		t.Fatal(err)
+	}
 	start := time.Now()
 	more, err := m.topUp(n)
 	if err != nil || more != 7000 {
