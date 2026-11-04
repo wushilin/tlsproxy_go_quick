@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -18,7 +19,7 @@ import (
 // version is set at build time: -ldflags "-X main.version=v1.2.0".
 var version = "v1.5.2"
 
-const usage = `usage: %[1]s [config.yaml] [-noconsole] [-console_domain <name>] [-console_bind <addr>] [-console_port <n>] [-console_cert <auto|local-ca[:caNNN]>] [--test <sni>...]
+const usage = `usage: %[1]s [config.yaml] [-noconsole] [-console_domain <name>] [-console_bind <addr>] [-console_port <n>] [-console_cert <auto|local-ca[:caNNN]>] [--test <sni>...] [--test-oidc [name...]]
        %[1]s --hash-password    (reads a password from stdin, prints an argon2id hash for $CONSOLE_PASSWORD or basic_auth)
        %[1]s --version
 
@@ -30,6 +31,11 @@ cert auto.
 -console_bind, -console_port and -console_cert (or $CONSOLE_BIND,
 $CONSOLE_PORT, $CONSOLE_CERT) change that. Flags take one dash or two, and
 -flag value or -flag=value.
+
+--test prints where each name would be routed, and exits. --test-oidc checks
+the oidc items (or those named) against their providers: discovery, signing
+keys, what is supported, and the client's credentials (with a made-up code;
+nobody signs in). It exits 1 if a check fails.
 `
 
 // consoleFlags are the flags that take a value.
@@ -67,8 +73,8 @@ func main() {
 	}
 	flags := map[string]string{}
 	noConsole := false
-	var testSNIs []string
-	testMode := false
+	var testSNIs, testOIDC []string
+	testMode, oidcMode := false, false
 	for len(args) > 0 {
 		name, value, hasValue := strings.Cut(strings.TrimLeft(args[0], "-"), "=")
 		args = args[1:]
@@ -80,6 +86,8 @@ func main() {
 			noConsole = true
 		case name == "test":
 			testMode, testSNIs, args = true, args, nil // the rest are names
+		case name == "test-oidc":
+			testMode, oidcMode, testOIDC, args = true, true, args, nil // the rest are oidc item names
 		case slices.Contains(consoleFlags, name):
 			if !hasValue {
 				if len(args) == 0 {
@@ -122,6 +130,23 @@ func main() {
 	if testMode { // dry run: print routing decisions and exit
 		for _, w := range cfg.Warnings {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		if oidcMode {
+			reports, err := checkOIDCConfig(context.Background(), cfg, testOIDC)
+			if err == nil && len(reports) == 0 {
+				err = fmt.Errorf("%s has no oidc items", path)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Print(formatOIDCReports(reports))
+			for _, r := range reports {
+				if !r.OK {
+					os.Exit(1)
+				}
+			}
+			return
 		}
 		for _, name := range testSNIs {
 			for i := range cfg.Listeners {

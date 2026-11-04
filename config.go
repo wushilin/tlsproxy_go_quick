@@ -76,10 +76,11 @@ type Config struct {
 	AcmeCAFile          string   // extra root CA for the ACME server's HTTPS (private CAs, Pebble)
 	Warnings            []string // non-fatal findings, logged at startup / reload
 
-	Console   *ConsoleConfig        // the [console] section; nil = no web console
-	Rules     []Rule                // in file order
-	Listeners []Listener            // in file order; at least one
-	BasicAuth map[string]*BasicAuth // [[basic_auth]] sections, by name
+	Console   *ConsoleConfig           // the [console] section; nil = no web console
+	Rules     []Rule                   // in file order
+	Listeners []Listener               // in file order; at least one
+	BasicAuth map[string]*BasicAuth    // [[basic_auth]] sections, by name
+	OIDC      map[string]*OIDCProvider // oidc items, by name
 	// Redirect is the port 80 listener of http_to_https_redirect = true, nil
 	// when off. It has no rules and is not in Listeners: it answers every
 	// plain HTTP request with a redirect to https:// (see redirect.go).
@@ -644,6 +645,7 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 	httpRedirect := false
 	var raws []rawRule
 	var auths []*BasicAuth
+	var providers []*OIDCProvider
 
 	// apply sets one key of a section; every value arrives as text, a list
 	// joined with "; " (see yamlValue).
@@ -853,7 +855,7 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 		}
 		return nil
 	}
-	if err := walkYAML(cfg, text, apply, &raws, &auths); err != nil {
+	if err := walkYAML(cfg, text, apply, &raws, &auths, &providers); err != nil {
 		return nil, err
 	}
 	cfg.CertPath = filepath.Join(cfg.CARoot, acmeFolder)
@@ -895,6 +897,9 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 		}
 	}
 	if err := cfg.resolveServe(auths); err != nil {
+		return nil, err
+	}
+	if err := cfg.resolveOIDC(providers); err != nil {
 		return nil, err
 	}
 	if auto := cfg.AutoDomains(); len(auto) > 0 {

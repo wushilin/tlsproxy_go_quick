@@ -121,6 +121,7 @@ type Server struct {
 	// connection, for the web server to find (see serve.go).
 	served sync.Map // *tls.Conn -> *servedConn
 	auth   *authChecker
+	oidc   *oidcAuth // sign-in with oidc items: the cookie key and providers' keys
 
 	dialer *targetDialer // resolves targets (cached) and connects
 
@@ -216,7 +217,7 @@ func (s *Server) sessionTicketKeys() [][32]byte {
 
 // NewServer fails if a CA a rule names cannot be opened.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache(), auth: newAuthChecker()}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache(), auth: newAuthChecker(), oidc: newOIDCAuth()}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}

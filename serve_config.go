@@ -48,6 +48,17 @@ type ServiceRoute struct {
 	Listing     bool   // static_content: a folder without index.html or index.htm is listed (else 403)
 	BasicAuth   string // the basic_auth that guards it; "" = none
 	auth        *BasicAuth
+	// OIDC is the oidc item a browser signs in with first; "" = none. The
+	// requirements apply to whoever signed in.
+	OIDC          string
+	oidc          *OIDCProvider
+	RequireMFA    bool
+	RequireGroups []string // any one of them
+	RequireRoles  []string // any one of them
+	// IdentitySecretFile holds the secret who signed in is signed with, for
+	// the target (X-OIDC-Assertion, see identity.go); "" = not signed.
+	IdentitySecretFile string
+	identitySecret     []byte
 }
 
 // TargetAddr is the host:port a reverse_proxy route connects to.
@@ -72,6 +83,19 @@ func (s *ServiceRoute) Describe() string {
 	}
 	if s.BasicAuth != "" {
 		out += " (basic_auth " + s.BasicAuth + ")"
+	}
+	if s.OIDC != "" {
+		out += " (oidc " + s.OIDC
+		if s.RequireMFA {
+			out += ", mfa"
+		}
+		if len(s.RequireGroups) > 0 {
+			out += ", group " + strings.Join(s.RequireGroups, " or ")
+		}
+		if len(s.RequireRoles) > 0 {
+			out += ", role " + strings.Join(s.RequireRoles, " or ")
+		}
+		out += ")"
 	}
 	return out
 }
@@ -138,8 +162,33 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 				return nil, fmt.Errorf("basic_auth must name a basic_auth item")
 			}
 			s.BasicAuth = v
+		case "oidc":
+			if v == "" {
+				return nil, fmt.Errorf("oidc must name an oidc item")
+			}
+			s.OIDC = v
+		case "require_mfa":
+			if s.RequireMFA, err = parseBool(v); err != nil {
+				return nil, fmt.Errorf("require_mfa: %v", err)
+			}
+		case "require_groups":
+			if s.RequireGroups = splitList(v); len(s.RequireGroups) == 0 {
+				return nil, fmt.Errorf("require_groups must list at least one group")
+			}
+		case "require_roles":
+			if s.RequireRoles = splitList(v); len(s.RequireRoles) == 0 {
+				return nil, fmt.Errorf("require_roles must list at least one role")
+			}
+		case "identity_secret_file":
+			if v == "" {
+				return nil, fmt.Errorf("identity_secret_file must not be empty")
+			}
+			if s.identitySecret, err = readIdentitySecret(v); err != nil {
+				return nil, fmt.Errorf("identity_secret_file: %v", err)
+			}
+			s.IdentitySecretFile = v
 		default:
-			return nil, fmt.Errorf("unknown key %q in a serve entry (type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, directory_listing, basic_auth)", k)
+			return nil, fmt.Errorf("unknown key %q in a serve entry (type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, directory_listing, basic_auth, oidc, require_mfa, require_groups, require_roles, identity_secret_file)", k)
 		}
 	}
 	only := func(opt, typ string) error {
@@ -161,6 +210,17 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 		return nil, fmt.Errorf("a %s prefix is a folder and ends with /, got %q", routeStatic, s.Prefix)
 	case verify != nil && s.Target != nil && s.Target.Scheme != "https":
 		return nil, fmt.Errorf("tls_verify only applies to an https:// target")
+	case s.OIDC != "" && s.BasicAuth != "":
+		return nil, fmt.Errorf("give basic_auth or oidc, not both")
+	case s.IdentitySecretFile != "" && s.Type != routeProxy:
+		return nil, fmt.Errorf("identity_secret_file only applies to type: %s: it signs who signed in for the target", routeProxy)
+	case s.IdentitySecretFile != "" && s.OIDC == "" && s.BasicAuth == "":
+		return nil, fmt.Errorf("identity_secret_file needs oidc: <name> or basic_auth: <name>: without a sign-in there is no one to vouch for")
+	}
+	for _, opt := range []string{"require_mfa", "require_groups", "require_roles"} {
+		if seen[opt] && s.OIDC == "" {
+			return nil, fmt.Errorf("%s needs oidc: <name>: it is checked against whoever signed in", opt)
+		}
 	}
 	for _, opt := range []string{"target", "strip_prefix", "force_host", "tls_verify"} {
 		if err := only(opt, routeProxy); err != nil {

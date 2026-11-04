@@ -3,7 +3,7 @@
 # (domain: "*.example.com", target: "${1}.lan:443"). A list is a YAML list:
 # [a, b] or one "- item" per line. Unknown keys and keys given twice are errors.
 #
-# Sections: global, logging, listeners, routes, basic_auth. Every
+# Sections: global, logging, listeners, routes, basic_auth, oidc. Every
 # commented-out setting below marked "(default: ...)" shows its DEFAULT
 # value: uncommenting the line (remove "# ") unchanged changes nothing (this
 # is checked by `go test`). Only a listener with a name and a port is
@@ -263,6 +263,12 @@ logging:
 #     a listing if directory_listing: true (default false), else 403. No hidden
 #     files except .well-known (never listed); no symlinks out of base_dir.
 #   basic_auth: team on either: ask for a user of the basic_auth item named team.
+#   oidc: corp on either: a browser signs in with the oidc item named corp first;
+#     require_mfa: true, require_groups: [ops], require_roles: [Admin] ask more of the
+#     user (any one group, any one role). See the oidc section at the end.
+#   identity_secret_file: /etc/tlsproxy/rest.key on a reverse_proxy with oidc or
+#     basic_auth: the target also gets X-OIDC-Assertion, a JWT signed with that
+#     secret (HS256, 60 s) saying who signed in, for it to verify.
 # Clients get HTTP/2 if they ask. A request whose Host another rule serves gets 421.
 # A reload applies to the next request, even on a connection already open.
 #
@@ -305,3 +311,35 @@ routes:
 #       - {username: jack, password_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."}
 #       - {username: jill, password_plain: "open sesame", expires: 2026-12-31}
 #       - {username: joe, password_hash: "...", disabled: true}
+
+# --- OpenID Connect sign-in (optional) -------------------------------------------
+# Identity providers that a serve entry can ask for with oidc: <name>: a browser
+# is sent there to sign in (authorization code with PKCE; the provider does the
+# password, the second factor and who may use the app) and comes back to
+# https://<the rule's domain>/.tlsproxy/oidc/callback, which must be registered as
+# the application's web redirect URI. Who signed in is kept in an encrypted
+# cookie for session (8h unless set), sent on as X-Forwarded-User, -Email,
+# -Groups, -Roles and -Mfa. Scripts and other non-browser requests get 401. A
+# signed-in user without a required group or role gets 403; one without a
+# required second factor is sent back to step up (asking for mfa_acr_values).
+# /.tlsproxy/oidc/logout signs out. A restart signs browsers in again (silently,
+# while the provider's own session lasts).
+#
+# oidc:
+#   - name: corp
+#     issuer: https://id.example.com/rust-oidc/example.com/v2.0
+#     client_id: 0b6f3c1e-4d2a-4c8e-9a51-2f7d0e6b9c13
+#     client_secret_file: /etc/tlsproxy/corp.secret     # or client_secret: "..."
+#     # or a certificate the provider holds (private_key_jwt), instead of a secret:
+#     # client_certificate: /etc/tlsproxy/corp.crt
+#     # client_key: /etc/tlsproxy/corp.key              # RSA, PEM
+#     scopes: [openid, profile, email]
+#     session: 8h
+#     mfa_acr_values: ["2"]                             # rust-oidc's MFA level
+#     ca_file: /etc/tlsproxy/id-ca.pem                  # a private CA for the provider
+#     username_claim: preferred_username                # else email, upn, sub
+#     groups_claim: groups                              # a claim name, or a dotted path
+#     roles_claim: roles                                # Keycloak: realm_access.roles
+#
+# tlsproxy config.yaml --test-oidc (or Check OIDC on the console's Config page)
+# checks each item against its provider without anyone signing in.

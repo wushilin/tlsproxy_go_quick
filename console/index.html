@@ -21,7 +21,7 @@
       <button class="tab" type="button" role="tab" data-tab="rules" aria-selected="true" aria-controls="tab-rules">Listeners</button>
       <button class="tab" type="button" role="tab" data-tab="flows" aria-selected="false" aria-controls="tab-flows">Flow log</button>
       <button class="tab" type="button" role="tab" data-tab="certs" aria-selected="false" aria-controls="tab-certs">Certificates</button>
-      <button class="tab" type="button" role="tab" data-tab="auth" aria-selected="false" aria-controls="tab-auth">Basic auth</button>
+      <button class="tab" type="button" role="tab" data-tab="auth" aria-selected="false" aria-controls="tab-auth">Authentication</button>
       <button class="tab" type="button" role="tab" data-tab="log" aria-selected="false" aria-controls="tab-log">Log</button>
       <button class="tab" type="button" role="tab" data-tab="config" aria-selected="false" aria-controls="tab-config">Config file</button>
     </nav>
@@ -129,8 +129,8 @@
       <p class="page-note" id="cert-note"></p>
     </section>
 
-    <!-- ================= Basic auth ================= -->
-    <section id="tab-auth" class="page" role="tabpanel" aria-label="Basic auth" hidden>
+    <!-- ================= Authentication: basic auth and OIDC ================= -->
+    <section id="tab-auth" class="page" role="tabpanel" aria-label="Authentication" hidden>
       <div class="panel">
         <div class="panel-head">
           <h2>Basic auth</h2>
@@ -142,6 +142,18 @@
         <div class="ca-list" id="auth-groups"></div>
       </div>
       <p class="page-note">A serve entry asks for a user of one of these groups with <code>basic_auth: &lt;group&gt;</code> (choose it in the rule editor). A password typed here is hashed in the proxy (argon2id) before it is written to the config file; it is never shown again. A browser that signed in is remembered for 5 minutes, so a new password applies within that time. Each change is saved like any other edit: checked first, the previous file kept as a backup, applied at once.</p>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>OIDC providers</h2>
+          <span class="sub" id="oidc-meta"></span>
+          <div class="toolbar-actions">
+            <button class="btn btn-add" type="button" id="oidc-add"><span aria-hidden="true">+</span> Add provider</button>
+          </div>
+        </div>
+        <div class="ca-list" id="oidc-list"></div>
+      </div>
+      <p class="page-note">A serve entry asks a browser to sign in with one of these providers with <code>oidc: &lt;name&gt;</code> (choose it in the rule editor, with any MFA, group or role it requires). The provider needs the redirect URIs shown on each card registered for its application. A client secret typed here is written to a file of its own next to the config file, never into it, and is never shown again; a certificate made here keeps its private key on this machine.</p>
     </section>
 
     <!-- ================= Log ================= -->
@@ -178,6 +190,7 @@
         <div class="panel-bar">
           <input class="input grow" type="text" id="cfg-snis" placeholder="Test routing: host names separated by spaces, <none> for no SNI" aria-label="Host names to test">
           <button class="btn" type="button" id="cfg-test">Test against the text above</button>
+          <button class="btn" type="button" id="cfg-test-oidc" title="Test each oidc item against its provider: discovery, signing keys, what it supports, and the client's credentials (nobody signs in)">Test OIDC</button>
         </div>
         <p class="msg" id="cfg-msg" role="status" hidden></p>
         <div class="vresult" id="cfg-result" role="status" hidden></div>
@@ -318,7 +331,7 @@
       <div id="routes-fields" hidden>
         <p class="field-help">The rule answers HTTP itself: each entry takes the requests under its prefix, the longest prefix first; a path no entry takes gets 404.
           <b>Reverse proxy</b> sends them to <code>http://host:port</code> (or https://); <b>static files</b> serves them from a folder the prefix stands for (/assets/a.css is &lt;folder&gt;/a.css).
-          Basic auth names a <code>basic_auth</code> item of the config file.</p>
+          Basic auth names a <code>basic_auth</code> item of the config file; OIDC, an <code>oidc</code> provider (both on the Authentication page).</p>
         <div id="f-serve-rows" class="serve-rows"></div>
         <button class="btn btn-quiet" type="button" id="f-serve-add">Add an entry</button>
       </div>
@@ -394,6 +407,83 @@
       <button class="btn" type="button" id="editor-back">Back</button>
       <button class="btn" type="button" id="editor-next">Next</button>
       <button class="btn btn-primary" type="submit" id="editor-save">Add rule</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="oidc-dlg" class="wizard" aria-labelledby="oidc-dlg-title">
+  <form id="oidc-form" method="dialog" class="editor" autocomplete="off" novalidate>
+    <h2 id="oidc-dlg-title">Add an OIDC provider</h2>
+    <p class="editor-hint" id="oidc-hint">Any OpenID Connect provider with the code flow and PKCE: rust-oidc, Entra ID, Keycloak, Okta, Google, ...</p>
+
+    <ol class="steps" role="tablist" aria-label="OIDC provider steps">
+      <li><button type="button" class="step-btn" data-step="0" role="tab"><span class="n">1</span>Provider</button></li>
+      <li><button type="button" class="step-btn" data-step="1" role="tab"><span class="n">2</span>Client</button></li>
+      <li><button type="button" class="step-btn" data-step="2" role="tab"><span class="n">3</span>Options</button></li>
+      <li><button type="button" class="step-btn" data-step="3" role="tab"><span class="n">4</span>Register</button></li>
+    </ol>
+
+    <div class="step" data-step="0">
+      <div class="fields">
+        <label class="field wide"><span>Name <em>what serve entries say: oidc: &lt;name&gt;</em></span><input id="oidc-name" spellcheck="false" maxlength="64" placeholder="corp"></label>
+        <label class="field wide"><span>Issuer URL</span><input id="oidc-issuer" spellcheck="false" placeholder="https://id.example.com/rust-oidc/example.com/v2.0"></label>
+        <label class="field wide"><span>CA file <em>optional: a private CA for the provider's HTTPS, a path on this machine</em></span><input id="oidc-ca" spellcheck="false" placeholder="system roots"></label>
+      </div>
+      <div class="editor-actions oidc-inline"><button class="btn" type="button" id="oidc-discover">Discover</button><span class="field-help" id="oidc-disc"></span></div>
+      <p class="field-help">rust-oidc: https://&lt;host&gt;/rust-oidc/&lt;tenant domain&gt;/v2.0 · Entra: https://login.microsoftonline.com/&lt;tenant&gt;/v2.0 · Keycloak: https://&lt;host&gt;/realms/&lt;realm&gt; · Google: https://accounts.google.com</p>
+    </div>
+
+    <div class="step" data-step="1" hidden>
+      <div class="fields">
+        <label class="field wide"><span>Client ID <em>the application's id at the provider</em></span><input id="oidc-client" spellcheck="false"></label>
+      </div>
+      <div class="oidc-creds" role="radiogroup" aria-label="How the proxy authenticates">
+        <label class="check" id="oidc-c-keep-l"><input type="radio" name="oidc-cred" value="keep"> Keep the current credential <em id="oidc-c-keep-what"></em></label>
+        <label class="check"><input type="radio" name="oidc-cred" value="secret"> Client secret</label>
+        <label class="check"><input type="radio" name="oidc-cred" value="generate"> Certificate: make one here <em>(private_key_jwt; the key stays on this machine, you register the certificate)</em></label>
+        <label class="check"><input type="radio" name="oidc-cred" value="upload"> Certificate: paste my own</label>
+      </div>
+      <div class="fields" id="oidc-secret-f" hidden>
+        <label class="field wide"><span>Client secret <em>written to a file next to the config file, never shown again</em></span><input id="oidc-secret" type="password" autocomplete="new-password"></label>
+      </div>
+      <div class="fields" id="oidc-upload-f" hidden>
+        <label class="field wide"><span>Certificate (PEM)</span><textarea class="pem" id="oidc-cert" rows="4" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+        <label class="field wide"><span>Private key (PEM, RSA, unencrypted)</span><textarea class="pem" id="oidc-key" rows="4" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+      </div>
+      <p class="field-help" id="oidc-cred-help"></p>
+    </div>
+
+    <div class="step" data-step="2" hidden>
+      <div class="fields">
+        <label class="field wide"><span>Scopes <em>openid is always included</em></span><input id="oidc-scopes" spellcheck="false" placeholder="openid profile email"></label>
+        <label class="field"><span>Session <em>how long a sign-in lasts here</em></span><input id="oidc-session" spellcheck="false" placeholder="8h"></label>
+        <label class="field"><span>MFA acr values <em>asked for to step up (rust-oidc: 2)</em></span><input id="oidc-mfa" spellcheck="false" placeholder="none"></label>
+        <label class="field"><span>Username claim</span><input id="oidc-user-claim" spellcheck="false" placeholder="preferred_username, email, upn, sub"></label>
+        <label class="field"><span>Groups claim</span><input id="oidc-groups-claim" spellcheck="false" placeholder="groups"></label>
+        <label class="field"><span>Roles claim <em>Keycloak: realm_access.roles</em></span><input id="oidc-roles-claim" spellcheck="false" placeholder="roles"></label>
+      </div>
+    </div>
+
+    <div class="step" data-step="3" hidden>
+      <p class="field-help" id="oidc-reg-intro"></p>
+      <div class="preview" id="oidc-reg-uris-box">
+        <div class="preview-head"><span>Web redirect URIs to register</span><button class="btn btn-quiet" type="button" id="oidc-copy-uris">Copy</button></div>
+        <pre class="block" id="oidc-reg-uris"></pre>
+      </div>
+      <div class="preview" id="oidc-reg-cert-box" hidden>
+        <div class="preview-head"><span>Certificate to give the provider (rust-oidc: app key add --cert, or Certificates in its console)</span><button class="btn btn-quiet" type="button" id="oidc-copy-cert">Copy</button></div>
+        <pre class="block" id="oidc-reg-cert"></pre>
+      </div>
+      <div class="editor-actions oidc-inline"><button class="btn" type="button" id="oidc-check">Test against the provider</button></div>
+      <pre class="block" id="oidc-check-out" hidden></pre>
+    </div>
+
+    <p class="editor-error" id="oidc-error" role="alert"></p>
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="oidc-cancel">Cancel</button>
+      <button class="btn" type="button" id="oidc-back">Back</button>
+      <button class="btn" type="button" id="oidc-next">Next</button>
+      <button class="btn btn-primary" type="submit" id="oidc-save">Save</button>
     </div>
   </form>
 </dialog>

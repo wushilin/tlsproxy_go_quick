@@ -896,6 +896,8 @@ func (m *CertManager) announce(cfg *Config, now time.Time) {
 		if !current[d] {
 			logf("cert: %s: no longer configured; its certificate stays in %s", d, autoDir(cfg, d))
 			delete(m.announced, d)
+			delete(m.nextTry, d) // nor is it retried: names come and go with edits
+			delete(m.lastError, d)
 		}
 	}
 }

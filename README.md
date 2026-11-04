@@ -322,8 +322,9 @@ option is missing from it, from `config.yaml` or from this README):
 | `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `low_latency` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` `short_read_delay_us` |
 | `listeners:` (a list) | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `routes:` (a list) | `listener` · `rules` |
-| each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `basic_auth`) |
+| each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `directory_listing` `basic_auth` `oidc` `require_mfa` `require_groups` `require_roles` `identity_secret_file`) |
 | `basic_auth:` (a list) | `name` · `users`, a list of (`username` with `password_hash` or `password_plain`; `disabled`, `expires`) |
+| `oidc:` (a list) | `name` `issuer` `client_id` · `client_secret` / `client_secret_file` / `client_certificate` + `client_key` · `scopes` `session` `mfa_acr_values` `ca_file` `username_claim` `groups_claim` `roles_claim` |
 | `logging:` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
 | the web console (not in the file) | `-console_domain` / `$CONSOLE_DOMAIN` · `$CONSOLE_PASSWORD` · `-console_bind` / `$CONSOLE_BIND` · `-console_port` / `$CONSOLE_PORT` · `-console_cert` / `$CONSOLE_CERT` · `-noconsole` |
 
@@ -547,6 +548,9 @@ basic_auth:
     again (at most once a second), so creating it later needs no reload.
   - `basic_auth: <name>` on either type asks for a user of the `basic_auth`
     item with that name; the `Authorization` header is not passed on.
+  - `oidc: <name>` on either type has a browser sign in with that `oidc`
+    item first, and `require_mfa`, `require_groups`, `require_roles` ask
+    more of the user (see [Signing in with OpenID Connect](#signing-in-with-openid-connect-oidc)).
 - **Matching.** The longest `prefix` that matches the path serves the
   request, wherever it stands in the list; the same prefix twice is a load
   error, and a path no prefix matches gets `404`. For a prefix ending in
@@ -589,8 +593,159 @@ basic_auth:
   item, is a load error; an item no serve entry uses is a warning.
 - **In the console**, the rule editor's *Serve it here* takes the serve
   entries as rows of a form, checked as you type, and saves them as the
-  rule's `serve` list; a row's basic auth is chosen from the existing groups.
-  The groups themselves are managed on the console's **Basic auth** page.
+  rule's `serve` list; a row's basic auth group or OIDC provider (with the
+  MFA, group and role it requires) is chosen from the existing ones. Both are
+  managed on the console's **Authentication** page.
+
+### Signing in with OpenID Connect (`oidc`)
+
+A serve entry can ask a browser to sign in with an OpenID Connect provider
+([rust-oidc](https://github.com/wushilin/rust-oidc), Entra ID, Keycloak,
+Google, ...) instead of a password the proxy checks. The provider does the
+signing in, its second factor, and the decision of who may use the
+application at all (in rust-oidc: *assignment required* on the app, and its
+users and groups assigned); the proxy only ever sees the result.
+
+```yaml
+routes:
+  - listener: https
+    rules:
+      - domain: portal.example.com
+        cert: auto
+        serve:
+          - {type: reverse_proxy, prefix: /, target: "http://127.0.0.1:8080", oidc: corp}
+          - {type: reverse_proxy, prefix: /admin/, target: "http://127.0.0.1:8080", oidc: corp,
+             require_mfa: true, require_roles: [Admin]}
+          - {type: static_content, prefix: /ops/, base_dir: /srv/ops, oidc: corp, require_groups: [ops, sre]}
+
+oidc:
+  - name: corp
+    issuer: https://id.example.com/rust-oidc/example.com/v2.0
+    client_id: 0b6f3c1e-4d2a-4c8e-9a51-2f7d0e6b9c13
+    client_secret_file: /etc/tlsproxy/corp.secret
+    mfa_acr_values: ["2"]
+```
+
+- **The provider's side.** Register an application with a **web** redirect
+  URI `https://<each domain>/.tlsproxy/oidc/callback` (redirect URIs match
+  exactly, so each name that uses it is listed, with its port if not 443)
+  and a client secret or certificate. In
+  rust-oidc: `app create`, `app add-redirect-uri --platform web`,
+  `app secret add`, and `app assignment-required --required true` with
+  users or groups assigned through app roles; MFA can be required there
+  for the whole app too.
+- **The flow.** Authorization code with PKCE, as a confidential client. A
+  browser opening a page (`GET`, `Sec-Fetch-Mode: navigate` or
+  `Accept: text/html`) without a session goes to the provider; anything
+  else (scripts, `fetch`, `POST`, WebSockets) gets `401`. Back at the
+  callback, the code is redeemed with the client secret and the ID token's
+  signature (the provider's JWKS; RS256/384/512, PS256, ES256/384), issuer,
+  audience, expiry and nonce are checked. Errors the provider reports (a
+  user not assigned, a cancelled sign-in) are shown on the page.
+- **The session** is an encrypted cookie (`__Host-`, `HttpOnly`, `Secure`,
+  `SameSite=Lax`) holding who signed in, for `session` (default `8h`); nothing
+  is stored on the server. Group and role changes apply at the next sign-in.
+  The key is made at start-up, so a restart sends browsers through the
+  provider again, which signs them straight back in while its own session
+  lasts. The proxy's cookies are not passed on to the target.
+- **Requirements**, per serve entry: `require_groups` (any one of them, from
+  the ID token's `groups` claim), `require_roles` (any one, from `roles`):
+  a user without gets `403`. `require_mfa`: the sign-in must have used a
+  second factor (`amr` has `mfa`, or `acr` is one of `mfa_acr_values`); a
+  session without one is sent back to the provider asking for
+  `mfa_acr_values` (rust-oidc's MFA level is `"2"`), and gets `403` if the
+  provider signs it in without one again.
+- **Who signed in** goes to a `reverse_proxy` target as `X-Forwarded-User`
+  (the `username_claim`, else `preferred_username`, `email`, `upn`, `sub`),
+  `X-Forwarded-Email`, `X-Forwarded-Groups`, `X-Forwarded-Roles` (comma
+  separated) and `X-Forwarded-Mfa`; these are removed from every request a
+  client sends, on every serve entry, and a `basic_auth` user is sent as
+  `X-Forwarded-User` too.
+- **Proof for the target** (`identity_secret_file`, on a `reverse_proxy`
+  entry with `oidc` or `basic_auth`): the plain headers are only as
+  trustworthy as the network to the target. With a secret (a file, 32+
+  characters, its first line that is not a `#` comment; the console's rule
+  editor makes one), the target also gets `X-OIDC-Assertion`, a JWT signed
+  with it (HS256), good for 60 seconds, for this entry and this request:
+
+  ```json
+  {"iss": "tlsproxy", "aud": "home.example.com/rest/", "sub": "alice@example.com",
+   "email": "alice@example.com", "groups": ["ops"], "roles": ["Admin"], "mfa": true,
+   "auth": "oidc:corp", "ip": "203.0.113.7", "htm": "GET", "htu": "/items",
+   "iat": 1793400000, "exp": 1793400060, "jti": "..."}
+  ```
+
+  `aud` is the rule's domain and the entry's prefix, `htu` the path the
+  target gets (after `strip_prefix`, without the query), `ip` the client's
+  address (what `X-Real-IP` says). A `basic_auth` user is
+  `"auth": "basic_auth:<group>"`, without groups, roles or mfa. The target
+  verifies it with any JWT library, e.g. in Python
+  `jwt.decode(h, secret, algorithms=["HS256"], audience="home.example.com/rest/")`,
+  and can then trust its claims, or the `X-Forwarded-*` headers that say the
+  same. Each entry has its own secret, so one target can't vouch for
+  another's users. To change it, let the target accept the old and the new
+  one, then replace the file (it is read when the configuration is). It is
+  a few hundred bytes for a typical user; the session's limit on groups
+  keeps it under about 4 KB.
+- **Signing out:** `/.tlsproxy/oidc/logout` on the same host forgets the
+  session and goes on to the provider's `end_session_endpoint`, which comes
+  back to the callback ("You are signed out").
+- **The client's credential:** a secret (`client_secret`, or
+  `client_secret_file`), sent as HTTP Basic (`client_secret_basic`), or in
+  the form when the provider offers only `client_secret_post`; or a
+  certificate: `client_certificate` and `client_key` (RSA, PEM). With a
+  certificate the proxy sends a `private_key_jwt` client assertion (RFC
+  7523): RS256, the certificate's SHA-1 thumbprint as `x5t` and `kid` (as
+  Entra and rust-oidc look it up), `iss` and `sub` the client id, `aud` the
+  token endpoint, a fresh `jti`, valid for 5 minutes. Give the provider the
+  certificate only (rust-oidc: `app key add --cert corp.crt`; Entra:
+  *Certificates & secrets*); the key stays here. A self-signed one is
+  enough:
+
+  ```sh
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout corp.key -out corp.crt -days 730 -subj /CN=tlsproxy
+  ```
+
+  The files are read at load (the key must be the certificate's); a
+  certificate that expires within 30 days is a warning.
+- **The rest:** `scopes` (default `[openid, profile, email]`), `ca_file` for a
+  provider with a private CA, `groups_claim` and `roles_claim` (default
+  `groups` and `roles`): where the groups and roles are in the ID token, a
+  claim name or, if there is no claim by that name, a dotted path into
+  nested claims.
+- **Checking an item** without signing in: `tlsproxy config.yaml
+  --test-oidc [name...]`, or **Check OIDC** on the console's Config page
+  (for the text in the editor, saved or not). It fetches the discovery
+  document and the signing keys, compares what the item asks for (code
+  flow with S256 PKCE, the client authentication method, scopes,
+  `mfa_acr_values`, token signature algorithms) with what the provider
+  says it supports, and tries the client's secret or certificate at the
+  token endpoint with a made-up code: a provider checks the client first,
+  so a good one gets `invalid_grant` for the code and a bad one
+  `invalid_client`. It lists the redirect URIs to register. `--test-oidc`
+  exits 1 if a check fails.
+
+  ```text
+  oidc corp (https://id.example.com/rust-oidc/example.com/v2.0)
+    ok   discovery: the tokens' issuer is https://id.example.com/rust-oidc/0c4e.../v2.0 ...
+    ok   signing keys: 1 usable of 1 at https://id.example.com/rust-oidc/0c4e.../discovery/v2.0/keys
+    ok   client credentials (private_key_jwt): accepted (the made-up code was refused, as it should be)
+    ok   redirect URIs: register as web redirect URIs (with the port if not 443): https://portal.example.com/.tlsproxy/oidc/callback
+  ```
+- **Providers.** Any OpenID Connect provider with the code flow and PKCE
+  works; what differs is where they put groups and roles, and how they say
+  MFA happened. Only rust-oidc is tested here (the others are from their
+  documentation; look at a real ID token before relying on a claim):
+
+  | Provider | Groups / roles | MFA (`require_mfa`) |
+  |---|---|---|
+  | rust-oidc | `groups` (names), `roles` (app roles): the defaults | `amr` has `mfa`; `mfa_acr_values: ["2"]` steps up |
+  | Microsoft Entra ID | `groups` (object ids, once enabled in Token configuration), `roles`: the defaults | v2.0 ID tokens may not carry `amr`: require MFA with Conditional Access instead of `require_mfa` |
+  | Keycloak | `roles_claim: realm_access.roles` (or `resource_access.<client>.roles`); `groups` needs a Group Membership mapper | `acr` per its authentication flows: set `mfa_acr_values` to its MFA level |
+  | Okta / Auth0 | a `groups` claim you add, or a namespaced one (`groups_claim: https://example.com/groups`) | `amr` has `mfa` |
+  | Google | none | `amr` is not sent: don't use `require_mfa` | The `issuer` may be `http://` only to this machine.
+  The discovery document is fetched when first needed and kept for an hour;
+  the signing keys are fetched again when a token names a new one.
 
 ## The client's address (PROXY protocol)
 
@@ -1166,7 +1321,20 @@ written to it (and every change to the file shows up in the console).
   with **Show all closed** on, every closed connection the proxy still
   remembers (the last 2000) stays listed. Open connections can be stopped
   from here too.
-- **Basic auth**: one card per `basic_auth` group, with its users and the
+- **Authentication**, in two sections. **OIDC providers**: one card per
+  `oidc` item (issuer, client id, how the proxy authenticates, what it asks
+  for, the serve entries that use it and the redirect URIs to register),
+  with **Test** (the checks of `--test-oidc`), **Edit** and **Delete** (not
+  while a serve entry uses it). **Add provider** is a wizard: the issuer,
+  with **Discover** (its discovery document: what it supports, which fills
+  in the MFA acr values and Keycloak's roles claim), the client id and its
+  credential (a client secret, written to a file of its own next to the
+  config file, mode 0600, never shown again; a certificate made here, its
+  RSA key staying on this machine; or your own certificate and key), the
+  options, then what to register with the provider (the redirect URIs and
+  the certificate) and a test. Files a change replaces are removed once it
+  is saved, and files of a change that is refused are not left behind.
+  **Basic auth**: one card per `basic_auth` group, with its users and the
   serve entries that use it. Add or delete a group (one still used by a serve
   entry can't be deleted), rename it (its serve entries are renamed with it),
   add or delete a user (a group keeps at least one), and set a user's

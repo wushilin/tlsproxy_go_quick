@@ -207,6 +207,30 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		out = append(out, auths)
 	}
 
+	if len(cfg.OIDC) > 0 {
+		providers := treeNode{Title: "OIDC", Note: fmt.Sprintf("%d", len(cfg.OIDC))}
+		for _, name := range slices.Sorted(maps.Keys(cfg.OIDC)) {
+			p := cfg.OIDC[name]
+			secret := "client_secret (in the file)"
+			if p.SecretFile != "" {
+				secret = p.SecretFile
+			}
+			if p.CertFile != "" {
+				secret = "certificate " + p.CertFile + " (private_key_jwt), until " + p.CertExpires.UTC().Format(time.DateOnly)
+			}
+			n := treeNode{Title: name, Note: p.Issuer, Line: toEditor(p.Line)}
+			n.Items = []treeItem{
+				{Key: "client_id", Value: p.ClientID},
+				{Key: "secret", Value: secret},
+				{Key: "scopes", Value: strings.Join(p.Scopes, " ")},
+				{Key: "session", Value: p.Session.String()},
+				{Key: "mfa_acr_values", Value: listOr(p.MFAAcr, "none")},
+			}
+			providers.Children = append(providers.Children, n)
+		}
+		out = append(out, providers)
+	}
+
 	if auto := cfg.AutoDomains(); len(auto) > 0 || cfg.AcmeAgreeTOS {
 		certs := treeNode{Title: "Automatic certificates", Note: fmt.Sprintf("%d name(s)", len(auto))}
 		certs.Items = []treeItem{

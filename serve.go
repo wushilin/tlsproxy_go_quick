@@ -468,6 +468,11 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 		s.console.handler.ServeHTTP(w, r)
 		return " (console)"
 	}
+	if strings.HasPrefix(r.URL.Path, oidcPathPrefix) && len(providersOf(rule)) > 0 {
+		if ok, note := s.oidc.handle(w, r, rule); ok {
+			return note
+		}
+	}
 	route := rule.RouteFor(r.URL.Path)
 	// /docs for the prefix /docs/: send the client to the folder, as nginx
 	// does, unless a prefix at least as long as /docs takes it as it is.
@@ -495,6 +500,16 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 		}
 		r.Header.Del("Authorization") // the password stays here: it is not the backend's
 		note += " user=" + user
+		r = r.WithContext(context.WithValue(r.Context(), oidcUserKey{}, &oidcIdentity{User: user}))
+	}
+	if route.oidc != nil {
+		id, why := s.oidc.gate(w, r, route)
+		if id == nil {
+			return note + " (oidc: " + why + ")"
+		}
+		stripOIDCCookies(r)
+		note += " user=" + id.User
+		r = r.WithContext(context.WithValue(r.Context(), oidcUserKey{}, id))
 	}
 	switch route.Type {
 	case routeStatic:
@@ -741,6 +756,12 @@ func reverseProxy(rule *Rule, route *ServiceRoute, transport *http.Transport) *h
 			out.Header.Del("X-Forwarded-Prefix")
 			if p := strings.TrimSuffix(route.Prefix, "/"); route.StripPrefix && p != "" {
 				out.Header.Set("X-Forwarded-Prefix", p) // what the path sent on lost
+			}
+			id, _ := pr.In.Context().Value(oidcUserKey{}).(*oidcIdentity)
+			setIdentityHeaders(out.Header, id)
+			out.Header.Del(identityHeader)
+			if route.identitySecret != nil && id != nil {
+				out.Header.Set(identityHeader, identityAssertion(rule, route, id, client, out.Method, out.URL.Path, time.Now()))
 			}
 			out.Header.Set("Forwarded", forwardedHeader(client, pr.In.Host)) // RFC 7239
 			out.Header.Set("X-Forwarded-By", serverName+"/"+strings.TrimPrefix(version, "v"))
