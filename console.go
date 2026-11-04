@@ -104,6 +104,10 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("POST /api/certs/remove", c.authed(c.certRemove))
 	mux.HandleFunc("GET /api/auth", c.authed(c.authList))
 	mux.HandleFunc("POST /api/auth/save", c.authed(c.authSave))
+	mux.HandleFunc("POST /api/auth/oidc/discover", c.authed(c.oidcDiscover))
+	mux.HandleFunc("POST /api/auth/oidc/save", c.authed(c.oidcSave))
+	mux.HandleFunc("POST /api/auth/oidc/check", c.authed(c.oidcCheckOne))
+	mux.HandleFunc("POST /api/auth/identity-secret", c.authed(c.identityGenerate))
 	mux.HandleFunc("GET /api/cas", c.authed(c.caList))
 	mux.HandleFunc("GET /api/cas/cert", c.authed(c.caCert))
 	mux.HandleFunc("POST /api/cas/generate", c.authed(c.caGenerate))
@@ -115,6 +119,7 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("GET /api/config", c.authed(c.configGet))
 	mux.HandleFunc("POST /api/config/validate", c.authed(c.configValidate))
 	mux.HandleFunc("POST /api/config/test", c.authed(c.configTest))
+	mux.HandleFunc("POST /api/config/test-oidc", c.authed(c.configTestOIDC))
 	mux.HandleFunc("POST /api/config/save", c.authed(c.configSave))
 	mux.HandleFunc("GET /api/config/backups", c.authed(c.backups))
 	mux.HandleFunc("GET /api/config/backup", c.authed(c.backupGet))
@@ -579,6 +584,40 @@ func (c *Console) configTest(w http.ResponseWriter, r *http.Request) {
 	}
 	// Rule lines refer to the full file; say so rather than mistranslate silently.
 	writeJSON(w, 200, map[string]any{"ok": true, "results": results})
+}
+
+// oidcCheckMu lets one OIDC check run at a time: each makes requests to
+// the providers.
+var oidcCheckMu sync.Mutex
+
+// configTestOIDC checks the oidc items of the text in the editor, saved or
+// not, against their providers (see oidc_check.go).
+func (c *Console) configTestOIDC(w http.ResponseWriter, r *http.Request) {
+	var req configRequest
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "bad request"})
+		return
+	}
+	cfg, err := c.check(req.Text)
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if len(cfg.OIDC) == 0 {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "the text has no oidc items to check"})
+		return
+	}
+	if !oidcCheckMu.TryLock() {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "a check is already running; try again in a moment"})
+		return
+	}
+	defer oidcCheckMu.Unlock()
+	reports, err := checkOIDCConfig(r.Context(), cfg, nil)
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "reports": reports, "text": formatOIDCReports(reports)})
 }
 
 func (c *Console) configSave(w http.ResponseWriter, r *http.Request) {

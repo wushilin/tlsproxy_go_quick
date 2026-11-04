@@ -179,17 +179,35 @@ func (s *Stats) host(name string) *HostStats { return s.hosts.get(name) }
 
 // prepare makes the counters of every rule and listener of cfg before it
 // goes live, so connections only ever read them (a read never locks; adding
-// a key to a sync.Map does).
+// a key to a sync.Map does), and drops those of rules and listeners cfg no
+// longer has, so edits over months don't pile them up. (A connection of an
+// old rule still open makes its counters again; the next reload drops them.)
 func (s *Stats) prepare(cfg *Config) {
+	rules, lists := map[string]bool{}, map[string]bool{}
 	for i := range cfg.Rules {
+		rules[cfg.Rules[i].Key()] = true
 		s.rule(cfg.Rules[i].Key())
 	}
 	for _, l := range cfg.PortListeners() {
+		lists[l.Name] = true
 		s.listener(l.Name)
 	}
 	if cfg.Redirect != nil {
+		rules[redirectKey] = true
 		s.rule(redirectKey)
 	}
+	s.rules.Range(func(k string, _ *RuleStats) bool {
+		if !rules[k] {
+			s.rules.Delete(k)
+		}
+		return true
+	})
+	s.lists.Range(func(k string, _ *ListenerStats) bool {
+		if !lists[k] {
+			s.lists.Delete(k)
+		}
+		return true
+	})
 }
 
 // sample records the totals once a second for the rate display.

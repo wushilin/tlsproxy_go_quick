@@ -877,3 +877,24 @@ textarea.pem:focus { outline: 2px solid var(--focus); outline-offset: 0; border-
 .cert-table td.acts { text-align: right; white-space: nowrap; }
 .cert-table td.acts .act { height: 28px; padding: 0 10px; }
 .empty-row { padding: 18px 16px; margin: 0; color: var(--fg-3); }
+
+/* Authentication page: OIDC providers and their wizard. */
+.oidc-inline { justify-content: flex-start; align-items: center; gap: 10px; flex-wrap: wrap; }
+.oidc-inline .field-help { margin: 0; overflow-wrap: anywhere; }
+.oidc-creds { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 6px; background: var(--surface-2); }
+.oidc-creds .check { font-weight: 400; color: var(--fg); flex-wrap: wrap; row-gap: 2px; }
+.oidc-creds .check em { flex-basis: 100%; padding-left: 22px; font-size: 12px; }
+.oidc-creds .check[hidden] { display: none; }
+.oidc-creds em { font-style: normal; color: var(--fg-3); }
+.block.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 7%, transparent); }
+.block.warn { color: var(--warn); background: var(--warn-soft); }
+.block.bad { color: var(--danger); background: var(--danger-soft); }
+.oidc-check-out { border-radius: 6px; margin-top: 8px; }
+.oidc-check-out[hidden], #oidc-check-out[hidden] { display: none; }
+details.oidc-cert { margin-top: 6px; }
+.ident-row { display: flex; gap: 8px; align-items: center; }
+.ident-row input { flex: 1; }
+.ident-secret { border-radius: 6px; font-size: 12px; }
+.ident-secret[hidden] { display: none; }
+details.oidc-cert summary { cursor: pointer; color: var(--fg-2); font-size: var(--t-small); }
+details.oidc-cert pre { font-size: 11px; }

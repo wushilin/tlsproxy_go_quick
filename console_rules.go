@@ -7,10 +7,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,6 +138,8 @@ type consoleState struct {
 	Listeners []listenerView `json:"listeners"`
 	// AuthGroups are the basic_auth group names, for the rule editor's serve rows.
 	AuthGroups []string `json:"authGroups"`
+	// OIDC are the oidc item names, for the same.
+	OIDC []string `json:"oidc"`
 }
 
 // parsedFile is the config file as last read, re-read only when it changes.
@@ -382,7 +386,7 @@ func (c *Console) state() consoleState {
 	}
 	host, _ := os.Hostname()
 	return consoleState{
-		Host: host, Version: version, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, AuthGroups: authGroupNames(shown),
+		Host: host, Version: version, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, AuthGroups: authGroupNames(shown), OIDC: slices.Sorted(maps.Keys(shown.OIDC)),
 		Status: statusView{Active: st.Active.Load(), Accepted: st.Accepted.Load(),
 			Completed: st.Completed.Load(), Denied: st.Denied.Load(), Failed: st.Failed.Load(), Rejected: st.Rejected.Load(),
 			MaxConnections: rt.cfg.MaxConnections, BytesUp: st.BytesUp.Load(), BytesDown: st.BytesDown.Load()},
@@ -834,6 +838,11 @@ func (c *Console) listenerStopStart(stop bool) http.HandlerFunc {
 // commit writes full over onDisk (kept as a timestamped backup), reloads at
 // once and answers with the new version. The caller holds configFileMu.
 func (c *Console) commit(w http.ResponseWriter, r *http.Request, onDisk []byte, full string, cfg *Config, what string) {
+	c.commitWith(w, r, onDisk, full, cfg, what, nil)
+}
+
+// commitWith is commit, with extra to add to the answer.
+func (c *Console) commitWith(w http.ResponseWriter, r *http.Request, onDisk []byte, full string, cfg *Config, what string, extra map[string]any) {
 	if full == string(onDisk) {
 		ver, _ := versionOf(c.srv.configPath, onDisk)
 		writeJSON(w, 200, map[string]any{"ok": true, "unchanged": true, "hash": ver.Hash, "mtime": ver.Mtime})
@@ -873,8 +882,12 @@ func (c *Console) commit(w http.ResponseWriter, r *http.Request, onDisk []byte, 
 		problems = []string{"saved, but applying it is taking long; watch the listener cards"}
 	}
 	c.poke()
-	writeJSON(w, 200, map[string]any{"ok": true, "hash": now.Hash, "mtime": now.Mtime, "backup": filepath.Base(backup),
-		"warnings": cfg.Warnings, "problems": problems})
+	out := map[string]any{"ok": true, "hash": now.Hash, "mtime": now.Mtime, "backup": filepath.Base(backup),
+		"warnings": cfg.Warnings, "problems": problems}
+	for k, v := range extra {
+		out[k] = v
+	}
+	writeJSON(w, 200, out)
 }
 
 // routeTarget is where an allowed decision goes, as the console shows it.

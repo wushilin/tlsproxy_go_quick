@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+- Sign-in with OpenID Connect for serve entries: `oidc: <name>` names an
+  item of the new `oidc` section (issuer, client id and secret), and a
+  browser signs in there first: authorization code with PKCE, the ID
+  token's signature and claims checked, the session in an encrypted cookie
+  for `session` (default 8h). Tested against rust-oidc (an optional test,
+  `RUST_OIDC_BIN`); any OpenID provider should work.
+- The proxy authenticates to the provider with a client secret
+  (`client_secret_basic`, or `_post` when that is all it offers) or a
+  certificate: `client_certificate` and `client_key` send a
+  `private_key_jwt` assertion (RS256, the thumbprint as `x5t`), as rust-oidc
+  and Entra accept.
+- Per serve entry, `require_mfa` (stepping up at the provider, asking for
+  `mfa_acr_values`), `require_groups` and `require_roles` (any one of each,
+  else 403).
+- A target gets who signed in as `X-Forwarded-User`, `-Email`, `-Groups`,
+  `-Roles` and `-Mfa`; these are removed from what clients send, on every
+  serve entry. A `basic_auth` user is sent as `X-Forwarded-User` too.
+- `identity_secret_file` on a serve entry: the target also gets
+  `X-OIDC-Assertion`, a JWT signed with that entry's secret (HS256, 60 s)
+  saying who signed in (user, email, groups, roles, MFA, the client's
+  address, the request), so it can trust it even if something else can
+  reach it. The console's rule editor generates the secret.
+- `/.tlsproxy/oidc/logout` signs out, through the provider's end-session
+  endpoint.
+- `groups_claim` and `roles_claim`: where a provider puts groups and roles
+  (a claim name, or a dotted path: Keycloak's `realm_access.roles`).
+- `tlsproxy config.yaml --test-oidc [name...]`, and **Check OIDC** on the
+  console's Config page, check each oidc item against its provider without
+  signing anyone in: discovery, signing keys, what it supports, and the
+  client's secret or certificate at the token endpoint.
+- Counters of rules and listeners a reload removes are dropped, and so is
+  the retry state of automatic certificates for names no longer configured:
+  they piled up over many edits.
+- Console: the Basic auth page is now **Authentication**, with a section for
+  OIDC providers: a card each with Test, Edit and Delete, and an Add
+  provider wizard (Discover, a client secret or a certificate made here,
+  options, then what to register with the provider).
+- Console: the rule editor's serve rows offer the oidc items under *Who may
+  use it*, with the requirements; the config tree lists the providers.
+
 ## v1.5.2
 
 - The console shows the proxy's version next to its name, once signed in.

@@ -1486,7 +1486,12 @@ function argsList(s) {
 
 // ---- serve entries: one row each ----
 
-const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth"];
+const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth", "oidc", "require_mfa", "require_groups", "require_roles", "identity_secret_file"];
+const SERVE_LISTS = ["require_groups", "require_roles"];
+
+// listOf is a list value as an array of words: from the file (a YAML list,
+// or one text with ; or , between) or a form field.
+const listOf = (v) => (Array.isArray(v) ? v.map(String) : String(v || "").split(/[;,]/)).map((s) => s.trim()).filter(Boolean);
 
 function serveRow(e) {
   const row = el("div", "serve-row");
@@ -1543,19 +1548,60 @@ function serveRow(e) {
   const [listL] = check("s-list", "Directory listing: list a folder that has no index.html or index.htm (otherwise 403)", String(e.directory_listing) === "true");
   sopts.appendChild(listL);
 
-  // Access.
+  // Access: a basic_auth group ("basic:name") or an oidc item ("oidc:name").
   const auth = el("select", "s-auth");
   const groups = (ui.state && ui.state.authGroups) || [];
-  for (const g of ["", ...groups, ...(e.basic_auth && !groups.includes(e.basic_auth) ? [e.basic_auth] : [])]) {
-    const o = el("option", "", g === "" ? "Anyone (no basic auth)" : groups.includes(g) ? `Users of ${g}` : `${g} (no such group)`);
-    o.value = g;
-    auth.appendChild(o);
+  const providers = (ui.state && ui.state.oidc) || [];
+  const choices = [["", "Anyone (no sign-in)"]];
+  for (const g of [...groups, ...(e.basic_auth && !groups.includes(e.basic_auth) ? [e.basic_auth] : [])]) {
+    choices.push(["basic:" + g, groups.includes(g) ? `Users of ${g} (basic auth)` : `${g} (no such group)`]);
   }
-  auth.value = e.basic_auth || "";
-  const authField = field("Who may use it", auth, "", groups.length ? "" : "no basic_auth group yet: add one on the Basic auth page");
+  for (const p of [...providers, ...(e.oidc && !providers.includes(e.oidc) ? [e.oidc] : [])]) {
+    choices.push(["oidc:" + p, providers.includes(p) ? `Sign in with ${p} (OIDC)` : `${p} (no such oidc item)`]);
+  }
+  for (const [v, t] of choices) {
+    const o = el("option", "", t); o.value = v; auth.appendChild(o);
+  }
+  auth.value = e.oidc ? "oidc:" + e.oidc : e.basic_auth ? "basic:" + e.basic_auth : "";
+  const authField = field("Who may use it", auth, "", groups.length || providers.length ? "" : "no basic_auth group or OIDC provider yet: add one on the Authentication page");
 
-  row.append(head, main, opts, sopts, authField);
+  // What a signed-in user must also have (oidc only).
+  const reqs = el("div", "serve-opts");
+  const [mfaL] = check("s-mfa", "Require a second factor (MFA); a session without one is sent to step up", String(e.require_mfa) === "true");
+  const reqGroups = text("s-groups", listOf(e.require_groups).join(", "), "any one of these groups, e.g. ops, sre (empty: any)");
+  const reqRoles = text("s-roles", listOf(e.require_roles).join(", "), "any one of these app roles, e.g. Admin (empty: any)");
+  reqs.append(mfaL, field("Required group", reqGroups, "wide"), field("Required role", reqRoles, "wide"));
+
+  // Vouching for who signed in to the target (X-OIDC-Assertion).
+  const ident = el("div", "serve-opts");
+  const identPath = text("s-ident", e.identity_secret_file, "none: the target gets the plain X-Forwarded-User/-Groups/-Roles only");
+  const gen = el("button", "btn", "Generate");
+  gen.type = "button";
+  const identRow = el("div", "ident-row");
+  identRow.append(identPath, gen);
+  const identOut = el("pre", "block ok ident-secret");
+  identOut.hidden = true;
+  const identField = field("Sign who signed in for the target (X-OIDC-Assertion, HS256, 60 s)", identRow, "wide",
+    "a file holding the secret the target verifies with; Generate makes one (shown once) and replaces this entry's old one");
+  ident.append(identField, identOut);
+  gen.addEventListener("click", () => {
+    gen.disabled = true;
+    api("api/auth/identity-secret", { domain: val("f-pattern"), prefix: prefix.value.trim() || "/" })
+      .then((d) => {
+        if (!d.ok) throw new Error(d.error || "not made");
+        identPath.value = d.path;
+        identOut.hidden = false;
+        setText(identOut, `Secret for the target (shown once; it is also in ${d.path}):\n${d.secret}`);
+        onFormChange();
+      })
+      .catch((err) => toast(err.message, true))
+      .finally(() => { gen.disabled = false; });
+  });
+
+  row.append(head, main, opts, sopts, authField, reqs, ident);
   const sync = () => {
+    reqs.hidden = !auth.value.startsWith("oidc:");
+    ident.hidden = type.value !== "reverse_proxy" || !auth.value;
     const proxy = type.value === "reverse_proxy";
     whereField.firstChild.textContent = proxy ? "Target URL" : "Folder";
     where.placeholder = proxy ? "http://127.0.0.1:8080" : "/opt/www/site";
@@ -1568,7 +1614,7 @@ function serveRow(e) {
     const sent = !proxy || strip.checked ? "/x" : path;
     summary.textContent = `${path} → ${(where.value.trim() || "…").replace(/\/$/, "")}${sent}`;
   };
-  for (const n of [type, prefix, where, strip]) n.addEventListener(n.tagName === "SELECT" || n.type === "checkbox" ? "change" : "input", sync);
+  for (const n of [type, prefix, where, strip, auth]) n.addEventListener(n.tagName === "SELECT" || n.type === "checkbox" ? "change" : "input", sync);
   sync();
   return row;
 }
@@ -1593,7 +1639,17 @@ function readServe() {
       if (q(".s-host")) e.force_host = q(".s-host");
       if (!row.querySelector(".s-verify").checked) e.tls_verify = "false";
     }
-    if (q(".s-auth")) e.basic_auth = q(".s-auth");
+    const auth = q(".s-auth");
+    if (auth && e.type === "reverse_proxy" && q(".s-ident")) e.identity_secret_file = q(".s-ident");
+    if (auth.startsWith("basic:")) e.basic_auth = auth.slice(6);
+    if (auth.startsWith("oidc:")) {
+      e.oidc = auth.slice(5);
+      if (row.querySelector(".s-mfa").checked) e.require_mfa = "true";
+      for (const [k, c] of [["require_groups", ".s-groups"], ["require_roles", ".s-roles"]]) {
+        const list = listOf(q(c));
+        if (list.length) e[k] = list;
+      }
+    }
     for (const k of Object.keys(e)) if (e[k] === "") delete e[k];
     return e;
   }));
@@ -1603,7 +1659,8 @@ function readServe() {
 // unchanged list compares equal.
 function sameServe(e) {
   const out = {};
-  for (const k of SERVE_KEYS) if (e[k] !== undefined && e[k] !== "") out[k] = String(e[k]);
+  for (const k of SERVE_KEYS) if (e[k] !== undefined && e[k] !== "") out[k] = SERVE_LISTS.includes(k) ? listOf(e[k]) : String(e[k]);
+  for (const k of SERVE_LISTS) if (out[k] && !out[k].length) delete out[k];
   return out;
 }
 
@@ -3187,6 +3244,17 @@ $("cfg-test").addEventListener("click", () => {
     })
     .catch((e) => cfgMessage("bad", e.message));
 });
+$("cfg-test-oidc").addEventListener("click", () => {
+  cfgMessage("warn", "Checking the OIDC providers…");
+  cfgPost("api/config/test-oidc", { text: $("cfg").value })
+    .then((d) => {
+      if (!d.ok) return cfgMessage("bad", d.error);
+      const reports = d.reports || [];
+      const worst = reports.some((r) => !r.ok) ? "bad" : reports.some((r) => r.checks.some((c) => c.level === "warn")) ? "warn" : "ok";
+      cfgMessage(worst, d.text);
+    })
+    .catch((e) => cfgMessage("bad", e.message));
+});
 // Save validates first, as Validate does: an invalid text shows why and is
 // not saved; a valid one is saved, its outcome shown above its tree.
 $("cfg-save").addEventListener("click", () => {
@@ -3346,7 +3414,7 @@ checkSession().then((ok) => {
   else if (ok === null) { showApp(); setStatus("down", "Reconnecting"); scheduleReconnect(); }
 });
 
-// ---------- basic auth ----------
+// ---------- authentication: basic auth, then OIDC ----------
 
 let authFile = null; // the config file version the page shows
 let authDlg = null;  // the change the dialog is making
@@ -3361,7 +3429,9 @@ function loadAuth() {
 function renderAuth(d) {
   authFile = d.file;
   const editable = !!(d.file && d.file.editable);
-  setText($("auth-meta"), editable ? `${d.groups.length} group${d.groups.length === 1 ? "" : "s"} in ${d.file.path}` : (d.file.error || "the config file can't be edited"));
+  oidcCandidates = d.redirectCandidates || [];
+  renderOIDC(d.oidc || [], editable);
+  setText($("auth-meta"), editable ? `${d.groups.length} group${d.groups.length === 1 ? "" : "s"} in ${d.file.path}` : ((d.file && d.file.error) || "the config file can't be edited"));
   $("auth-add-group").disabled = !editable;
   const list = $("auth-groups");
   list.replaceChildren();
@@ -3544,3 +3614,262 @@ $("auth-dlg-form").addEventListener("submit", (ev) => {
     .catch((e) => setText($("auth-dlg-error"), e.message))
     .finally(() => { $("auth-dlg-save").disabled = false; });
 });
+
+// ---------- OIDC providers ----------
+
+let oidcProviders = []; // as the page last loaded them
+let oidcCandidates = []; // redirect URIs of every site served here, for a provider not used yet
+let oidcEd = null;      // the wizard's state: {op, name, step, saved, disc}
+
+// Each provider is a card: where it is, how the proxy authenticates, what
+// it asks for, who uses it and what to register, with Check, Edit and
+// Delete; a check's findings show on the card.
+function renderOIDC(list, editable) {
+  oidcProviders = list;
+  setText($("oidc-meta"), `${list.length} provider${list.length === 1 ? "" : "s"}`);
+  $("oidc-add").disabled = !editable;
+  const box = $("oidc-list");
+  box.replaceChildren();
+  if (!list.length) {
+    const empty = el("div", "empty");
+    empty.append(el("span", "", "No OIDC provider yet. Add one, then choose it for a serve entry in the rule editor."));
+    box.appendChild(empty);
+    return;
+  }
+  for (const p of list) {
+    const card = el("div", "ca-card auth-card");
+    const main = el("div", "ca-main");
+    const head = el("div", "ca-head");
+    const how = p.auth === "certificate" ? el("span", "chip ok", "certificate") : el("span", "chip", p.auth === "secret_file" ? "secret (file)" : "secret (in the config file)");
+    head.append(el("span", "ca-name", p.name), how);
+    if (p.mfaAcr.length) head.appendChild(el("span", "chip t-muted", "MFA step-up"));
+    if (p.line) head.title = `oidc at line ${p.line} of the config file`;
+    const act = el("div", "ca-actions");
+    const out = el("pre", "block oidc-check-out");
+    out.hidden = true;
+    const [check] = actionButton("Test", "");
+    check.title = "Discovery, signing keys, what it supports, and the client's credentials (nobody signs in)";
+    check.addEventListener("click", () => {
+      check.disabled = true;
+      out.hidden = false;
+      setText(out, "Testing…");
+      oidcCheck(p.name).then((d) => { setText(out, d.text); out.className = "block oidc-check-out " + oidcLevel(d.report); })
+        .catch((e) => { setText(out, e.message); out.className = "block oidc-check-out bad"; })
+        .finally(() => { check.disabled = false; });
+    });
+    const [edit] = actionButton("Edit", "");
+    edit.disabled = !editable;
+    edit.addEventListener("click", () => openOIDC({ op: "update", provider: p }));
+    const del = armedButton("Delete", () => oidcSave({ op: "delete", name: p.name }).then(() => toast(`Deleted ${p.name}`)).catch(() => {}));
+    del.disabled = !editable || p.usedBy.length > 0;
+    del.title = p.usedBy.length ? "Used by a serve entry: change it first" : `Delete the provider ${p.name}`;
+    act.append(check, edit, del);
+    head.appendChild(act);
+    main.appendChild(head);
+    const fact = (k, v, mono) => {
+      const line = el("div", "ca-line ca-facts");
+      line.append(el("span", "ca-k", k), el("span", mono ? "mono" : "", v));
+      main.appendChild(line);
+    };
+    fact("issuer", p.issuer, true);
+    fact("client id", p.clientId, true);
+    if (p.auth === "certificate") fact("certificate", `${p.certFile} · until ${p.certExpires.slice(0, 10)}`, true);
+    else if (p.auth === "secret_file") fact("secret", p.secretFile, true);
+    fact("asks for", [`scopes ${p.scopes.join(" ")}`, `session ${p.session}`, p.mfaAcr.length ? `MFA acr ${p.mfaAcr.join(" ")}` : "",
+      `groups from ${p.groupsClaim}`, `roles from ${p.rolesClaim}`, p.usernameClaim ? `user from ${p.usernameClaim}` : ""].filter(Boolean).join(" · "));
+    fact("used by", p.usedBy.length ? p.usedBy.map((x) => `${x.rule} ${x.prefix}` + (x.line ? ` (line ${x.line})` : "")).join(", ") : "no serve entry yet");
+    fact("redirect URIs", p.redirectUris.length ? p.redirectUris.join("  ")
+      : oidcCandidates.length ? `not used yet; for the sites served here: ${oidcCandidates.join("  ")}` : "not used yet: https://<site>/.tlsproxy/oidc/callback for each site you use it on", true);
+    if (p.certPem) {
+      const det = el("details", "oidc-cert");
+      det.append(el("summary", "", "Certificate to register with the provider"), el("pre", "block", p.certPem));
+      main.appendChild(det);
+    }
+    main.appendChild(out);
+    card.appendChild(main);
+    box.appendChild(card);
+  }
+}
+
+// oidcLevel is a check report's worst finding, for its colour.
+function oidcLevel(rep) {
+  if (!rep || !rep.ok) return "bad";
+  return (rep.checks || []).some((c) => c.level === "warn") ? "warn" : "ok";
+}
+
+function oidcCheck(name) {
+  return api("api/auth/oidc/check", { name }).then((d) => { if (!d.ok) throw new Error(d.error || "not checked"); return d; });
+}
+
+// oidcSave saves one change; the answer (with a certificate made) is
+// returned, and the page reloaded.
+function oidcSave(change) {
+  return api("api/auth/oidc/save", { ...change, baseHash: authFile.hash, baseMtime: authFile.mtime })
+    .then((d) => {
+      if (!d.ok) throw new Error(d.error || "not saved");
+      for (const p of d.problems || []) toast(p, true);
+      return loadAuth().then(() => d);
+    })
+    .catch((e) => { loadAuth(); throw e; });
+}
+
+const oidcWords = (v) => v.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+
+function oidcCred() {
+  const c = document.querySelector('input[name="oidc-cred"]:checked');
+  return c ? c.value : "";
+}
+
+function oidcPaintCred() {
+  const c = oidcCred();
+  $("oidc-secret-f").hidden = c !== "secret";
+  $("oidc-upload-f").hidden = c !== "upload";
+  setText($("oidc-cred-help"), {
+    secret: "The provider shows the secret once when you make it (rust-oidc: app secret add, or Certificates & secrets in its console).",
+    generate: "After saving, the next step shows the certificate to give the provider. The private key never leaves this machine.",
+    upload: "The certificate is what the provider holds; the key must be its RSA private key.",
+    keep: "",
+  }[c] || "");
+}
+
+function openOIDC(change) {
+  const p = change.provider;
+  oidcEd = { op: change.op, name: p ? p.name : "", step: 0, saved: null, disc: null };
+  setText($("oidc-dlg-title"), p ? `Edit ${p.name}` : "Add an OIDC provider");
+  $("oidc-name").value = p ? p.name : "";
+  $("oidc-issuer").value = p ? p.issuer : "";
+  $("oidc-ca").value = p ? p.caFile || "" : "";
+  $("oidc-client").value = p ? p.clientId : "";
+  $("oidc-secret").value = $("oidc-cert").value = $("oidc-key").value = "";
+  $("oidc-scopes").value = p ? p.scopes.join(" ") : "openid profile email";
+  $("oidc-session").value = p ? p.session : "8h";
+  $("oidc-mfa").value = p ? p.mfaAcr.join(" ") : "";
+  $("oidc-user-claim").value = p ? p.usernameClaim || "" : "";
+  $("oidc-groups-claim").value = p ? p.groupsClaim : "groups";
+  $("oidc-roles-claim").value = p ? p.rolesClaim : "roles";
+  $("oidc-c-keep-l").hidden = !p;
+  setText($("oidc-c-keep-what"), p ? (p.auth === "certificate" ? `(certificate until ${p.certExpires.slice(0, 10)})` : "(the client secret)") : "");
+  for (const r of document.querySelectorAll('input[name="oidc-cred"]')) r.checked = r.value === (p ? "keep" : "secret");
+  setText($("oidc-disc"), "");
+  setText($("oidc-error"), "");
+  $("oidc-check-out").hidden = true;
+  oidcPaintCred();
+  oidcStep(0);
+  $("oidc-dlg").showModal();
+  $(p ? "oidc-issuer" : "oidc-name").focus();
+}
+
+// oidcStep shows step n: 0-2 before saving, 3 (register) after.
+function oidcStep(n) {
+  const saved = !!oidcEd.saved;
+  oidcEd.step = saved ? 3 : Math.max(0, Math.min(2, n));
+  for (const st of document.querySelectorAll("#oidc-dlg .step")) st.hidden = +st.dataset.step !== oidcEd.step;
+  for (const b of document.querySelectorAll("#oidc-dlg .step-btn")) {
+    b.setAttribute("aria-selected", String(+b.dataset.step === oidcEd.step));
+    b.disabled = saved ? +b.dataset.step !== 3 : +b.dataset.step === 3;
+  }
+  $("oidc-back").hidden = saved || oidcEd.step === 0;
+  $("oidc-next").hidden = saved || oidcEd.step === 2;
+  $("oidc-save").hidden = saved;
+  setText($("oidc-cancel"), saved ? "Done" : "Cancel");
+}
+
+// oidcQuick is what the page can tell before asking the proxy: [step, message].
+function oidcQuick() {
+  const out = [];
+  const name = val("oidc-name"), issuer = val("oidc-issuer");
+  if (!name) out.push([0, "The provider needs a name."]);
+  if (!/^https:\/\/[^\s/]+/.test(issuer) && !/^http:\/\/(localhost|127\.|\[::1\])/.test(issuer)) out.push([0, "The issuer is a URL starting with https://."]);
+  if (!val("oidc-client")) out.push([1, "The client ID is required."]);
+  const c = oidcCred();
+  if (c === "secret" && !$("oidc-secret").value) out.push([1, "Type the client secret."]);
+  if (c === "upload" && (!val("oidc-cert") || !val("oidc-key"))) out.push([1, "Paste the certificate and its key."]);
+  if (val("oidc-session") && !/^\d+(h|m)$/.test(val("oidc-session"))) out.push([2, "The session is a length like 8h or 90m."]);
+  return out;
+}
+
+$("oidc-add").addEventListener("click", () => openOIDC({ op: "add" }));
+$("oidc-cancel").addEventListener("click", () => $("oidc-dlg").close());
+$("oidc-back").addEventListener("click", () => oidcStep(oidcEd.step - 1));
+$("oidc-next").addEventListener("click", () => {
+  const bad = oidcQuick().find(([st]) => st === oidcEd.step);
+  if (bad) return setText($("oidc-error"), bad[1]);
+  setText($("oidc-error"), "");
+  if (oidcEd.step === 0 && !oidcEd.disc) $("oidc-discover").click(); // look before going on
+  oidcStep(oidcEd.step + 1);
+});
+for (const b of document.querySelectorAll("#oidc-dlg .step-btn")) b.addEventListener("click", () => oidcStep(+b.dataset.step));
+for (const r of document.querySelectorAll('input[name="oidc-cred"]')) r.addEventListener("change", oidcPaintCred);
+$("oidc-dlg").addEventListener("close", () => { $("oidc-secret").value = $("oidc-key").value = ""; });
+
+// Discover reads the provider's discovery document: whether it is one, and
+// what it supports, which fills in the next steps where they are empty.
+$("oidc-discover").addEventListener("click", () => {
+  const issuer = val("oidc-issuer");
+  if (!issuer) return setText($("oidc-disc"), "Type the issuer URL first.");
+  setText($("oidc-disc"), "Looking…");
+  api("api/auth/oidc/discover", { issuer, caFile: val("oidc-ca") }).then((d) => {
+    if (!d.ok) { oidcEd.disc = null; return setText($("oidc-disc"), "Not found: " + d.error); }
+    oidcEd.disc = d;
+    const methods = d.authMethods.length ? d.authMethods.join(", ") : "not listed";
+    const lines = [`Found: issuer ${d.issuer}`, `client authentication: ${methods}`];
+    if (d.acrValues.length) lines.push(`acr values: ${d.acrValues.join(", ")}`);
+    if (!d.endSession) lines.push("no end_session_endpoint: logout stays local");
+    setText($("oidc-disc"), lines.join(" · "));
+    // rust-oidc offers acr 1 and 2: 2 is its MFA level.
+    if (!val("oidc-mfa") && d.acrValues.length > 1) $("oidc-mfa").value = d.acrValues[d.acrValues.length - 1];
+    if (d.claims.includes("realm_access") && val("oidc-roles-claim") === "roles") $("oidc-roles-claim").value = "realm_access.roles";
+  }).catch((e) => setText($("oidc-disc"), "Not found: " + e.message));
+});
+
+$("oidc-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  if (oidcEd.saved) return;
+  const bad = oidcQuick();
+  if (bad.length) { oidcStep(bad[0][0]); return setText($("oidc-error"), bad[0][1]); }
+  const name = val("oidc-name");
+  const change = {
+    op: oidcEd.op, name: oidcEd.op === "update" ? oidcEd.name : name, newName: oidcEd.op === "update" ? name : "",
+    issuer: val("oidc-issuer"), clientId: val("oidc-client"), credential: oidcCred(),
+    secret: $("oidc-secret").value, certPem: val("oidc-cert"), keyPem: val("oidc-key"),
+    scopes: ["openid", ...oidcWords(val("oidc-scopes")).filter((s) => s !== "openid")],
+    session: val("oidc-session"), mfaAcr: oidcWords(val("oidc-mfa")), caFile: val("oidc-ca"),
+    usernameClaim: val("oidc-user-claim"), groupsClaim: val("oidc-groups-claim") || "groups", rolesClaim: val("oidc-roles-claim") || "roles",
+  };
+  $("oidc-save").disabled = true;
+  setText($("oidc-error"), "");
+  oidcSave(change).then((d) => {
+    toast(oidcEd.op === "add" ? `Added ${name}` : `Saved ${name}`);
+    oidcEd.saved = d;
+    oidcEd.name = name;
+    const p = oidcProviders.find((x) => x.name === name);
+    const used = p && p.redirectUris.length ? p.redirectUris : [];
+    const uris = used.length ? used : oidcCandidates;
+    setText($("oidc-reg-intro"), used.length
+      ? `Saved. Register these with ${name}'s application at the provider (web platform), then test it.`
+      : uris.length
+        ? `Saved. No serve entry uses ${name} yet: register the URI of each site below you will use it on (web platform), then choose ${name} for those serve entries in the rule editor (Who may use it).`
+        : `Saved. No site is served here yet: add a rule that serves HTTP, choose ${name} for it, then register https://<its domain>/.tlsproxy/oidc/callback with the provider.`);
+    setText($("oidc-reg-uris"), uris.length ? uris.join("\n") : "https://<domain>/.tlsproxy/oidc/callback");
+    const cert = d.certPem || (p && change.credential === "upload" ? p.certPem : "");
+    $("oidc-reg-cert-box").hidden = !cert;
+    setText($("oidc-reg-cert"), cert || "");
+    oidcStep(3);
+  }).catch((e) => setText($("oidc-error"), e.message)).finally(() => { $("oidc-save").disabled = false; });
+});
+
+$("oidc-check").addEventListener("click", () => {
+  const out = $("oidc-check-out");
+  out.hidden = false;
+  setText(out, "Testing…");
+  $("oidc-check").disabled = true;
+  oidcCheck(oidcEd.name).then((d) => { setText(out, d.text); out.className = "block " + oidcLevel(d.report); })
+    .catch((e) => { setText(out, e.message); out.className = "block bad"; })
+    .finally(() => { $("oidc-check").disabled = false; });
+});
+
+function copyText(id, label) {
+  navigator.clipboard.writeText($(id).textContent).then(() => toast(`${label} copied`), () => toast("Copy failed: select the text instead", true));
+}
+$("oidc-copy-uris").addEventListener("click", () => copyText("oidc-reg-uris", "Redirect URIs"));
+$("oidc-copy-cert").addEventListener("click", () => copyText("oidc-reg-cert", "Certificate"));

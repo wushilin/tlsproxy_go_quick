@@ -20,6 +20,9 @@ package main
 //	  - name: team
 //	    users:
 //	      - {username: jack, password_hash: "$argon2id$..."}
+//	oidc:            identity providers that serve entries can ask for
+//	  - name: corp
+//	    issuer: https://id.example.com/rust-oidc/example.com/v2.0
 //
 // A list is a YAML list ("; " joined inside, which every list key reads).
 // Unknown keys and keys given twice are errors, with their line.
@@ -35,7 +38,7 @@ import (
 )
 
 // topLevel are the file's sections, in the order a new file lists them.
-var topLevel = []string{"global", "logging", "listeners", "routes", "basic_auth"}
+var topLevel = []string{"global", "logging", "listeners", "routes", "basic_auth", "oidc"}
 
 // parseYAML reads text into its document node; an empty file is an empty
 // mapping.
@@ -111,8 +114,9 @@ func yamlValue(key string, v *yaml.Node) (string, error) {
 }
 
 // walkYAML reads the file into apply (global, logging, listener and rule
-// keys), raws (the rules, built once the listeners are known) and auths.
-func walkYAML(cfg *Config, text string, apply func(section, key, value string, line int) error, raws *[]rawRule, auths *[]*BasicAuth) error {
+// keys), raws (the rules, built once the listeners are known), auths and
+// providers.
+func walkYAML(cfg *Config, text string, apply func(section, key, value string, line int) error, raws *[]rawRule, auths *[]*BasicAuth, providers *[]*OIDCProvider) error {
 	doc, err := parseYAML(text)
 	if err != nil {
 		return err
@@ -173,6 +177,14 @@ func walkYAML(cfg *Config, text string, apply func(section, key, value string, l
 				a, err := walkBasicAuth(item)
 				if err == nil {
 					*auths = append(*auths, a)
+				}
+				return err
+			})
+		case "oidc":
+			err = eachItem(v, "oidc", func(item *yaml.Node) error {
+				p, err := walkOIDC(item)
+				if err == nil {
+					*providers = append(*providers, p)
 				}
 				return err
 			})

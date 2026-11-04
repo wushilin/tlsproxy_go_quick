@@ -341,6 +341,31 @@
         "key": "basic_auth",
         "default": "(none)",
         "meaning": "The name of a basic_auth item whose users may use it."
+      },
+      {
+        "key": "oidc",
+        "default": "(none)",
+        "meaning": "The name of an oidc item: a browser signs in there first (other clients get 401). Not with basic_auth. A reverse_proxy target gets X-Forwarded-User, -Email, -Groups, -Roles and -Mfa; what the client sent in those is removed, on every serve entry."
+      },
+      {
+        "key": "require_mfa",
+        "default": "false",
+        "meaning": "oidc: the sign-in must have used a second factor (amr has mfa, or acr is one of the item's mfa_acr_values). A session without it is sent back to the provider to step up."
+      },
+      {
+        "key": "require_groups",
+        "default": "(any)",
+        "meaning": "oidc: a list; the user must be in at least one of these groups (the ID token's groups claim). Otherwise 403."
+      },
+      {
+        "key": "require_roles",
+        "default": "(any)",
+        "meaning": "oidc: a list; the user must hold at least one of these app roles (the ID token's roles claim). Otherwise 403."
+      },
+      {
+        "key": "identity_secret_file",
+        "default": "(none)",
+        "meaning": "reverse_proxy with oidc or basic_auth: a file holding a secret (32+ characters; the first line that is not a # comment). The target also gets X-OIDC-Assertion, a JWT signed with it (HS256, 60 s): iss tlsproxy, aud \u003cdomain\u003e\u003cprefix\u003e, sub, email, groups, roles, mfa, auth, ip, htm, htu (the path it gets), iat, exp, jti. What a client sends in it is removed on every serve entry."
       }
     ]
   },
@@ -357,6 +382,82 @@
         "key": "users",
         "default": "(at least one)",
         "meaning": "A list of {username, password_hash} (argon2id, or pbkdf2-sha256; make one with tlsproxy --hash-password) or {username, password_plain}, each optionally with disabled: true and expires: 2026-12-31 (through that day, UTC) or an RFC 3339 time (default: never)."
+      }
+    ]
+  },
+  {
+    "section": "oidc",
+    "about": "A list of OpenID Connect providers that serve entries can ask for (oidc: \u003cname\u003e). The proxy is a confidential web client (authorization code with PKCE); register https://\u003ceach domain\u003e/.tlsproxy/oidc/callback as the application's web redirect URI. /.tlsproxy/oidc/logout signs out. A sign-in is kept in an encrypted cookie; a restart signs browsers in again.",
+    "keys": [
+      {
+        "key": "name",
+        "default": "(required)",
+        "meaning": "What oidc: in a serve entry names; unique."
+      },
+      {
+        "key": "issuer",
+        "default": "(required)",
+        "meaning": "The provider's issuer URL (https://, or http:// to localhost); its discovery document is issuer/.well-known/openid-configuration. rust-oidc: https://host/rust-oidc/\u003ctenant domain or id\u003e/v2.0."
+      },
+      {
+        "key": "client_id",
+        "default": "(required)",
+        "meaning": "The application (client) id."
+      },
+      {
+        "key": "client_secret",
+        "default": "(this or client_secret_file)",
+        "meaning": "The application's client secret."
+      },
+      {
+        "key": "client_secret_file",
+        "default": "(this or client_secret)",
+        "meaning": "A file holding the client secret, read at load."
+      },
+      {
+        "key": "client_certificate",
+        "default": "(instead of a secret)",
+        "meaning": "A PEM certificate the provider holds for the app (rust-oidc: app key add --cert): the proxy authenticates with private_key_jwt, an RS256 assertion with the certificate's thumbprint as x5t. With client_key; read at load, a warning 30 days before it expires."
+      },
+      {
+        "key": "client_key",
+        "default": "(with client_certificate)",
+        "meaning": "The certificate's RSA private key, PEM (PKCS #1 or #8, unencrypted)."
+      },
+      {
+        "key": "scopes",
+        "default": "[openid, profile, email]",
+        "meaning": "A list of scopes to ask for; openid is always added."
+      },
+      {
+        "key": "session",
+        "default": "8h",
+        "meaning": "How long a sign-in lasts here, 1m to 720h. Group and role changes apply at the next sign-in."
+      },
+      {
+        "key": "mfa_acr_values",
+        "default": "(none)",
+        "meaning": "A list: acr values to ask for when a require_mfa entry needs a step-up, also accepted as MFA in the acr claim. rust-oidc: [\"2\"]."
+      },
+      {
+        "key": "ca_file",
+        "default": "(system roots)",
+        "meaning": "Extra root CA for the provider's HTTPS."
+      },
+      {
+        "key": "username_claim",
+        "default": "preferred_username, email, upn, sub",
+        "meaning": "The ID token claim that names the user in logs and X-Forwarded-User."
+      },
+      {
+        "key": "groups_claim",
+        "default": "groups",
+        "meaning": "Where require_groups and X-Forwarded-Groups find the user's groups: a claim name, or a dotted path into nested claims."
+      },
+      {
+        "key": "roles_claim",
+        "default": "roles",
+        "meaning": "Where require_roles and X-Forwarded-Roles find the user's roles, the same way: Keycloak realm roles are realm_access.roles, a client's resource_access.\u003cclient id\u003e.roles."
       }
     ]
   },

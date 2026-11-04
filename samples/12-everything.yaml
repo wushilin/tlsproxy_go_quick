@@ -164,6 +164,18 @@ routes:
           - {type: static_content, prefix: /static/, base_dir: /usr/local/www/static, basic_auth: team}
           - {type: static_content, prefix: /files/, base_dir: /srv/files, directory_listing: true}   # a folder without index.html / index.htm is listed (default: 403)
 
+      # Signed in with OpenID Connect (oidc below). Register
+      # https://portal.example.com/.tlsproxy/oidc/callback as the app's web redirect URI.
+      - domain: portal.example.com
+        cert: auto
+        serve:
+          - {type: reverse_proxy, prefix: /, target: "http://192.168.1.70:8080", oidc: corp}                  # anyone the provider lets in
+          - {type: reverse_proxy, prefix: /admin/, target: "http://192.168.1.70:8080", oidc: corp,
+             require_mfa: true, require_roles: [Admin]}                                                     # and signed in with MFA, holding the Admin role
+          # The target also gets X-OIDC-Assertion, signed with this secret, to verify who it is:
+          # - {type: reverse_proxy, prefix: /api/, target: "http://192.168.1.70:8081", oidc: corp, identity_secret_file: /etc/tlsproxy/portal-api.key}
+          - {type: static_content, prefix: /ops/, base_dir: /srv/ops, oidc: corp, require_groups: [ops, sre]}  # in either group
+
       - domain: $anything_else
         action: deny
 
@@ -179,3 +191,26 @@ basic_auth:
       - {username: jack, password_hash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$ZVrRXqxlLcWfcXCnMyv0m4Rpvh/bnCi7"}
       - {username: jill, password_plain: "open sesame", expires: 2026-12-31}   # through the end of that day, UTC
       - {username: joe, password_plain: "x", disabled: true}                 # refused, even with the right password
+
+# Identity providers serve entries with oidc: corp sign in with (here rust-oidc).
+oidc:
+  - name: corp
+    issuer: https://id.example.com/rust-oidc/example.com/v2.0
+    client_id: 0b6f3c1e-4d2a-4c8e-9a51-2f7d0e6b9c13
+    client_secret: "change-me"                         # or client_secret_file: /etc/tlsproxy/corp.secret
+    scopes: [openid, profile, email]                   # the default
+    session: 8h                                        # the default
+    mfa_acr_values: ["2"]                              # rust-oidc's MFA level, asked for to step up
+    # ca_file: /etc/tlsproxy/id-ca.pem                 # a private CA for the provider's HTTPS
+    # username_claim: preferred_username               # default: preferred_username, email, upn, sub
+    # groups_claim: groups                             # the default; a dotted path reads nested claims
+    # roles_claim: roles                               # the default; Keycloak: realm_access.roles
+
+  # The same provider, authenticating with a certificate instead of a secret
+  # (private_key_jwt; give the provider the .crt: rust-oidc app key add --cert).
+  # (Commented out: the files are read at load.)
+  # - name: corp-cert
+  #   issuer: https://id.example.com/rust-oidc/example.com/v2.0
+  #   client_id: 0b6f3c1e-4d2a-4c8e-9a51-2f7d0e6b9c13
+  #   client_certificate: /etc/tlsproxy/corp.crt
+  #   client_key: /etc/tlsproxy/corp.key

@@ -612,7 +612,7 @@ func TestFormats(t *testing.T) {
 // parserSource is the code that reads config.yaml's keys.
 func parserSource() ([]byte, error) {
 	var out []byte
-	for _, f := range []string{"config.go", "config_yaml.go", "serve_config.go"} {
+	for _, f := range []string{"config.go", "config_yaml.go", "serve_config.go", "oidc_config.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return nil, err
@@ -878,6 +878,7 @@ func TestConfigReference(t *testing.T) {
 		"rules":         "routes:\n  - listener: a\n    rules:\n      - %s: x\n",
 		"serve entries": "listeners:\n  - {name: a, port: 1}\nroutes:\n  - listener: a\n    rules:\n      - {domain: x.test, cert: local-ca, serve: [{%s: x}]}\n",
 		"basic_auth":    "basic_auth:\n  - %s: x\n",
+		"oidc":          "oidc:\n  - %s: x\n",
 	}
 	for _, sec := range configReference {
 		form, ok := where[sec.Section]
@@ -914,5 +915,24 @@ func TestConfigReference(t *testing.T) {
 				t.Errorf("the parser accepts %q, but the console's reference does not list it", k)
 			}
 		}
+	}
+}
+
+// The counters of rules and listeners a reload removes are dropped.
+func TestStatsDropRemovedRules(t *testing.T) {
+	s := NewStats()
+	two, err := ParseConfig("listeners:\n  - {name: a, port: 1}\n  - {name: b, port: 2}\nroutes:\n  - listener: a\n    rules:\n      - {domain: x.test, target: \"h:1\"}\n      - {domain: y.test, target: \"h:1\"}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := ParseConfig("listeners:\n  - {name: a, port: 1}\nroutes:\n  - listener: a\n    rules:\n      - {domain: x.test, target: \"h:1\"}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.prepare(two)
+	s.rule(two.Rules[0].Key()).Total.Add(5)
+	s.prepare(one)
+	if s.rules.Len() != 1 || s.lists.Len() != 1 || s.rule(one.Rules[0].Key()).Total.Load() != 5 {
+		t.Errorf("after the reload: %d rules, %d listeners kept; the kept rule's count %d", s.rules.Len(), s.lists.Len(), s.rule(one.Rules[0].Key()).Total.Load())
 	}
 }

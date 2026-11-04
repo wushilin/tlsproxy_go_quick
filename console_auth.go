@@ -1,6 +1,7 @@
 package main
 
-// The console's Basic auth page: the basic_auth groups, their users and the
+// The console's Authentication page, Basic auth section (the OIDC section is
+// console_oidc.go): the basic_auth groups, their users and the
 // serve entries that use each, and changes to them. A password typed here is
 // hashed in the proxy (argon2id) before it is written; no password or hash
 // is ever sent back to the page.
@@ -76,7 +77,8 @@ func authGroupViews(cfg *Config) []authGroupView {
 
 func (c *Console) authList(w http.ResponseWriter, r *http.Request) {
 	pf := c.configFile()
-	writeJSON(w, 200, map[string]any{"ok": true, "groups": authGroupViews(pf.cfg), "file": pf.view})
+	writeJSON(w, 200, map[string]any{"ok": true, "groups": authGroupViews(pf.cfg), "oidc": oidcProviderViews(pf.cfg),
+		"redirectCandidates": callbackCandidates(pf.cfg), "file": pf.view})
 }
 
 // authSave makes one change to the groups, through the same checks as every
