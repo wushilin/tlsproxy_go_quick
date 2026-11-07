@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `identity_secret` on a serve entry: the X-OIDC-Assertion secret written in
+  the entry (`identity_secret_file` still names a file instead). The
+  console's rule editor takes it as a field, with Show, Copy and Generate
+  (made in the browser), and masks it in a rule's preview; it no longer
+  writes secret files.
+
 ## v1.6.0
 
 - Sign-in with OpenID Connect for serve entries: `oidc: <name>` names an

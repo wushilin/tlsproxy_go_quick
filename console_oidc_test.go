@@ -163,36 +163,3 @@ oidc:
 		t.Error("a name given twice is refused")
 	}
 }
-
-// The rule editor's Generate: a secret in a file named after the entry,
-// mode 0600, good for identity_secret_file; again, the same file, a new
-// secret.
-func TestConsoleIdentitySecret(t *testing.T) {
-	t.Parallel()
-	_, c, path := startConsoleProxy(t, "password = pw", "[[host]]\nlistener=default\npattern=www.test\naction=deny\n")
-	if c.login("pw") != 200 {
-		t.Fatal("sign-in")
-	}
-	_, a := c.post("/api/auth/identity-secret", map[string]any{"domain": "home.example.com", "prefix": "/rest/"})
-	if a["ok"] != true || filepath.Dir(a["path"].(string)) != filepath.Join(filepath.Dir(path), "identity") || len(a["secret"].(string)) < identityMinSecret {
-		t.Fatalf("generate: %v", a)
-	}
-	st, err := os.Stat(a["path"].(string))
-	if err != nil || st.Mode().Perm() != 0o600 && runtime.GOOS != "windows" { // no Unix modes there
-		t.Fatalf("file: %v %v", st, err)
-	}
-	if s, err := readIdentitySecret(a["path"].(string)); err != nil || string(s) != a["secret"] {
-		t.Errorf("read back: %q %v", s, err)
-	}
-	_, b := c.post("/api/auth/identity-secret", map[string]any{"domain": "home.example.com", "prefix": "/rest/"})
-	if b["path"] != a["path"] || b["secret"] == a["secret"] {
-		t.Errorf("again: %v, then %v", a, b)
-	}
-	entries, _ := os.ReadDir(filepath.Dir(a["path"].(string)))
-	if len(entries) != 1 {
-		t.Errorf("%d files", len(entries))
-	}
-	if _, d := c.post("/api/auth/identity-secret", map[string]any{"domain": "", "prefix": ""}); d["ok"] == true {
-		t.Error("no domain, no prefix: refused")
-	}
-}

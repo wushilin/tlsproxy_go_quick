@@ -107,7 +107,6 @@ func (s *Server) startConsole(cfg *ConsoleConfig) error {
 	mux.HandleFunc("POST /api/auth/oidc/discover", c.authed(c.oidcDiscover))
 	mux.HandleFunc("POST /api/auth/oidc/save", c.authed(c.oidcSave))
 	mux.HandleFunc("POST /api/auth/oidc/check", c.authed(c.oidcCheckOne))
-	mux.HandleFunc("POST /api/auth/identity-secret", c.authed(c.identityGenerate))
 	mux.HandleFunc("GET /api/cas", c.authed(c.caList))
 	mux.HandleFunc("GET /api/cas/cert", c.authed(c.caCert))
 	mux.HandleFunc("POST /api/cas/generate", c.authed(c.caGenerate))

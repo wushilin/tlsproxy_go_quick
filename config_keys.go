@@ -97,7 +97,8 @@ var configReference = []sectionDoc{
 		{"require_mfa", "false", "oidc: the sign-in must have used a second factor (amr has mfa, or acr is one of the item's mfa_acr_values). A session without it is sent back to the provider to step up."},
 		{"require_groups", "(any)", "oidc: a list; the user must be in at least one of these groups (the ID token's groups claim). Otherwise 403."},
 		{"require_roles", "(any)", "oidc: a list; the user must hold at least one of these app roles (the ID token's roles claim). Otherwise 403."},
-		{"identity_secret_file", "(none)", "reverse_proxy with oidc or basic_auth: a file holding a secret (32+ characters; the first line that is not a # comment). The target also gets X-OIDC-Assertion, a JWT signed with it (HS256, 60 s): iss tlsproxy, aud <domain><prefix>, sub, email, groups, roles, mfa, auth, ip, htm, htu (the path it gets), iat, exp, jti. What a client sends in it is removed on every serve entry."},
+		{"identity_secret", "(none)", "reverse_proxy with oidc or basic_auth: a secret, 32+ characters (the console's rule editor makes one). The target also gets X-OIDC-Assertion, a JWT signed with it (HS256, 60 s): iss tlsproxy, aud <domain><prefix>, sub, email, groups, roles, mfa, auth, ip, htm, htu (the path it gets), iat, exp, jti. What a client sends in it is removed on every serve entry."},
+		{"identity_secret_file", "(none)", "Instead of identity_secret: a file holding it, its first line that is not a # comment, read at load; keeps the secret out of the config file and its backups."},
 	}},
 	{"basic_auth", "A list of user groups that serve entries can ask for (basic_auth: <name>). A password a browser sends is checked once and remembered for 5 minutes.", []keyDoc{
 		{"name", "(required)", "What basic_auth: in a serve entry names; unique."},

@@ -1486,7 +1486,7 @@ function argsList(s) {
 
 // ---- serve entries: one row each ----
 
-const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth", "oidc", "require_mfa", "require_groups", "require_roles", "identity_secret_file"];
+const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth", "oidc", "require_mfa", "require_groups", "require_roles", "identity_secret", "identity_secret_file"];
 const SERVE_LISTS = ["require_groups", "require_roles"];
 
 // listOf is a list value as an array of words: from the file (a YAML list,
@@ -1572,30 +1572,43 @@ function serveRow(e) {
   const reqRoles = text("s-roles", listOf(e.require_roles).join(", "), "any one of these app roles, e.g. Admin (empty: any)");
   reqs.append(mfaL, field("Required group", reqGroups, "wide"), field("Required role", reqRoles, "wide"));
 
-  // Vouching for who signed in to the target (X-OIDC-Assertion).
+  // Vouching for who signed in to the target (X-OIDC-Assertion): a secret
+  // the target verifies with, written in the entry (identity_secret). An
+  // entry that names a file (identity_secret_file, by hand) keeps it until a
+  // secret is typed here.
   const ident = el("div", "serve-opts");
-  const identPath = text("s-ident", e.identity_secret_file, "none: the target gets the plain X-Forwarded-User/-Groups/-Roles only");
-  const gen = el("button", "btn", "Generate");
-  gen.type = "button";
+  const secret = text("s-isecret", e.identity_secret, e.identity_secret_file
+    ? `from the file ${e.identity_secret_file}; type or generate one to use it instead`
+    : "none: the target gets the plain X-Forwarded-User/-Groups/-Roles only");
+  secret.type = "password";
+  secret.autocomplete = "new-password";
+  const identFile = el("input");
+  identFile.type = "hidden";
+  identFile.className = "s-ident";
+  identFile.value = e.identity_secret_file || "";
+  const btn = (label) => { const b = el("button", "btn", label); b.type = "button"; return b; };
+  const show = btn("Show"), copy = btn("Copy"), gen = btn("Generate");
   const identRow = el("div", "ident-row");
-  identRow.append(identPath, gen);
-  const identOut = el("pre", "block ok ident-secret");
-  identOut.hidden = true;
+  identRow.append(secret, show, copy, gen, identFile);
   const identField = field("Sign who signed in for the target (X-OIDC-Assertion, HS256, 60 s)", identRow, "wide",
-    "a file holding the secret the target verifies with; Generate makes one (shown once) and replaces this entry's old one");
-  ident.append(identField, identOut);
+    "the secret the target verifies with, 32 characters or more; give the target the same one");
+  ident.append(identField);
+  show.addEventListener("click", () => {
+    secret.type = secret.type === "password" ? "text" : "password";
+    setText(show, secret.type === "password" ? "Show" : "Hide");
+  });
+  copy.addEventListener("click", () => {
+    if (!secret.value) return toast("No secret to copy", true);
+    navigator.clipboard.writeText(secret.value).then(() => toast("Secret copied"), () => toast("Copy failed: Show it and select it instead", true));
+  });
   gen.addEventListener("click", () => {
-    gen.disabled = true;
-    api("api/auth/identity-secret", { domain: val("f-pattern"), prefix: prefix.value.trim() || "/" })
-      .then((d) => {
-        if (!d.ok) throw new Error(d.error || "not made");
-        identPath.value = d.path;
-        identOut.hidden = false;
-        setText(identOut, `Secret for the target (shown once; it is also in ${d.path}):\n${d.secret}`);
-        onFormChange();
-      })
-      .catch((err) => toast(err.message, true))
-      .finally(() => { gen.disabled = false; });
+    const raw = new Uint8Array(32);
+    crypto.getRandomValues(raw);
+    secret.value = btoa(String.fromCharCode(...raw)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    secret.type = "text";
+    setText(show, "Hide");
+    secret.dispatchEvent(new Event("input", { bubbles: true }));
+    onFormChange();
   });
 
   row.append(head, main, opts, sopts, authField, reqs, ident);
@@ -1640,7 +1653,11 @@ function readServe() {
       if (!row.querySelector(".s-verify").checked) e.tls_verify = "false";
     }
     const auth = q(".s-auth");
-    if (auth && e.type === "reverse_proxy" && q(".s-ident")) e.identity_secret_file = q(".s-ident");
+    if (auth && e.type === "reverse_proxy") {
+      const typed = row.querySelector(".s-isecret").value.trim();
+      if (typed) e.identity_secret = typed;
+      else if (q(".s-ident")) e.identity_secret_file = q(".s-ident");
+    }
     if (auth.startsWith("basic:")) e.basic_auth = auth.slice(6);
     if (auth.startsWith("oidc:")) {
       e.oidc = auth.slice(5);

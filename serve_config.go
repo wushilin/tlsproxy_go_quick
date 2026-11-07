@@ -55,8 +55,10 @@ type ServiceRoute struct {
 	RequireMFA    bool
 	RequireGroups []string // any one of them
 	RequireRoles  []string // any one of them
-	// IdentitySecretFile holds the secret who signed in is signed with, for
-	// the target (X-OIDC-Assertion, see identity.go); "" = not signed.
+	// The secret who signed in is signed with for the target
+	// (X-OIDC-Assertion, see identity.go): identity_secret, written in the
+	// entry (what the console writes), or identity_secret_file, a file that
+	// holds it; neither = not signed.
 	IdentitySecretFile string
 	identitySecret     []byte
 }
@@ -187,8 +189,13 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 				return nil, fmt.Errorf("identity_secret_file: %v", err)
 			}
 			s.IdentitySecretFile = v
+		case "identity_secret":
+			if len(v) < identityMinSecret {
+				return nil, fmt.Errorf("identity_secret must be at least %d characters (the console's rule editor makes one)", identityMinSecret)
+			}
+			s.identitySecret = []byte(v)
 		default:
-			return nil, fmt.Errorf("unknown key %q in a serve entry (type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, directory_listing, basic_auth, oidc, require_mfa, require_groups, require_roles, identity_secret_file)", k)
+			return nil, fmt.Errorf("unknown key %q in a serve entry (type, prefix, target, strip_prefix, force_host, tls_verify, base_dir, directory_listing, basic_auth, oidc, require_mfa, require_groups, require_roles, identity_secret, identity_secret_file)", k)
 		}
 	}
 	only := func(opt, typ string) error {
@@ -212,10 +219,12 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 		return nil, fmt.Errorf("tls_verify only applies to an https:// target")
 	case s.OIDC != "" && s.BasicAuth != "":
 		return nil, fmt.Errorf("give basic_auth or oidc, not both")
-	case s.IdentitySecretFile != "" && s.Type != routeProxy:
-		return nil, fmt.Errorf("identity_secret_file only applies to type: %s: it signs who signed in for the target", routeProxy)
-	case s.IdentitySecretFile != "" && s.OIDC == "" && s.BasicAuth == "":
-		return nil, fmt.Errorf("identity_secret_file needs oidc: <name> or basic_auth: <name>: without a sign-in there is no one to vouch for")
+	case seen["identity_secret"] && seen["identity_secret_file"]:
+		return nil, fmt.Errorf("give identity_secret or identity_secret_file, not both")
+	case s.identitySecret != nil && s.Type != routeProxy:
+		return nil, fmt.Errorf("identity_secret only applies to type: %s: it signs who signed in for the target", routeProxy)
+	case s.identitySecret != nil && s.OIDC == "" && s.BasicAuth == "":
+		return nil, fmt.Errorf("identity_secret needs oidc: <name> or basic_auth: <name>: without a sign-in there is no one to vouch for")
 	}
 	for _, opt := range []string{"require_mfa", "require_groups", "require_roles"} {
 		if seen[opt] && s.OIDC == "" {

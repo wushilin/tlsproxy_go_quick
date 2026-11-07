@@ -173,7 +173,8 @@ routes:
           - {type: reverse_proxy, prefix: /admin/, target: "http://192.168.1.70:8080", oidc: corp,
              require_mfa: true, require_roles: [Admin]}                                                     # and signed in with MFA, holding the Admin role
           # The target also gets X-OIDC-Assertion, signed with this secret, to verify who it is:
-          # - {type: reverse_proxy, prefix: /api/, target: "http://192.168.1.70:8081", oidc: corp, identity_secret_file: /etc/tlsproxy/portal-api.key}
+          - {type: reverse_proxy, prefix: /api/, target: "http://192.168.1.70:8081", oidc: corp, identity_secret: "change-me-to-32-or-more-random-characters"}
+          # or identity_secret_file: /etc/tlsproxy/portal-api.key, a file holding it
           - {type: static_content, prefix: /ops/, base_dir: /srv/ops, oidc: corp, require_groups: [ops, sre]}  # in either group
 
       - domain: $anything_else

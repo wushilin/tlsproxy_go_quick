@@ -14,7 +14,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -573,47 +572,4 @@ func newClientCert(name string) (certPEM, keyPEM []byte, err error) {
 		return nil, nil, errors.New("no certificate")
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pk}), nil
-}
-
-// identityGenerate makes a secret for a serve entry's identity_secret_file
-// (X-OIDC-Assertion, see identity.go) and shows it once, to give the
-// target. The file is named after the entry's domain and prefix, so making
-// one again replaces it rather than adding another; the running
-// configuration reads it at the next reload (the rule's save).
-func (c *Console) identityGenerate(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Domain, Prefix string }
-	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		fail(w, 400, "bad request")
-		return
-	}
-	name := fileSlug(req.Domain + " " + req.Prefix)
-	if name == "" {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "give the rule a domain and the entry a prefix first"})
-		return
-	}
-	configPath := c.srv.configPath
-	if abs, err := filepath.Abs(configPath); err == nil {
-		configPath = abs
-	}
-	dir := filepath.Join(filepath.Dir(configPath), "identity")
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		fail(w, 500, "%v", err)
-		return
-	}
-	secret := base64.RawURLEncoding.EncodeToString(raw)
-	path := filepath.Join(dir, name+".key")
-	text := fmt.Sprintf("# X-OIDC-Assertion secret for %s%s, made by the console %s\n%s\n", req.Domain, req.Prefix, time.Now().UTC().Format(time.RFC3339), secret)
-	if err := os.MkdirAll(dir, 0o700); err == nil {
-		err = writeFileAtomic(path, []byte(text))
-		if err == nil {
-			err = os.Chmod(path, 0o600)
-		}
-		if err != nil {
-			fail(w, 500, "%v", err)
-			return
-		}
-	}
-	logf("console: identity secret for %s%s made in %s, from %s", req.Domain, req.Prefix, path, r.RemoteAddr)
-	writeJSON(w, 200, map[string]any{"ok": true, "path": path, "secret": secret})
 }
