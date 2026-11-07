@@ -266,9 +266,10 @@ logging:
 #   oidc: corp on either: a browser signs in with the oidc item named corp first;
 #     require_mfa: true, require_groups: [ops], require_roles: [Admin] ask more of the
 #     user (any one group, any one role). See the oidc section at the end.
-#   identity_secret_file: /etc/tlsproxy/rest.key on a reverse_proxy with oidc or
-#     basic_auth: the target also gets X-OIDC-Assertion, a JWT signed with that
-#     secret (HS256, 60 s) saying who signed in, for it to verify.
+#   identity_secret: "<32+ characters>" on a reverse_proxy with oidc or basic_auth
+#     (or identity_secret_file: /etc/tlsproxy/rest.key, a file holding it): the
+#     target also gets X-OIDC-Assertion, a JWT signed with that secret (HS256,
+#     60 s) saying who signed in, for it to verify.
 # Clients get HTTP/2 if they ask. A request whose Host another rule serves gets 421.
 # A reload applies to the next request, even on a connection already open.
 #

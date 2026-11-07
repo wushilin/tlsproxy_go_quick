@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -631,7 +632,7 @@ func (c *Console) ruleValidate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, resp)
 		return
 	}
-	resp["block"] = block
+	resp["block"] = maskSecrets(block)
 	cfg, err := c.srv.loadConfig(full)
 	if err == nil {
 		err = c.srv.certs.Check(cfg)
@@ -767,7 +768,7 @@ func (c *Console) listenerValidate(w http.ResponseWriter, r *http.Request) {
 	configFileMu.Lock()
 	_, _, block, notes, cfg, ver, err := c.listenerChange(req, false)
 	configFileMu.Unlock()
-	resp := map[string]any{"ok": err == nil, "stale": req.Line > 0 && (req.BaseMtime != ver.Mtime || req.BaseHash != ver.Hash), "notes": notes, "block": block}
+	resp := map[string]any{"ok": err == nil, "stale": req.Line > 0 && (req.BaseMtime != ver.Mtime || req.BaseHash != ver.Hash), "notes": notes, "block": maskSecrets(block)}
 	if err != nil {
 		resp["error"] = err.Error()
 	} else {
@@ -916,4 +917,14 @@ func (s *Server) consoleListener() string {
 		return ""
 	}
 	return s.consoleCfg.ListenerName()
+}
+
+// secretValue is a serve entry's identity_secret and its value, as YAML
+// writes it (quoted or not).
+var secretValue = regexp.MustCompile(`(identity_secret:\s*)("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^,}\s]+)`)
+
+// maskSecrets hides the identity secrets in a rule as the console shows it:
+// the page has the value in its field, not on display.
+func maskSecrets(block string) string {
+	return secretValue.ReplaceAllString(block, `${1}"••••"`)
 }

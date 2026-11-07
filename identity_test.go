@@ -57,11 +57,18 @@ func TestIdentityConfig(t *testing.T) {
 	if r := cfg.Rules[0].Routes[0]; string(r.identitySecret) != strings.Repeat("k", 40) || r.IdentitySecretFile != good {
 		t.Errorf("secret: %q", r.identitySecret)
 	}
+	// Or written in the entry, as the console writes it.
+	cfg, err = ParseConfig(fmt.Sprintf(head, `{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret: "`+strings.Repeat("i", 32)+`"}`))
+	if err != nil || string(cfg.Rules[0].Routes[0].identitySecret) != strings.Repeat("i", 32) {
+		t.Fatalf("inline: %v", err)
+	}
 	for entry, want := range map[string]string{
-		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret_file: ` + short + `}`:    "at least 32 characters",
-		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret_file: /nonexistent/key}`: "identity_secret_file: open", // each system words the rest its own way
-		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", identity_secret_file: ` + good + `}`:                       "needs oidc: <name> or basic_auth",
-		`{type: static_content, prefix: /, base_dir: /tmp, basic_auth: team, identity_secret_file: ` + good + `}`:                  "only applies to type: reverse_proxy",
+		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret_file: ` + short + `}`:                                                    "at least 32 characters",
+		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret_file: /nonexistent/key}`:                                                 "identity_secret_file: open", // each system words the rest its own way
+		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", identity_secret_file: ` + good + `}`:                                                                       "needs oidc: <name> or basic_auth",
+		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret: "short"}`:                                                               "at least 32 characters",
+		`{type: reverse_proxy, prefix: /, target: "http://127.0.0.1:1", basic_auth: team, identity_secret: "` + strings.Repeat("i", 32) + `", identity_secret_file: ` + good + `}`: "not both",
+		`{type: static_content, prefix: /, base_dir: /tmp, basic_auth: team, identity_secret_file: ` + good + `}`:                                                                  "only applies to type: reverse_proxy",
 	} {
 		if _, err := ParseConfig(fmt.Sprintf(head, entry)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: got %v, want %q", entry, err, want)
@@ -99,13 +106,13 @@ routes:
         serve:
           - {type: reverse_proxy, prefix: /open/, target: "http://127.0.0.1:%[2]d"}
           - {type: reverse_proxy, prefix: /rest/, target: "http://127.0.0.1:%[2]d", strip_prefix: true, basic_auth: team, identity_secret_file: %[3]s}
-          - {type: reverse_proxy, prefix: /app/, target: "http://127.0.0.1:%[2]d", oidc: corp, identity_secret_file: %[3]s}
+          - {type: reverse_proxy, prefix: /app/, target: "http://127.0.0.1:%[2]d", oidc: corp, identity_secret: "%[5]s"}
           - {type: reverse_proxy, prefix: /plain/, target: "http://127.0.0.1:%[2]d", oidc: corp}
 basic_auth:
   - {name: team, users: [{username: jack, password_plain: pw}]}
 oidc:
   - {name: corp, issuer: "%[4]s", client_id: app, client_secret: s3cret, mfa_acr_values: ["2"]}
-`, ca.localCA(t), backend, key, idp.issuerURL()), "")
+`, ca.localCA(t), backend, key, idp.issuerURL(), secret), "")
 	forged := "eyJhbGciOiJub25lIn0.eyJzdWIiOiJyb290In0."
 	c := serveClient(p, ca, false)
 
@@ -176,5 +183,21 @@ oidc:
 	}
 	if len(token) > 1500 {
 		t.Errorf("assertion is %d bytes", len(token))
+	}
+}
+
+// The console shows a rule with its identity secret masked, however YAML
+// wrote it; a file's path stays.
+func TestMaskSecrets(t *testing.T) {
+	for in, want := range map[string]string{
+		`{type: reverse_proxy, oidc: corp, identity_secret: "abc\"def", prefix: /}`: `{type: reverse_proxy, oidc: corp, identity_secret: "••••", prefix: /}`,
+		`{oidc: corp, identity_secret: 'it''s'}`:                                    `{oidc: corp, identity_secret: "••••"}`,
+		`{oidc: corp, identity_secret: plainValue123}`:                              `{oidc: corp, identity_secret: "••••"}`,
+		"  identity_secret: plainValue123\n  prefix: /":                             "  identity_secret: \"••••\"\n  prefix: /",
+		`{oidc: corp, identity_secret_file: /etc/tlsproxy/x.key}`:                   `{oidc: corp, identity_secret_file: /etc/tlsproxy/x.key}`,
+	} {
+		if got := maskSecrets(in); got != want {
+			t.Errorf("%s\n  got  %s\n  want %s", in, got, want)
+		}
 	}
 }

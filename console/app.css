@@ -894,7 +894,5 @@ textarea.pem:focus { outline: 2px solid var(--focus); outline-offset: 0; border-
 details.oidc-cert { margin-top: 6px; }
 .ident-row { display: flex; gap: 8px; align-items: center; }
 .ident-row input { flex: 1; }
-.ident-secret { border-radius: 6px; font-size: 12px; }
-.ident-secret[hidden] { display: none; }
 details.oidc-cert summary { cursor: pointer; color: var(--fg-2); font-size: var(--t-small); }
 details.oidc-cert pre { font-size: 11px; }

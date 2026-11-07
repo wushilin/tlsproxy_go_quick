@@ -322,7 +322,7 @@ option is missing from it, from `config.yaml` or from this README):
 | `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `low_latency` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` `short_read_delay_us` |
 | `listeners:` (a list) | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `routes:` (a list) | `listener` · `rules` |
-| each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `directory_listing` `basic_auth` `oidc` `require_mfa` `require_groups` `require_roles` `identity_secret_file`) |
+| each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `directory_listing` `basic_auth` `oidc` `require_mfa` `require_groups` `require_roles` `identity_secret` / `identity_secret_file`) |
 | `basic_auth:` (a list) | `name` · `users`, a list of (`username` with `password_hash` or `password_plain`; `disabled`, `expires`) |
 | `oidc:` (a list) | `name` `issuer` `client_id` · `client_secret` / `client_secret_file` / `client_certificate` + `client_key` · `scopes` `session` `mfa_acr_values` `ca_file` `username_claim` `groups_claim` `roles_claim` |
 | `logging:` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
@@ -661,12 +661,16 @@ oidc:
   separated) and `X-Forwarded-Mfa`; these are removed from every request a
   client sends, on every serve entry, and a `basic_auth` user is sent as
   `X-Forwarded-User` too.
-- **Proof for the target** (`identity_secret_file`, on a `reverse_proxy`
-  entry with `oidc` or `basic_auth`): the plain headers are only as
-  trustworthy as the network to the target. With a secret (a file, 32+
-  characters, its first line that is not a `#` comment; the console's rule
-  editor makes one), the target also gets `X-OIDC-Assertion`, a JWT signed
-  with it (HS256), good for 60 seconds, for this entry and this request:
+- **Proof for the target** (`identity_secret`, on a `reverse_proxy` entry
+  with `oidc` or `basic_auth`): the plain headers are only as trustworthy
+  as the network to the target. With a secret (32+ characters; the
+  console's rule editor generates one, with Show and Copy to give it to the
+  target), the target also gets `X-OIDC-Assertion`, a JWT signed with it
+  (HS256), good for 60 seconds, for this entry and this request. To keep
+  the secret out of the config file and its backups, write
+  `identity_secret_file: /path` instead (the file's first line that is not
+  a `#` comment); the console shows it as `••••` in a rule's preview but
+  the Config file page shows the file as it is:
 
   ```json
   {"iss": "tlsproxy", "aud": "home.example.com/rest/", "sub": "alice@example.com",
@@ -684,7 +688,7 @@ oidc:
   and can then trust its claims, or the `X-Forwarded-*` headers that say the
   same. Each entry has its own secret, so one target can't vouch for
   another's users. To change it, let the target accept the old and the new
-  one, then replace the file (it is read when the configuration is). It is
+  one, then change it here. It is
   a few hundred bytes for a typical user; the session's limit on groups
   keeps it under about 4 KB.
 - **Signing out:** `/.tlsproxy/oidc/logout` on the same host forgets the

@@ -363,9 +363,14 @@
         "meaning": "oidc: a list; the user must hold at least one of these app roles (the ID token's roles claim). Otherwise 403."
       },
       {
+        "key": "identity_secret",
+        "default": "(none)",
+        "meaning": "reverse_proxy with oidc or basic_auth: a secret, 32+ characters (the console's rule editor makes one). The target also gets X-OIDC-Assertion, a JWT signed with it (HS256, 60 s): iss tlsproxy, aud \u003cdomain\u003e\u003cprefix\u003e, sub, email, groups, roles, mfa, auth, ip, htm, htu (the path it gets), iat, exp, jti. What a client sends in it is removed on every serve entry."
+      },
+      {
         "key": "identity_secret_file",
         "default": "(none)",
-        "meaning": "reverse_proxy with oidc or basic_auth: a file holding a secret (32+ characters; the first line that is not a # comment). The target also gets X-OIDC-Assertion, a JWT signed with it (HS256, 60 s): iss tlsproxy, aud \u003cdomain\u003e\u003cprefix\u003e, sub, email, groups, roles, mfa, auth, ip, htm, htu (the path it gets), iat, exp, jti. What a client sends in it is removed on every serve entry."
+        "meaning": "Instead of identity_secret: a file holding it, its first line that is not a # comment, read at load; keeps the secret out of the config file and its backups."
       }
     ]
   },
