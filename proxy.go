@@ -1245,14 +1245,17 @@ func (m *bufferMover) read() (int, error) { return m.from.Read(m.buf) }
 // topUp reads under a deadline of topUpWait: a read can't be made
 // non-blocking, but one with data waiting returns at once. A socket read takes
 // all there is; TLS hands over a record per read, so it reads until a read
-// times out or the buffer is full. A timeout is no error: it means nothing
-// more came. TLS state survives a read timeout (only write timeouts break it),
-// and the relay sets its own read deadline again before the next read.
+// times out or the buffer is full. Each read gets its own deadline, as each
+// non-blocking read would get its own try: one deadline over the whole loop
+// ran out after two records on Windows, where a socket read is slower, and
+// left the rest waiting. A timeout is no error: it means nothing more came.
+// TLS state survives a read timeout (only write timeouts break it), and the
+// relay sets its own read deadline again before the next read.
 func (m *bufferMover) topUp(have int) (int, error) {
-	m.from.SetReadDeadline(time.Now().Add(topUpWait))
 	defer m.from.SetReadDeadline(time.Time{})
 	got := 0
 	for have+got < len(m.buf) {
+		m.from.SetReadDeadline(time.Now().Add(topUpWait))
 		n, err := m.from.Read(m.buf[have+got:])
 		got += n
 		if err != nil {

@@ -184,9 +184,13 @@ func TestBufferTopUpReadsEveryTLSRecord(t *testing.T) {
 	if err != nil || n != 1000 {
 		t.Fatalf("read %d, %v", n, err)
 	}
-	if err := <-written; err != nil { // the other seven records have arrived
+	if err := <-written; err != nil { // the other seven records are sent
 		t.Fatal(err)
 	}
+	// A returned write means the kernel took the bytes, not that the other
+	// socket has them yet (Windows delivers over loopback asynchronously), so
+	// give them a moment to arrive before asking for them.
+	time.Sleep(20 * time.Millisecond)
 	start := time.Now()
 	more, err := m.topUp(n)
 	if err != nil || more != 7000 {
