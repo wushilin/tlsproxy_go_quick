@@ -500,21 +500,30 @@ func fakeDNS(t *testing.T, ip string, ip6 ...string) string {
 // It answers over UDP and TCP on one port (Pebble asks over TCP).
 func fakeDNSWith(t *testing.T, ip string, other map[string]string, ip6 ...string) string {
 	t.Helper()
-	// One port for both: take a free UDP one, and try again if another test
-	// holds the same number for TCP.
+	// One port for both: take a free UDP one, and when another test holds
+	// the same number for TCP, walk up from there. Asking the system again
+	// would not do: Windows hands out ports in order, and reserves whole
+	// blocks of them for TCP (Hyper-V), so twenty tries can all land in one
+	// block ("access forbidden").
 	var pc net.PacketConn
 	var tl net.Listener
+	port := 0 // the first UDP bind picks it
 	for try := 0; ; try++ {
 		var err error
-		if pc, err = net.ListenPacket("udp", "127.0.0.1:0"); err != nil {
+		if pc, err = net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+			if tl, err = net.Listen("tcp", pc.LocalAddr().String()); err == nil {
+				break
+			}
+			port = pc.LocalAddr().(*net.UDPAddr).Port
+			pc.Close()
+		} else if port == 0 {
 			t.Fatal(err)
 		}
-		if tl, err = net.Listen("tcp", pc.LocalAddr().String()); err == nil {
-			break
-		}
-		pc.Close()
-		if try == 20 {
+		if try == 1000 {
 			t.Fatalf("no port free for both UDP and TCP: %v", err)
+		}
+		if port++; port >= 65535 {
+			port = 49152
 		}
 	}
 	t.Cleanup(func() { pc.Close(); tl.Close() })
