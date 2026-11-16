@@ -283,6 +283,11 @@ func (s *Stream) watchLoop() bool {
 		if err != nil || f.op == OpClose {
 			return false
 		}
+		if f.op == OpText && string(payload) == msgEOF && s.c.framed {
+			// A second eof breaks protocol 3 (§13.4): reset the stream.
+			s.c.broken()
+			return false
+		}
 		if f.op == OpText && string(payload) == MsgIdle && s.reusable.Load() {
 			// Valid only after both half-closes, and on the hub only as the
 			// answer to its own "idle" (§12.4); anything else is a violation.
@@ -381,8 +386,21 @@ func (s *Stream) Close() error {
 				}
 				t.Stop()
 			}
-		} else if s.CloseReason != nil {
-			if reason := s.CloseReason(); reason != "" {
+		} else {
+			reason := ""
+			if s.CloseReason != nil {
+				reason = s.CloseReason()
+			}
+			if reason == "" && s.c.framed && s.wroteEOF.Load() && s.failure.Load() == nil {
+				// On QUIC a reset discards what was written and not yet
+				// delivered, the data before this side's eof included. Over
+				// WebSocket that data arrives before the cut. So fail the
+				// stream instead: err and FIN, which keep the data (§13.5).
+				// Not when the far end failed it, or the link did: the end
+				// that receives err ends its direction, it does not answer.
+				reason = ClosedEarly
+			}
+			if reason != "" {
 				_ = s.c.WriteFrame(OpText, []byte(msgErrPrefix+reason))
 				_ = s.c.WriteFrame(OpClose, nil)
 			}

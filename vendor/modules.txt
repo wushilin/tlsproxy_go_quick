@@ -38,7 +38,7 @@ github.com/quic-go/quic-go/quicvarint
 # github.com/wushilin/go-named-queue v0.1.0
 ## explicit; go 1.22
 github.com/wushilin/go-named-queue
-# github.com/wushilin/pf-simple v0.16.0
+# github.com/wushilin/pf-simple v0.16.1
 ## explicit; go 1.26.0
 github.com/wushilin/pf-simple/internal/quictun
 github.com/wushilin/pf-simple/internal/relayhook

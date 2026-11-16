@@ -37,6 +37,10 @@ const (
 	// NoReason is what an empty "err:" from a WebSocket becomes: a framed
 	// err is never empty.
 	NoReason = "the peer gave no reason"
+
+	// ClosedEarly is the reason a protocol 3 stream is failed with when it
+	// is closed after this side's half-close but before the far end's.
+	ClosedEarly = "the connection was closed before the far end finished"
 )
 
 // CloseWriter is a connection that can half-close: a QUIC stream's FIN.
@@ -49,6 +53,16 @@ type CloseWriter interface {
 // answer (§13.4). Nothing may have been read from c through a buffer.
 func NewFramed(c CloseWriter) *Conn {
 	return &Conn{conn: c, rd: bufio.NewReader(c), framed: true}
+}
+
+// broken ends a protocol 3 stream whose peer broke the protocol: both
+// directions reset ("protocol", §13.5) where the stream can say so.
+func (c *Conn) broken() {
+	if b, ok := c.conn.(interface{ Broken() }); ok {
+		b.Broken()
+		return
+	}
+	_ = c.conn.Close()
 }
 
 // Framed reports whether c is a protocol 3 stream.

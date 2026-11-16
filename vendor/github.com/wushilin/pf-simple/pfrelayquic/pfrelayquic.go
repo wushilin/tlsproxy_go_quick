@@ -59,7 +59,8 @@ func NewClient(base, word string, tlsConfig *tls.Config) (*pfrelay.Client, error
 	}
 	c.Agent = DefaultAgent
 	relayhook.Attach(c, &transport{
-		http: &http.Client{Timeout: tunnel.HandshakeLimit, Transport: &http.Transport{TLSClientConfig: tlsConfig, MaxIdleConnsPerHost: 1}},
+		http:    &http.Client{Timeout: tunnel.HandshakeLimit, Transport: &http.Transport{TLSClientConfig: tlsConfig, MaxIdleConnsPerHost: 1}},
+		dialing: make(chan struct{}, 1),
 	})
 	return c, nil
 }
@@ -68,20 +69,34 @@ func NewClient(base, word string, tlsConfig *tls.Config) (*pfrelay.Client, error
 // lost.
 type transport struct {
 	http *http.Client
+	// dialing is held while a connection is made, and taken with the
+	// caller's context, so a caller can give up waiting and Close never
+	// waits behind a discovery or a handshake.
+	dialing chan struct{}
 
-	mu   sync.Mutex
-	conn *qconn
+	mu      sync.Mutex
+	conn    *qconn
+	retired []*qconn // dropped, and closed once they hold nothing (§13.8)
 }
 
+// Close closes the QUIC connections to the hub (code none). Streams that
+// sent an err, a refusal or an unregister FIN get up to DeliverWait for the
+// hub to take it, as closing a connection drops what is still queued
+// (§13.5, "Delivering a reason").
 func (t *transport) Close() error {
 	t.mu.Lock()
-	qc := t.conn
-	t.conn = nil
+	conns := t.retired
+	if t.conn != nil {
+		conns = append(conns, t.conn)
+	}
+	t.conn, t.retired = nil, nil
 	t.mu.Unlock()
 	t.http.CloseIdleConnections()
-	if qc != nil {
-		_ = qc.conn.CloseWithError(quictun.CodeNone, "done")
+	var wg sync.WaitGroup
+	for _, qc := range conns {
+		wg.Go(func() { qc.close() })
 	}
+	wg.Wait()
 	return nil
 }
 
@@ -133,12 +148,18 @@ func (t *transport) discover(ctx context.Context, p relayhook.Params, op string)
 // discovery, then a handshake that pins the certificate, with one more
 // discovery after a mismatch (§13.3).
 func (t *transport) get(ctx context.Context, p relayhook.Params, op string) (*qconn, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.conn != nil && t.conn.conn.Context().Err() == nil {
-		return t.conn, nil
+	if qc := t.current(); qc != nil {
+		return qc, nil
 	}
-	t.conn = nil
+	select {
+	case t.dialing <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-t.dialing }()
+	if qc := t.current(); qc != nil { // made meanwhile by another caller
+		return qc, nil
+	}
 	var err error
 	for try := 0; try < 2; try++ {
 		var d *quictun.Discovery
@@ -146,11 +167,13 @@ func (t *transport) get(ctx context.Context, p relayhook.Params, op string) (*qc
 			return nil, err
 		}
 		var c *quic.Conn
-		c, err = quic.DialAddr(ctx, d.Addr(), quictun.ClientTLS(d.Host, d.Fingerprints), quictun.Config())
+		c, err = quic.DialAddr(ctx, d.Addr(), quictun.ClientTLS(d.Host, d.Fingerprints), quictun.ClientConfig())
 		if err == nil {
 			qc := &qconn{conn: c, regs: map[string]*registration{}, changed: make(chan struct{})}
 			go qc.acceptOpens()
+			t.mu.Lock()
 			t.conn = qc
+			t.mu.Unlock()
 			return qc, nil
 		}
 		if !errors.Is(err, quictun.ErrPinMismatch) && !strings.Contains(err.Error(), quictun.ErrPinMismatch.Error()) {
@@ -158,6 +181,17 @@ func (t *transport) get(ctx context.Context, p relayhook.Params, op string) (*qc
 		}
 	}
 	return nil, dialError(err)
+}
+
+// current is the connection to use, if there is a live one.
+func (t *transport) current() *qconn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.conn != nil && t.conn.conn.Context().Err() == nil {
+		return t.conn
+	}
+	t.conn = nil
+	return nil
 }
 
 // dialError words a failure to reach the QUIC listener.
@@ -175,88 +209,123 @@ func dialError(err error) error {
 	return fmt.Errorf("cannot reach the hub over QUIC (UDP may be blocked on the way; pf-client over WebSocket works where QUIC does not): %w", err)
 }
 
-// drop forgets qc as the connection to use, if it still is.
+// drop forgets qc as the connection to use, if it still is, and closes it
+// (none) once it holds no stream and no registration (§13.8).
 func (t *transport) drop(qc *qconn) {
 	t.mu.Lock()
 	if t.conn == qc {
 		t.conn = nil
 	}
+	live := t.retired[:0]
+	for _, r := range t.retired {
+		if r.conn.Context().Err() == nil && r != qc {
+			live = append(live, r)
+		}
+	}
+	t.retired = append(live, qc)
 	t.mu.Unlock()
+	qc.retire()
 }
 
-// request opens a stream, sends req, and reads the hub's answer. A refusal
-// comes back as a *tunnel.StatusError, after the stream is ended.
-func (t *transport) request(ctx context.Context, p relayhook.Params, op string, req quictun.Request) (*qconn, *quic.Stream, *quictun.Answer, error) {
-	qc, err := t.get(ctx, p, op)
-	if err != nil {
-		return nil, nil, nil, err
+// request opens a stream on qc, or on the connection to the hub if qc is
+// nil, sends req, and reads the hub's answer. A refusal comes back as a
+// *tunnel.StatusError, after the stream is ended. release ends the
+// stream's hold on its connection.
+func (t *transport) request(ctx context.Context, p relayhook.Params, op string, req quictun.Request, qc *qconn) (_ *qconn, _ *quic.Stream, _ *quictun.Answer, release func(), _ error) {
+	if qc == nil {
+		var err error
+		if qc, err = t.get(ctx, p, op); err != nil {
+			return nil, nil, nil, nil, err
+		}
 	}
+	release = qc.hold()
 	req.Proto, req.Version, req.Word = tunnel.ProtoRange(Proto, Proto), p.Agent, p.Word
 	s, err := qc.conn.OpenStreamSync(ctx)
 	if err != nil {
-		t.drop(qc)
-		return nil, nil, nil, fmt.Errorf("the QUIC connection to the hub was lost: %w", err)
+		release()
+		if ctx.Err() != nil {
+			return nil, nil, nil, nil, ctx.Err()
+		}
+		if qc.conn.Context().Err() != nil {
+			t.drop(qc)
+		}
+		return nil, nil, nil, nil, fmt.Errorf("the QUIC connection to the hub was lost: %w", err)
+	}
+	reset := func(code quic.StreamErrorCode) {
+		s.CancelWrite(code)
+		s.CancelRead(code)
+		release()
 	}
 	stop := context.AfterFunc(ctx, func() { s.CancelWrite(quictun.CodeCancelled); s.CancelRead(quictun.CodeCancelled) })
 	defer stop()
 	_ = s.SetDeadline(time.Now().Add(quictun.AnswerWait))
-	if err := quictun.WriteMessage(s, req); err != nil {
-		return nil, nil, nil, err
+	werr := quictun.WriteMessage(s, req)
+	if errors.Is(werr, quictun.ErrMessage) { // too long: nothing was sent
+		reset(quictun.CodeCancelled)
+		return nil, nil, nil, nil, fmt.Errorf("the request is too long for the hub (over %d bytes): %w", quictun.MaxMessage, werr)
 	}
+	// Read the answer even after a failed write: the hub's refusal can
+	// overtake the request, and it says why (§13.5).
 	var a quictun.Answer
-	err = quictun.ReadMessage(s, &a)
+	rerr := quictun.ReadMessage(s, &a)
 	_ = s.SetDeadline(time.Time{})
-	if err != nil {
-		s.CancelWrite(quictun.CodeRequestTimeout)
-		s.CancelRead(quictun.CodeRequestTimeout)
-		if ctx.Err() != nil {
-			return nil, nil, nil, ctx.Err()
+	if rerr != nil {
+		reset(quictun.CodeRequestTimeout)
+		switch {
+		case ctx.Err() != nil:
+			return nil, nil, nil, nil, ctx.Err()
+		case werr != nil:
+			return nil, nil, nil, nil, fmt.Errorf("cannot send the request to the hub: %w", werr)
 		}
-		return nil, nil, nil, fmt.Errorf("the hub did not answer: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("the hub did not answer: %w", rerr)
 	}
-	if a.Proto != 0 && a.Proto != Proto {
-		s.CancelWrite(quictun.CodeProtocol)
-		s.CancelRead(quictun.CodeProtocol)
-		return nil, nil, nil, fmt.Errorf("the hub answered in QUIC protocol %d; this client speaks %d", a.Proto, Proto)
-	}
+	// The status first: a refusal, a 426 included, carries the hub's own
+	// protocol in proto, and its message says which side to upgrade (§13.4).
 	if a.Status != http.StatusOK && a.Status != http.StatusNoContent {
 		// The hub sends FIN and STOP_SENDING; end this direction too.
 		s.CancelWrite(quictun.CodeRefused)
-		go drain(s)
+		quictun.Drain(s, &qc.lingers)
+		release()
 		if a.Status == http.StatusTooManyRequests && a.Scope == "connection" {
 			t.drop(qc) // the next request opens a new connection (§13.8)
 		}
 		hd := http.Header{}
 		hd.Set(tunnel.HeaderProto, strconv.Itoa(a.Proto))
-		return nil, nil, nil, &tunnel.StatusError{Code: a.Status, Msg: a.Error, Header: hd}
+		return nil, nil, nil, nil, &tunnel.StatusError{Code: a.Status, Msg: a.Error, Header: hd}
 	}
-	return qc, s, &a, nil
-}
-
-func drain(s *quic.Stream) {
-	_ = s.SetReadDeadline(time.Now().Add(quictun.DeliverWait))
-	_, _ = io.Copy(io.Discard, s)
-	s.CancelRead(quictun.CodeCancelled)
+	if werr != nil {
+		reset(quictun.CodeBroken)
+		return nil, nil, nil, nil, fmt.Errorf("cannot send the request to the hub: %w", werr)
+	}
+	if a.Proto != 0 && a.Proto != Proto {
+		reset(quictun.CodeProtocol)
+		// Final: retrying cannot help, one side must be upgraded.
+		return nil, nil, nil, nil, &tunnel.StatusError{Code: http.StatusUpgradeRequired,
+			Msg: fmt.Sprintf("the hub answered in QUIC protocol %d; this client speaks %d", a.Proto, Proto)}
+	}
+	return qc, s, &a, release, nil
 }
 
 // ---------- the requests ----------
 
 func (t *transport) Check(ctx context.Context, p relayhook.Params) error {
-	_, s, _, err := t.request(ctx, p, "connect", quictun.Request{Op: "check", ClientToken: p.ClientToken})
+	qc, s, _, release, err := t.request(ctx, p, "connect", quictun.Request{Op: "check", ClientToken: p.ClientToken}, nil)
 	if err != nil {
 		return err
 	}
-	_ = s.Close()
-	go drain(s)
+	quictun.FinishCounted(s, &qc.lingers)
+	release()
 	return nil
 }
 
 func (t *transport) Connect(ctx context.Context, p relayhook.Params) (*tunnel.Stream, string, error) {
-	qc, s, a, err := t.request(ctx, p, "connect", quictun.Request{Op: "connect", ClientToken: p.ClientToken})
+	qc, s, a, release, err := t.request(ctx, p, "connect", quictun.Request{Op: "connect", ClientToken: p.ClientToken}, nil)
 	if err != nil {
 		return nil, "", err
 	}
-	return tunnel.NewStream(tunnel.NewFramed(quictun.NewStreamConn(s, qc.conn))), a.Conn, nil
+	sc := quictun.NewStreamConn(s, qc.conn, &qc.lingers)
+	sc.OnDone = release
+	return tunnel.NewStream(tunnel.NewFramed(sc)), a.Conn, nil
 }
 
 func (t *transport) Register(ctx context.Context, p relayhook.Params, target string) (relayhook.Registration, error) {
@@ -268,28 +337,82 @@ func (t *transport) Register(ctx context.Context, p relayhook.Params, target str
 	if err != nil {
 		return nil, err
 	}
-	qc.serving(1) // an open may arrive before the answer (§13.4)
+	// An open may arrive before the answer (§13.4): the serve is counted on
+	// the connection its request goes on, until its registration is there.
+	qc.serving(1)
 	defer qc.serving(-1)
-	qc, s, a, err := t.request(ctx, p, "serve", req)
+	_, s, a, release, err := t.request(ctx, p, "serve", req, qc)
 	if err != nil {
 		return nil, err
 	}
-	r := &registration{qc: qc, s: s, id: a.Reg, opens: make(chan *open, 128), ended: make(chan struct{})}
+	r := &registration{qc: qc, s: s, id: a.Reg, opens: make(chan *open, openQueue), ended: make(chan struct{})}
 	qc.add(r)
+	release() // the registration holds the connection from now on
 	go r.watch()
 	return r, nil
 }
+
+// openQueue is how many opens wait for a registration's Next, beyond
+// pfrelay's own backlog.
+const openQueue = 128
+
+// backlogFull is what an open is refused with when its registration's queue
+// is full (§9), as pfrelay says it over WebSocket.
+const backlogFull = "the serving side is not accepting connections fast enough"
 
 // ---------- the connection's incoming streams ----------
 
 // qconn is one QUIC connection to the hub and its registrations.
 type qconn struct {
-	conn *quic.Conn
+	conn    *quic.Conn
+	lingers quictun.Lingers
 
 	mu      sync.Mutex
 	regs    map[string]*registration
 	serves  int           // serve requests not yet answered
 	changed chan struct{} // closed and replaced when regs or serves change
+	held    int           // streams in use: requests, connections, opens
+	retired bool          // no new request goes here; close it once it holds nothing
+}
+
+// hold counts a stream as in use; release, once, ends that.
+func (qc *qconn) hold() (release func()) {
+	qc.mu.Lock()
+	qc.held++
+	qc.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			qc.mu.Lock()
+			qc.held--
+			qc.mu.Unlock()
+			qc.closeIfIdle()
+		})
+	}
+}
+
+func (qc *qconn) retire() {
+	qc.mu.Lock()
+	qc.retired = true
+	qc.mu.Unlock()
+	qc.closeIfIdle()
+}
+
+// closeIfIdle closes a retired connection that holds nothing any more.
+func (qc *qconn) closeIfIdle() {
+	qc.mu.Lock()
+	idle := qc.retired && qc.held == 0 && len(qc.regs) == 0
+	qc.mu.Unlock()
+	if idle {
+		go qc.close()
+	}
+}
+
+// close closes the connection (none), after giving streams that wait for
+// the hub's end of them up to DeliverWait.
+func (qc *qconn) close() {
+	qc.lingers.Wait(quictun.DeliverWait)
+	_ = qc.conn.CloseWithError(quictun.CodeNone, "done")
 }
 
 func (qc *qconn) serving(d int) {
@@ -311,6 +434,7 @@ func (qc *qconn) remove(r *registration) {
 	delete(qc.regs, r.id)
 	qc.notifyLocked()
 	qc.mu.Unlock()
+	qc.closeIfIdle()
 }
 
 func (qc *qconn) notifyLocked() {
@@ -346,26 +470,36 @@ func (qc *qconn) acceptOpens() {
 		if err != nil {
 			return
 		}
+		release := qc.hold()
 		go func() {
 			_ = s.SetReadDeadline(time.Now().Add(quictun.RequestWait))
 			var o quictun.Open
 			err := quictun.ReadMessage(s, &o)
 			_ = s.SetReadDeadline(time.Time{})
 			if err != nil || o.Open == "" {
-				s.CancelWrite(quictun.CodeProtocol)
-				s.CancelRead(quictun.CodeProtocol)
+				code := quic.StreamErrorCode(quictun.CodeProtocol)
+				if isTimeout(err) {
+					code = quictun.CodeRequestTimeout
+				}
+				s.CancelWrite(code)
+				s.CancelRead(code)
+				release()
 				return
 			}
+			op := &open{qc: qc, s: s, id: o.Open, release: release}
 			r := qc.find(o.Reg)
-			op := &open{qc: qc, s: s, id: o.Open}
-			if r == nil || !r.deliver(op) {
-				// A refused open: the answer, then FIN (§13.5).
-				_ = op.answer(quictun.Answer{Status: http.StatusGone, Error: "no such registration"})
-				_ = s.Close()
-				go drain(s)
+			if r == nil {
+				op.refuse(http.StatusGone, "no such registration")
+				return
 			}
+			r.deliver(op)
 		}()
 	}
+}
+
+func isTimeout(err error) bool {
+	var ne interface{ Timeout() bool }
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // registration is one registration over QUIC, until its serve stream ends.
@@ -376,20 +510,26 @@ type registration struct {
 	opens chan *open
 	ended chan struct{}
 	why   error
-	once  sync.Once
+
+	mu   sync.Mutex
+	done bool // ended: no open is queued any more
 }
 
-func (r *registration) deliver(o *open) bool {
-	select {
-	case <-r.ended:
-		return false
-	default:
+// deliver queues o for Next, or refuses it: 410 once the registration has
+// ended, 502 with a reason when the queue is full (§9).
+func (r *registration) deliver(o *open) {
+	r.mu.Lock()
+	if r.done {
+		r.mu.Unlock()
+		o.refuse(http.StatusGone, "no such registration")
+		return
 	}
 	select {
 	case r.opens <- o:
-		return true
+		r.mu.Unlock()
 	default:
-		return false
+		r.mu.Unlock()
+		o.refuse(http.StatusBadGateway, backlogFull)
 	}
 }
 
@@ -406,11 +546,14 @@ func (r *registration) watch() {
 		switch {
 		case err == nil:
 			why = endError(e)
-			_ = r.s.Close() // the hub's FIN follows; answer with ours
-			go drain(r.s)
+			quictun.FinishCounted(r.s, &r.qc.lingers) // the hub's FIN follows; answer with ours
 		case errors.Is(err, io.EOF):
 			why = errors.New("the server ended the registration")
 			_ = r.s.Close()
+		case errors.Is(err, quictun.ErrMessage):
+			why = errors.New("the server broke the protocol on the serve stream")
+			r.s.CancelWrite(quictun.CodeProtocol)
+			r.s.CancelRead(quictun.CodeProtocol)
 		default:
 			why = fmt.Errorf("the link to the server was lost (%v)", err)
 		}
@@ -419,12 +562,32 @@ func (r *registration) watch() {
 	r.end(why)
 }
 
+// end ends the registration once. The opens still queued are refused: the
+// hub hears 410 at once, and their streams end (§13.5).
 func (r *registration) end(why error) {
-	r.once.Do(func() {
-		r.why = why
-		close(r.ended)
-		r.qc.remove(r)
-	})
+	r.mu.Lock()
+	if r.done {
+		r.mu.Unlock()
+		return
+	}
+	r.done = true
+	r.why = why
+	close(r.ended)
+	var queued []*open
+	for {
+		select {
+		case o := <-r.opens:
+			queued = append(queued, o)
+			continue
+		default:
+		}
+		break
+	}
+	r.mu.Unlock()
+	for _, o := range queued {
+		go o.refuse(http.StatusGone, "no such registration")
+	}
+	r.qc.remove(r)
 }
 
 // endError is the hub's end of a registration, as the user should read it.
@@ -441,6 +604,11 @@ func endError(e quictun.End) error {
 
 func (r *registration) Next(ctx context.Context) (relayhook.Open, error) {
 	select {
+	case <-r.ended: // an end wins over a queued open: those are refused
+		return nil, r.why
+	default:
+	}
+	select {
 	case o := <-r.opens:
 		return o, nil
 	case <-r.ended:
@@ -450,19 +618,25 @@ func (r *registration) Next(ctx context.Context) (relayhook.Open, error) {
 	}
 }
 
-// Close unregisters: FIN on the serve stream (§13.4).
+// Close unregisters: FIN on the serve stream (§13.4). watch reads on to the
+// hub's FIN, which ends the stream; DeliverWait bounds the wait.
 func (r *registration) Close() {
 	r.end(errors.New("unregistered"))
 	_ = r.s.Close()
-	go drain(r.s)
+	done := r.qc.lingers.Add()
+	time.AfterFunc(quictun.DeliverWait, func() {
+		r.s.CancelRead(quictun.CodeCancelled)
+		done()
+	})
 }
 
 // open is the hub asking for one connection, on a stream it opened.
 type open struct {
-	qc   *qconn
-	s    *quic.Stream
-	id   string
-	once sync.Once
+	qc      *qconn
+	s       *quic.Stream
+	id      string
+	release func() // the stream's hold on its connection
+	once    sync.Once
 }
 
 func (o *open) ID() string { return o.id }
@@ -480,23 +654,32 @@ func (o *open) Accept(context.Context) (*tunnel.Stream, error) {
 		if err = o.answer(quictun.Answer{Status: http.StatusOK}); err != nil {
 			o.s.CancelWrite(quictun.CodeBroken)
 			o.s.CancelRead(quictun.CodeBroken)
+			o.release()
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
-	return tunnel.NewStream(tunnel.NewFramed(quictun.NewStreamConn(o.s, o.qc.conn))), nil
+	sc := quictun.NewStreamConn(o.s, o.qc.conn, &o.qc.lingers)
+	sc.OnDone = o.release
+	return tunnel.NewStream(tunnel.NewFramed(sc)), nil
 }
 
 func (o *open) Refuse(reason string) {
+	reason = cleanText(reason, 128)
+	if reason == "" {
+		reason = "the serving side refused the connection"
+	}
+	o.refuse(http.StatusBadGateway, reason)
+}
+
+// refuse answers the open with a refusal, then FIN, and lets the hub end
+// its direction (§13.5).
+func (o *open) refuse(status int, reason string) {
 	o.once.Do(func() {
-		reason = cleanText(reason, 128)
-		if reason == "" {
-			reason = "the serving side refused the connection"
-		}
-		_ = o.answer(quictun.Answer{Status: http.StatusBadGateway, Error: reason})
-		_ = o.s.Close()
-		go drain(o.s)
+		_ = o.answer(quictun.Answer{Status: status, Error: reason})
+		quictun.FinishCounted(o.s, &o.qc.lingers)
+		o.release()
 	})
 }
 

@@ -409,12 +409,23 @@ func (c *Client) ServeOne(ctx context.Context, local HalfCloser) error {
 	go func() { failed <- c.serve(ctx, tunnel.StdioTarget, open, nil) }()
 	select {
 	case err := <-done:
+		// Unregister before returning, so that a program that exits next
+		// does not cut it short: serve ends its registration when ctx does.
+		cancel()
+		select {
+		case <-failed:
+		case <-time.After(unregisterWait):
+		}
 		return err
 	case err := <-failed: // refused outright, or ctx ended while waiting
 		_ = local.Close()
 		return err
 	}
 }
+
+// unregisterWait bounds how long ServeOne waits for its registration to end
+// after its one connection did.
+const unregisterWait = 5 * time.Second
 
 // serve keeps a control channel registered and calls open, on its own
 // goroutine, for each connection the relay asks for. up, if not nil, is
@@ -751,6 +762,10 @@ func (p party) localReason(err error) string {
 	return fmt.Sprintf("the connection between %s and %s failed (%v)", p.self, p.local, err)
 }
 
+// writeReasonWait bounds how long bridge waits, after a failed write on a
+// protocol 3 stream, for the reason the far end sent (§13.5).
+const writeReasonWait = 3 * time.Second
+
 // bridge copies both ways until both directions finish cleanly or either
 // fails, then closes both ends. When this end is the one that saw the
 // break, it tells the far end why, so both logs name the same cause.
@@ -806,7 +821,22 @@ func bridge(ctx context.Context, sess *tunnel.Stream, local HalfCloser, p party,
 		return p.localReason(r.end.writeErr), true, r.end.writeErr
 	}
 
-	reason, mine, err := describe(<-results)
+	first := <-results
+	if first.outbound && first.end.readErr == nil && first.end.writeErr != nil && sess.Leg().Framed() {
+		// A write on a protocol 3 stream can fail before the reason is
+		// read: a STOP_SENDING may overtake the err sent before it. Give
+		// the reader a moment, and report the far end's reason if it comes
+		// (§13.5); the write error only if none does.
+		select {
+		case second := <-results:
+			var remote *tunnel.RemoteError
+			if errors.As(second.end.readErr, &remote) {
+				first = second
+			}
+		case <-time.After(writeReasonWait):
+		}
+	}
+	reason, mine, err := describe(first)
 	if err == nil {
 		// One direction finished cleanly. Unless more is learned, the
 		// reason stays who closed first. If that was the far end's
