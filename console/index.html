@@ -22,6 +22,7 @@
       <button class="tab" type="button" role="tab" data-tab="flows" aria-selected="false" aria-controls="tab-flows">Flow log</button>
       <button class="tab" type="button" role="tab" data-tab="certs" aria-selected="false" aria-controls="tab-certs">Certificates</button>
       <button class="tab" type="button" role="tab" data-tab="auth" aria-selected="false" aria-controls="tab-auth">Authentication</button>
+      <button class="tab" type="button" role="tab" data-tab="relays" aria-selected="false" aria-controls="tab-relays">Relays</button>
       <button class="tab" type="button" role="tab" data-tab="log" aria-selected="false" aria-controls="tab-log">Log</button>
       <button class="tab" type="button" role="tab" data-tab="config" aria-selected="false" aria-controls="tab-config">Config file</button>
     </nav>
@@ -156,6 +157,33 @@
       <p class="page-note">A serve entry asks a browser to sign in with one of these providers with <code>oidc: &lt;name&gt;</code> (choose it in the rule editor, with any MFA, group or role it requires). The provider needs the redirect URIs shown on each card registered for its application. A client secret typed here is written to a file of its own next to the config file, never into it, and is never shown again; a certificate made here keeps its private key on this machine.</p>
     </section>
 
+    <!-- ================= Relays ================= -->
+    <section id="tab-relays" class="page" role="tabpanel" aria-label="Relays" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Exchanges</h2>
+          <span class="sub" id="relay-x-meta"></span>
+          <div class="toolbar-actions">
+            <button class="btn btn-add" type="button" id="relay-x-add"><span aria-hidden="true">+</span> Add exchange</button>
+          </div>
+        </div>
+        <div class="ca-list" id="relay-x-list"></div>
+      </div>
+      <p class="page-note">An exchange is a <a href="https://github.com/wushilin/pf-simple" target="_blank" rel="noopener">pf-simple</a> relay hub (0.16.0 or later, its QUIC listener on): its https address, where the QUIC listener is found, and the CA its certificate comes from if it is not a public one (pf-simple's <code>tls = "self_signed"</code> makes <code>certs/ca.pem</code>). Check reaches it over https only; nothing is sent that the hub could count as a wrong guess.</p>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Endpoints</h2>
+          <span class="sub" id="relay-e-meta"></span>
+          <div class="toolbar-actions">
+            <button class="btn btn-add" type="button" id="relay-e-add"><span aria-hidden="true">+</span> Add endpoint</button>
+          </div>
+        </div>
+        <div class="ca-list" id="relay-e-list"></div>
+      </div>
+      <p class="page-note">An endpoint is a tunnel on an exchange: its word, and the client token if the serving side asks for one (<code>pf-client serve --client-token</code>). A rule connects through it with the target <code>relay://&lt;endpoint&gt;</code> (choose it in the rule editor); the serving side decides where the connection lands. Passing TLS through, terminating it, PROXY headers and speed limits all work as with a host and port. Over QUIC only; the serving side may use QUIC or WebSockets. The word and the token are written to the config file and never shown again here: leave them blank when editing to keep them.</p>
+    </section>
+
     <!-- ================= Log ================= -->
     <section id="tab-log" class="page" role="tabpanel" aria-label="Log" hidden>
       <div class="panel">
@@ -216,6 +244,27 @@
     <div class="editor-actions">
       <button class="btn btn-quiet" type="button" id="auth-dlg-cancel">Cancel</button>
       <button class="btn btn-primary" type="submit" id="auth-dlg-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="relay-dlg" class="wizard" aria-labelledby="relay-dlg-title">
+  <form id="relay-dlg-form" method="dialog" class="editor" autocomplete="off" novalidate>
+    <h2 id="relay-dlg-title"></h2>
+    <p class="editor-hint" id="relay-dlg-hint"></p>
+    <div class="fields">
+      <label class="field wide"><span id="relay-name-label">Name</span><input id="relay-name" spellcheck="false" maxlength="64"></label>
+      <label class="field wide" id="relay-f-hub"><span>Hub <em>the pf-simple hub's https address</em></span><input id="relay-hub" spellcheck="false" placeholder="https://relay.example.com/"></label>
+      <label class="field wide" id="relay-f-ca"><span>CA file <em>optional: the hub's own CA, a path on this machine</em></span><input id="relay-ca" spellcheck="false" placeholder="system roots"></label>
+      <label class="field wide" id="relay-f-exchange"><span>Exchange <em>the hub the tunnel is on</em></span><select id="relay-exchange"></select></label>
+      <label class="field wide" id="relay-f-word"><span>Word <em id="relay-word-note">the tunnel's word</em></span><input id="relay-word" spellcheck="false" autocomplete="off" placeholder="k3f9-x2mq-7hpa"></label>
+      <label class="field wide" id="relay-f-token"><span>Client token <em id="relay-token-note">only if the serving side asks for one</em></span><input id="relay-token" type="password" autocomplete="new-password"></label>
+      <label class="check" id="relay-f-notoken"><input type="checkbox" id="relay-notoken"> The tunnel asks for no client token</label>
+    </div>
+    <p class="editor-error" id="relay-dlg-error" role="alert"></p>
+    <div class="editor-actions">
+      <button class="btn btn-quiet" type="button" id="relay-dlg-cancel">Cancel</button>
+      <button class="btn btn-primary" type="submit" id="relay-dlg-save">Save</button>
     </div>
   </form>
 </dialog>
@@ -324,9 +373,16 @@
         <label><input type="radio" name="f-action" value="serve"><span>Serve it here <em>service rules</em></span></label>
         <label><input type="radio" name="f-action" value="deny"><span>Refuse it <em>deny</em></span></label>
       </div>
-      <div class="fields" id="target-fields">
-        <label class="field"><span>Target host</span><input id="f-target-host" spellcheck="false" placeholder="10.0.0.6 or backend-${1}.lan"></label>
-        <label class="field"><span>Target port</span><input id="f-target-port" inputmode="numeric" placeholder="443"></label>
+      <div id="target-fields">
+        <div class="seg" role="radiogroup" aria-label="Where it connects">
+          <label><input type="radio" name="f-target-kind" value="host" checked><span>Host and port</span></label>
+          <label><input type="radio" name="f-target-kind" value="relay"><span>Relay endpoint <em>a pf-simple tunnel</em></span></label>
+        </div>
+        <div class="fields">
+          <label class="field" id="f-f-host"><span>Target host</span><input id="f-target-host" spellcheck="false" placeholder="10.0.0.6 or backend-${1}.lan"></label>
+          <label class="field" id="f-f-port"><span>Target port</span><input id="f-target-port" inputmode="numeric" placeholder="443"></label>
+          <label class="field wide" id="f-f-endpoint" hidden><span>Endpoint <em>relay://&lt;endpoint&gt;; add one on the Relays page. Its serving side decides where the connection lands</em></span><select id="f-target-endpoint"></select></label>
+        </div>
       </div>
       <div id="routes-fields" hidden>
         <p class="field-help">The rule answers HTTP itself: each entry takes the requests under its prefix, the longest prefix first; a path no entry takes gets 404.

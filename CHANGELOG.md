@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Relay targets: `target: relay://<endpoint>` connects through a tunnel of
+  a pf-simple relay hub (0.16.0 or later), over QUIC, instead of to a
+  host:port. Two new sections: `exchanges` (the hubs: `hub`, optionally
+  `ca_file`) and `endpoints` (the tunnels on them: `exchange`, `word`,
+  optionally `client_token`). Passthrough, termination with a plaintext or
+  TLS upstream, `proxy: v1 | v2` and speed limits all work through it; the
+  serving side may use QUIC or WebSockets. One QUIC connection per
+  endpoint, kept across reloads while its settings stay the same.
+- The console's new Relays page adds, edits, renames (where used, too),
+  deletes and checks exchanges and endpoints; words and client tokens are
+  never sent back to the browser. The rule editor offers the endpoints as
+  a target. Built on pf-simple's `pfrelayquic` SDK (adds quic-go; the
+  binary grows by about 2 MB). Tested against pf-simple's own hub, built
+  from the pinned version.
+- New endpoint names (added or renamed to in the console) are letters,
+  digits and `_+-`, so `relay://<name>` reads like an address. Names already
+  in a config still load and can be edited.
 - `identity_secret` on a serve entry: the X-OIDC-Assertion secret written in
   the entry (`identity_secret_file` still names a file instead). The
   console's rule editor takes it as a field, with Show, Copy and Generate

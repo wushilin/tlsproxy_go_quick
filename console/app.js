@@ -31,7 +31,7 @@ const RATE_MAX_SAMPLES = 64;
 const HISTORY_POINTS = 120; // two minutes at one sample per second
 const MAX_ROWS = 200;
 const ARM_MS = 3000;
-const TABS = ["rules", "flows", "certs", "auth", "log", "config"];
+const TABS = ["rules", "flows", "certs", "auth", "relays", "log", "config"];
 
 const ui = {
   state: null,
@@ -1400,8 +1400,12 @@ const DEFAULTS = { action: "allow", proxy: "none", upstream_tls: "true", upstrea
 const listText = (v) => Array.isArray(v) ? v.join(", ") : String(v ?? "");
 const textList = (s) => String(s ?? "").split(/[\s,;]+/).filter(Boolean);
 // splitTarget reads host:port, an IPv6 host in brackets.
+// A relay target (relay://<endpoint>, an endpoint of the Relays page) has no
+// port: the tunnel's serving side decides where it lands.
+const isRelay = (host) => /^relay:\/\//i.test(host);
 function splitTarget(t) {
   const s = String(t ?? "").trim();
+  if (isRelay(s)) return [s, ""];
   const m = /^\[([^\]]*)\]:(.*)$/.exec(s) || /^(.*):([^:]*)$/.exec(s);
   return m ? [m[1], m[2]] : [s, ""];
 }
@@ -1446,11 +1450,12 @@ function formValues() {
   const upTLS = term && !serve && $("f-upstream-tls").value !== "false";
   const proxy = allow && !serve && $("f-proxy").checked;
   const host = val("f-target-host"), port = val("f-target-port");
+  const endpoint = radio("f-target-kind") === "relay" ? $("f-target-endpoint").value : null;
   const v = {
     listener: $("f-listener").value,
     domain: val("f-pattern"),
     action: allow ? "allow" : "deny",
-    target: allow && !serve && (host || port) ? joinTarget(host, port) : null,
+    target: !allow || serve ? null : endpoint !== null ? (endpoint ? "relay://" + endpoint : null) : host || port ? joinTarget(host, port) : null,
     serve: serve ? readServe() : null,
     max_aggregated_speed: allow ? val("f-agg") : null,
     max_single_connection_speed: allow ? val("f-conn") : null,
@@ -1734,7 +1739,10 @@ function prefill(values) {
   setRadio("f-action", normal("action", v.action) === "deny" ? "deny" : serve.length ? "serve" : "allow");
   $("f-serve-rows").replaceChildren(...serve.map(serveRow));
   if (ed.rule) ed.rule.values = { ...ed.rule.values, serve: serve.map(sameServe) };
-  const [host, port] = splitTarget(v.target);
+  const relayTo = isRelay(String(v.target || "")) ? String(v.target).trim().slice("relay://".length) : "";
+  setRadio("f-target-kind", relayTo ? "relay" : "host");
+  fillEndpoints(relayTo);
+  const [host, port] = relayTo ? ["", ""] : splitTarget(v.target);
   $("f-target-host").value = host;
   $("f-target-port").value = port;
   const cert = (v.cert || "").trim();
@@ -1813,7 +1821,9 @@ function quickChecks(v) {
     });
     if (radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the Certificates page first."]);
   } else if (v.action !== "deny") {
-    const host = val("f-target-host");
+    const relay = radio("f-target-kind") === "relay";
+    const host = relay ? "-" : val("f-target-host");
+    if (relay && !$("f-target-endpoint").value) out.push([1, "Choose an endpoint; add one on the Relays page first."]);
     if (!host) out.push([1, "A target host is required for an allow rule."]);
     const bare = /\$(?!\{)(\d*)/.exec(host);
     if (bare) out.push([1, bare[1] ? `Write \${${bare[1]}}, not $${bare[1]}: captures are always in braces.` : "A $ must start ${1}, ${2}, … or ${host}."]);
@@ -1821,7 +1831,8 @@ function quickChecks(v) {
       if (ref !== "host" && !/^(0|[1-9]\d*)$/.test(ref)) out.push([1, `Unknown reference \${${ref}}: use \${1}, \${2}, … for the *s, or \${host} for the whole name.`]);
     }
     const port = val("f-target-port");
-    if (!port) out.push([1, "A target port is required for an allow rule."]);
+    if (relay) { /* no port: the tunnel decides */ }
+    else if (!port) out.push([1, "A target port is required for an allow rule."]);
     else if ((!/^\d+$/.test(port) || +port < 1 || +port > 65535)) out.push([1, "The target port must be a number from 1 to 65535."]);
     if (radio("f-tls") === "terminate" && radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the Certificates page first."]);
     for (const [id, label] of [["f-agg", "aggregated speed"], ["f-conn", "per-connection speed"]]) {
@@ -1830,6 +1841,25 @@ function quickChecks(v) {
     }
   }
   return out;
+}
+
+// fillEndpoints offers the endpoints of the config file as relay targets,
+// with current kept (marked) if the file no longer has it.
+function fillEndpoints(current) {
+  const names = [...((ui.state && ui.state.endpoints) || [])];
+  const opts = names.map((n) => { const o = el("option", "", `${n} (relay://${n})`); o.value = n; return o; });
+  if (current && !names.includes(current)) {
+    const o = el("option", "", `${current} (not in the config file)`);
+    o.value = current;
+    opts.unshift(o);
+  }
+  if (!opts.length) {
+    const o = el("option", "", "no endpoint yet: add one on the Relays page");
+    o.value = "";
+    opts.push(o);
+  }
+  $("f-target-endpoint").replaceChildren(...opts);
+  $("f-target-endpoint").value = current || (names[0] || "");
 }
 
 // syncWizard shows the fields that apply and the hints for what is typed.
@@ -1845,6 +1875,9 @@ function syncWizard() {
   const allow = radio("f-action") !== "deny";
   const serve = radio("f-action") === "serve";
   $("target-fields").hidden = !allow || serve;
+  const relay = radio("f-target-kind") === "relay";
+  $("f-f-host").hidden = $("f-f-port").hidden = relay;
+  $("f-f-endpoint").hidden = !relay;
   $("routes-fields").hidden = !serve;
   $("deny-help").hidden = allow;
   $("options-allow").hidden = !allow;
@@ -1852,7 +1885,7 @@ function syncWizard() {
 
   // ${1}, ${2}, ... in the target: explain them with a sample name.
   const cap = $("capture-help");
-  cap.hidden = !allow || serve || info.kind !== "wildcard";
+  cap.hidden = !allow || serve || relay || info.kind !== "wildcard";
   if (!cap.hidden) {
     const sample = tryNames().find((n) => n) || sampleNames(pattern);
     const re = patternRegex(pattern);
@@ -2308,7 +2341,7 @@ function selectTab(name, force) {
   clearInterval(ui.pageTimer);
   ui.pageTimer = 0;
   const every = { certs: 10000, log: 2000 }[name];
-  const load = { certs: loadCerts, auth: loadAuth, log: loadLog, config: loadConfigOnce }[name];
+  const load = { certs: loadCerts, auth: loadAuth, relays: loadRelays, log: loadLog, config: loadConfigOnce }[name];
   if (load) {
     const run = () => { if (!document.hidden) load().catch((e) => { if (e.status !== 401) pageError(name, e); }); };
     run();
@@ -2320,7 +2353,7 @@ function selectTab(name, force) {
 
 function pageError(name, e) {
   if (name === "config") cfgMessage("bad", e.message);
-  else toast(`Could not load ${name === "certs" ? "certificates" : "the log"}: ${e.message}`, true);
+  else toast(`Could not load ${{ certs: "certificates", relays: "the relays" }[name] || "the log"}: ${e.message}`, true);
 }
 
 for (const b of document.querySelectorAll(".tab")) b.addEventListener("click", () => selectTab(b.dataset.tab));
@@ -3630,6 +3663,203 @@ $("auth-dlg-form").addEventListener("submit", (ev) => {
     .then(() => $("auth-dlg").close())
     .catch((e) => setText($("auth-dlg-error"), e.message))
     .finally(() => { $("auth-dlg-save").disabled = false; });
+});
+
+// ---------- relays: exchanges (pf-simple hubs) and endpoints (tunnels) ----------
+
+let relayFile = null;  // the config file version the page shows
+let relayData = { exchanges: [], endpoints: [] };
+let relayDlg = null;   // the change the dialog is making: {kind, op, item}
+
+function loadRelays() {
+  return getJSON("api/relays").then(renderRelays);
+}
+
+// relayCheckButton is a Check button whose result shows in out.
+function relayCheckButton(kind, name, out, title) {
+  const [check] = actionButton("Check", "");
+  check.title = title;
+  check.addEventListener("click", () => {
+    check.disabled = true;
+    out.hidden = false;
+    out.className = "block oidc-check-out";
+    setText(out, "Checking…");
+    api("api/relays/check", { kind, name })
+      .then((d) => { setText(out, d.message); out.className = "block oidc-check-out " + (d.good ? "ok" : "bad"); })
+      .catch((e) => { setText(out, e.message); out.className = "block oidc-check-out bad"; })
+      .finally(() => { check.disabled = false; });
+  });
+  return check;
+}
+
+function relayFact(main, pairs) {
+  const line = el("div", "ca-line ca-facts");
+  for (const [k, v] of pairs) line.append(el("span", "ca-k", k), el("span", "mono", v));
+  main.appendChild(line);
+}
+
+// Each exchange and endpoint is a card: what it is, what uses it, and its
+// Check, Edit and Delete buttons; a check's result shows on the card.
+function renderRelays(d) {
+  relayFile = d.file;
+  relayData = { exchanges: d.exchanges || [], endpoints: d.endpoints || [] };
+  const editable = !!(d.file && d.file.editable);
+  const xs = relayData.exchanges, es = relayData.endpoints;
+  setText($("relay-x-meta"), editable ? `${xs.length} exchange${xs.length === 1 ? "" : "s"} in ${d.file.path}` : ((d.file && d.file.error) || "the config file can't be edited"));
+  setText($("relay-e-meta"), `${es.length} endpoint${es.length === 1 ? "" : "s"}`);
+  $("relay-x-add").disabled = !editable;
+  $("relay-e-add").disabled = !editable || !xs.length;
+  $("relay-e-add").title = xs.length ? "" : "Add an exchange first";
+
+  const xl = $("relay-x-list");
+  xl.replaceChildren();
+  if (!xs.length) {
+    const empty = el("div", "empty");
+    empty.append(el("span", "", "No exchange yet. Add the pf-simple hub your tunnels are on."));
+    xl.appendChild(empty);
+  }
+  for (const x of xs) {
+    const card = el("div", "ca-card auth-card relay-card");
+    card.dataset.exchange = x.name;
+    const main = el("div", "ca-main");
+    const head = el("div", "ca-head");
+    head.append(el("span", "ca-name", x.name), el("span", "chip t-muted", `${x.endpoints.length} endpoint${x.endpoints.length === 1 ? "" : "s"}`));
+    if (x.line) head.title = `exchanges at line ${x.line} of the config file`;
+    const out = el("pre", "block oidc-check-out");
+    out.hidden = true;
+    const act = el("div", "ca-actions");
+    const [edit] = actionButton("Edit", "");
+    edit.disabled = !editable;
+    edit.addEventListener("click", () => openRelayDialog({ kind: "exchange", op: "update", item: x }));
+    const del = armedButton("Delete", () => relayChange({ kind: "exchange", op: "delete", name: x.name }, `Deleted ${x.name}`).catch(() => {}));
+    del.disabled = !editable || x.endpoints.length > 0;
+    del.title = x.endpoints.length ? "Endpoints are on it: move or delete them first" : `Delete the exchange ${x.name}`;
+    act.append(relayCheckButton("exchange", x.name, out, "Reach the hub over https and see that it offers QUIC (sends no word)"), edit, del);
+    head.appendChild(act);
+    main.appendChild(head);
+    relayFact(main, [["hub", x.hub], ["ca", x.caFile || "system roots"]]);
+    relayFact(main, [["endpoints", x.endpoints.length ? x.endpoints.join(", ") : "none"]]);
+    main.appendChild(out);
+    card.appendChild(main);
+    xl.appendChild(card);
+  }
+
+  const elist = $("relay-e-list");
+  elist.replaceChildren();
+  if (!es.length) {
+    const empty = el("div", "empty");
+    empty.append(el("span", "", xs.length ? "No endpoint yet. Add a tunnel by its word, then choose it as a rule's target." : "Endpoints are tunnels on an exchange: add an exchange first."));
+    elist.appendChild(empty);
+  }
+  for (const e of es) {
+    const card = el("div", "ca-card auth-card relay-card");
+    card.dataset.endpoint = e.name;
+    const main = el("div", "ca-main");
+    const head = el("div", "ca-head");
+    head.append(el("span", "ca-name", e.name), el("span", "chip t-muted", "relay://" + e.name));
+    if (e.clientToken) head.appendChild(el("span", "chip", "client token"));
+    if (e.active) head.appendChild(el("span", "chip ok", `${e.active} open`));
+    if (e.line) head.title = `endpoints at line ${e.line} of the config file`;
+    const out = el("pre", "block oidc-check-out");
+    out.hidden = true;
+    const act = el("div", "ca-actions");
+    const [edit] = actionButton("Edit", "");
+    edit.disabled = !editable;
+    edit.addEventListener("click", () => openRelayDialog({ kind: "endpoint", op: "update", item: e }));
+    const del = armedButton("Delete", () => relayChange({ kind: "endpoint", op: "delete", name: e.name }, `Deleted ${e.name}`).catch(() => {}));
+    del.disabled = !editable || e.usedBy.length > 0;
+    del.title = e.usedBy.length ? "Rules go through it: change them first" : `Delete the endpoint ${e.name}`;
+    act.append(relayCheckButton("endpoint", e.name, out, "Ask the hub over QUIC whether the tunnel is served (a wrong word counts as a guess there)"), edit, del);
+    head.appendChild(act);
+    main.appendChild(head);
+    relayFact(main, [["exchange", e.exchange], ["word", e.word]]);
+    relayFact(main, [["used by", e.usedBy.length ? e.usedBy.map((u) => `${u.rule} on ${u.listener}` + (u.line ? ` (line ${u.line})` : "")).join(", ") : "no rule"]]);
+    main.appendChild(out);
+    card.appendChild(main);
+    elist.appendChild(card);
+  }
+}
+
+// relayChange saves one change and shows the result.
+function relayChange(change, done) {
+  return api("api/relays/save", { ...change, baseHash: relayFile.hash, baseMtime: relayFile.mtime })
+    .then((d) => {
+      if (!d.ok) throw new Error(d.error || "not saved");
+      toast(done);
+      for (const p of d.problems || []) toast(p, true);
+      return loadRelays();
+    })
+    .catch((e) => { if (!relayDlg) toast(e.message, true); loadRelays(); throw e; });
+}
+
+function openRelayDialog(change) {
+  relayDlg = change;
+  const x = change.kind === "exchange", it = change.item || {};
+  const edit = change.op === "update";
+  setText($("relay-dlg-title"), (edit ? "Edit " : "Add ") + (x ? "an exchange" : "an endpoint") + (edit ? `: ${it.name}` : ""));
+  setText($("relay-dlg-hint"), x
+    ? "A pf-simple relay hub (0.16.0 or later, with its QUIC listener on). Renaming it renames it in its endpoints."
+    : "A tunnel on an exchange. Renaming it renames it in the rules that go through it (relay://<name>).");
+  setText($("relay-name-label"), x ? "Name" : "Name (rules say relay://<name>)");
+  $("relay-name").placeholder = x ? "home-hub" : "office";
+  for (const id of ["relay-f-hub", "relay-f-ca"]) $(id).hidden = !x;
+  for (const id of ["relay-f-exchange", "relay-f-word", "relay-f-token", "relay-f-notoken"]) $(id).hidden = x;
+  $("relay-name").value = it.name || "";
+  $("relay-hub").value = it.hub || "";
+  $("relay-ca").value = it.caFile || "";
+  const sel = $("relay-exchange");
+  sel.replaceChildren(...relayData.exchanges.map((e) => { const o = el("option", "", e.name); o.value = e.name; return o; }));
+  sel.value = it.exchange || (relayData.exchanges[0] || {}).name || "";
+  $("relay-word").value = "";
+  $("relay-token").value = "";
+  $("relay-notoken").checked = edit ? !it.clientToken : true;
+  setText($("relay-word-note"), edit ? `now ${it.word}; leave blank to keep it` : "the tunnel's word, from pf-client serve");
+  setText($("relay-token-note"), edit && it.clientToken ? "set; leave blank to keep it" : "only if the serving side asks for one");
+  paintRelayToken();
+  setText($("relay-dlg-error"), "");
+  $("relay-dlg").showModal();
+  $("relay-name").focus();
+}
+
+// The token field is off while "no client token" is ticked.
+function paintRelayToken() {
+  $("relay-token").disabled = $("relay-notoken").checked;
+}
+
+$("relay-x-add").addEventListener("click", () => openRelayDialog({ kind: "exchange", op: "add" }));
+$("relay-e-add").addEventListener("click", () => openRelayDialog({ kind: "endpoint", op: "add" }));
+$("relay-notoken").addEventListener("change", () => { paintRelayToken(); if (!$("relay-notoken").checked) $("relay-token").focus(); });
+$("relay-token").addEventListener("input", () => { if ($("relay-token").value) $("relay-notoken").checked = false; });
+$("relay-dlg-cancel").addEventListener("click", () => $("relay-dlg").close());
+$("relay-dlg").addEventListener("close", () => { $("relay-word").value = ""; $("relay-token").value = ""; relayDlg = null; });
+$("relay-dlg-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const d = relayDlg, it = d.item || {};
+  const name = val("relay-name");
+  if (!name) return setText($("relay-dlg-error"), "A name is required.");
+  if (d.kind === "endpoint" && (d.op === "add" || name !== it.name) && !/^[A-Za-z0-9_+-]{1,64}$/.test(name))
+    return setText($("relay-dlg-error"), "An endpoint name is letters, digits and _+- only (rules write it as relay://<name>).");
+  const c = { kind: d.kind, op: d.op, name: d.op === "update" ? it.name : name };
+  if (d.op === "update" && name !== it.name) c.newName = name;
+  if (d.kind === "exchange") {
+    c.hub = val("relay-hub");
+    if (!/^https:\/\//i.test(c.hub)) return setText($("relay-dlg-error"), "The hub is an https:// address, e.g. https://relay.example.com/.");
+    c.caFile = val("relay-ca");
+  } else {
+    c.exchange = $("relay-exchange").value;
+    if (!c.exchange) return setText($("relay-dlg-error"), "Choose the exchange the tunnel is on.");
+    c.word = val("relay-word");
+    if (d.op === "add" && !c.word) return setText($("relay-dlg-error"), "The tunnel's word is required.");
+    c.noToken = $("relay-notoken").checked;
+    c.clientToken = c.noToken ? "" : $("relay-token").value;
+    if (!c.noToken && !c.clientToken && !(d.op === "update" && it.clientToken)) return setText($("relay-dlg-error"), "Type the client token, or tick that the tunnel asks for none.");
+  }
+  $("relay-dlg-save").disabled = true;
+  const done = d.op === "add" ? `Added ${name}` : c.newName ? `Renamed ${it.name} to ${name}` : `Saved ${name}`;
+  relayChange(c, done)
+    .then(() => $("relay-dlg").close())
+    .catch((e) => setText($("relay-dlg-error"), e.message))
+    .finally(() => { $("relay-dlg-save").disabled = false; });
 });
 
 // ---------- OIDC providers ----------

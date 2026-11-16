@@ -70,7 +70,7 @@ var configReference = []sectionDoc{
 	{"rules", "Each item of a routes item's rules. The most specific domain wins: $no_sni and literal names, then wildcards (more fixed characters first), then $anything_else. A name no rule matches is denied.", []keyDoc{
 		{"domain", "(required)", "A host name with * wildcards (a * never crosses a dot; as a whole label it is exactly one label), $no_sni for clients that send no name, or $anything_else for every name no other rule takes (checked last)."},
 		{"action", "allow", "allow or deny. deny answers with a TLS access_denied alert."},
-		{"target", "(required for allow)", "host:port to connect to; an IPv6 host in brackets, [2001:db8::1]:443. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces."},
+		{"target", "(required for allow)", "host:port to connect to; an IPv6 host in brackets, [2001:db8::1]:443. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces. Or relay://<name>: through that endpoint's tunnel (no port, no ${...})."},
 		{"cert", "(pass through)", "Terminate TLS here: auto (ACME, TLS-ALPN-01); or local-ca / local-ca:ca002 (your own CA in cert_root, made on the Certificates page, issuing one certificate per name on first use)."},
 		{"cert_domains", "the literal domain", "A list. cert: auto: exact names to issue. cert: local-ca: names or globs (*.dev.example.com, several) that get a certificate; any other name is refused (default: every name the rule matches). With $no_sni or $anything_else it may list IP addresses: a client without a host name gets one certificate for all of them (and a $no_sni rule's names), otherwise one for the address it connected to; an IP address a client sends as SNI must be listed."},
 		{"cert_validate_script", "(none)", "cert: auto: a script that decides per name not in cert_domains; exit 0 = issue."},
@@ -119,6 +119,17 @@ var configReference = []sectionDoc{
 		{"username_claim", "preferred_username, email, upn, sub", "The ID token claim that names the user in logs and X-Forwarded-User."},
 		{"groups_claim", "groups", "Where require_groups and X-Forwarded-Groups find the user's groups: a claim name, or a dotted path into nested claims."},
 		{"roles_claim", "roles", "Where require_roles and X-Forwarded-Roles find the user's roles, the same way: Keycloak realm roles are realm_access.roles, a client's resource_access.<client id>.roles."},
+	}},
+	{"exchanges", "A list of pf-simple relay hubs (0.16.0 or later, their QUIC listener on) that endpoints are on. Only the connecting side: no serve token is needed.", []keyDoc{
+		{"name", "(required)", "What an endpoint's exchange: names; unique."},
+		{"hub", "(required)", "The hub's https address, e.g. https://relay.example.com/ (the console's /pf path may be included). Its QUIC listener is found there, and that listener's certificate pinned from the answer."},
+		{"ca_file", "(system roots)", "Extra root CA for the hub's https, e.g. its self-signed ca.pem; read at load."},
+	}},
+	{"endpoints", "A list of tunnels on exchanges that rules connect through: target: relay://<name>, over QUIC (tunnel protocol 3). The tunnel's serving side, pf-client or pf-client-quic, decides where a connection lands; passing through, terminating TLS, PROXY headers and speed limits work as with a host:port. One QUIC connection per endpoint, each connection a stream on it.", []keyDoc{
+		{"name", "(required)", "What target: relay://<name> names; unique. The console makes new names from letters, digits and _+- only."},
+		{"exchange", "(required)", "The name of the exchanges item the tunnel is on."},
+		{"word", "(required)", "The tunnel's word, e.g. k3f9-x2mq-7hpa. Anyone who knows it can connect: keep it secret."},
+		{"client_token", "(none)", "The client token the serving side asks for (pf-client serve --client-token), 8 to 128 printable characters."},
 	}},
 	{"logging", "Where the two log streams go: activity (stdout) and problems (stderr).", []keyDoc{
 		{"stdout", "the process's stdout", "File for activity: accepted, route, connected, closed, stats, reloads."},

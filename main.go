@@ -9,10 +9,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -166,7 +164,7 @@ func main() {
 				case d.Allow && d.Rule.Serves():
 					fmt.Printf("%s -> served here (rule line %d, %s: %s)\n", sni, d.RuleLine, d.Rule.Kind, d.Rule.Source)
 				case d.Allow:
-					fmt.Printf("%s -> %s (rule line %d, %s: %s)\n", sni, net.JoinHostPort(d.Host, strconv.Itoa(d.Port)), d.RuleLine, d.Rule.Kind, d.Rule.Source)
+					fmt.Printf("%s -> %s (rule line %d, %s: %s)\n", sni, d.Target(), d.RuleLine, d.Rule.Kind, d.Rule.Source)
 				case d.RuleLine == 0:
 					fmt.Printf("%s -> DENY (no rule matched)\n", sni)
 				default:

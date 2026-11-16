@@ -81,6 +81,8 @@ type Config struct {
 	Listeners []Listener               // in file order; at least one
 	BasicAuth map[string]*BasicAuth    // [[basic_auth]] sections, by name
 	OIDC      map[string]*OIDCProvider // oidc items, by name
+	Exchanges map[string]*Exchange     // exchanges items, by name (relay.go)
+	Endpoints map[string]*Endpoint     // endpoints items, by name
 	// Redirect is the port 80 listener of http_to_https_redirect = true, nil
 	// when off. It has no rules and is not in Listeners: it answers every
 	// plain HTTP request with a redirect to https:// (see redirect.go).
@@ -215,6 +217,11 @@ type Rule struct {
 	Allow      bool
 	TargetHost string
 	TargetPort int
+	// EndpointName is set by target: relay://<name>: the rule connects
+	// through that endpoint's tunnel (relay.go) instead of to
+	// TargetHost:TargetPort.
+	EndpointName string
+	endpoint     *Endpoint
 
 	// TLS termination: set when the rule has cert = auto | local-ca[:caNNN].
 	// Without it the rule passes TLS through untouched.
@@ -328,6 +335,9 @@ func (r *Rule) decide(sni string, m []int) Decision {
 	}
 	if r.Serves() {
 		return Decision{Allow: true, RuleLine: r.Line, Rule: r} // served here: no target
+	}
+	if r.EndpointName != "" {
+		return Decision{Allow: true, RuleLine: r.Line, Rule: r} // through a tunnel: Decision.Target
 	}
 	host, err := expand(r.TargetHost, sni, m)
 	if err == nil {
@@ -646,6 +656,8 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 	var raws []rawRule
 	var auths []*BasicAuth
 	var providers []*OIDCProvider
+	var exchanges []*Exchange
+	var endpoints []*Endpoint
 
 	// apply sets one key of a section; every value arrives as text, a list
 	// joined with "; " (see yamlValue).
@@ -855,7 +867,7 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 		}
 		return nil
 	}
-	if err := walkYAML(cfg, text, apply, &raws, &auths, &providers); err != nil {
+	if err := walkYAML(cfg, text, apply, &raws, &auths, &providers, &exchanges, &endpoints); err != nil {
 		return nil, err
 	}
 	cfg.CertPath = filepath.Join(cfg.CARoot, acmeFolder)
@@ -900,6 +912,9 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 		return nil, err
 	}
 	if err := cfg.resolveOIDC(providers); err != nil {
+		return nil, err
+	}
+	if err := cfg.resolveRelays(exchanges, endpoints); err != nil {
 		return nil, err
 	}
 	if auto := cfg.AutoDomains(); len(auto) > 0 {
@@ -981,6 +996,14 @@ func buildRule(cfg *Config, r rawRule) (Rule, error) {
 		rule.Allow = true
 		if len(r.serviceRules) > 0 || r.console {
 			break // served here: serveSettings checks the rest
+		}
+		if r.target != nil && strings.HasPrefix(strings.ToLower(*r.target), relayScheme) {
+			name := (*r.target)[len(relayScheme):]
+			if name == "" {
+				return Rule{}, fmt.Errorf("line %d: target: %s needs the name of an endpoint, e.g. %soffice", r.targetLine, relayScheme, relayScheme)
+			}
+			rule.EndpointName = name // resolveRelays finds it
+			break
 		}
 		if r.target != nil {
 			host, port, err := splitTarget(*r.target)
@@ -1085,6 +1108,11 @@ func parsePrefixes(value string) ([]netip.Prefix, error) {
 // listenerName: letters, digits, space and -_@#~()[]<>"' (1-64, no space at
 // either end). The console quotes names that need it when it writes them.
 var listenerName = regexp.MustCompile(`^[A-Za-z0-9_@#~()\[\]<>"'-]([A-Za-z0-9 _@#~()\[\]<>"'-]{0,62}[A-Za-z0-9_@#~()\[\]<>"'-])?$`)
+
+// endpointName: what a new endpoint may be called, so relay://<name> reads
+// like an address: letters, digits and _+- (1-64). Only the console's add and
+// rename hold to it; names already in a config load as before.
+var endpointName = regexp.MustCompile(`^[A-Za-z0-9_+-]{1,64}$`)
 
 // listenerOption applies one key of a [[listener]] section.
 func listenerOption(l *Listener, key, value string) error {

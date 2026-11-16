@@ -231,6 +231,35 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		out = append(out, providers)
 	}
 
+	if len(cfg.Exchanges) > 0 {
+		exchanges := treeNode{Title: "Exchanges", Note: fmt.Sprintf("%d", len(cfg.Exchanges))}
+		for _, name := range slices.Sorted(maps.Keys(cfg.Exchanges)) {
+			x := cfg.Exchanges[name]
+			n := treeNode{Title: name, Note: "pf-simple relay hub", Line: toEditor(x.Line)}
+			n.Items = []treeItem{
+				{Key: "hub", Value: x.Hub},
+				{Key: "ca_file", Value: map[bool]string{true: "system roots", false: x.CAFile}[x.CAFile == ""]},
+			}
+			exchanges.Children = append(exchanges.Children, n)
+		}
+		out = append(out, exchanges)
+	}
+
+	if len(cfg.Endpoints) > 0 {
+		endpoints := treeNode{Title: "Endpoints", Note: fmt.Sprintf("%d", len(cfg.Endpoints))}
+		for _, name := range slices.Sorted(maps.Keys(cfg.Endpoints)) {
+			e := cfg.Endpoints[name]
+			n := treeNode{Title: name, Note: "relay://" + name + " over QUIC", Line: toEditor(e.Line)}
+			n.Items = []treeItem{
+				{Key: "exchange", Value: e.ExchangeName},
+				{Key: "word", Value: e.WordLabel() + " (in the file)"},
+				{Key: "client_token", Value: map[bool]string{true: "none", false: "set (in the file)"}[e.ClientToken == ""]},
+			}
+			endpoints.Children = append(endpoints.Children, n)
+		}
+		out = append(out, endpoints)
+	}
+
 	if auto := cfg.AutoDomains(); len(auto) > 0 || cfg.AcmeAgreeTOS {
 		certs := treeNode{Title: "Automatic certificates", Note: fmt.Sprintf("%d name(s)", len(auto))}
 		certs.Items = []treeItem{
@@ -280,7 +309,7 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 			add(route.Key, route.Describe())
 		}
 	case r.Terminates():
-		add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
+		add("target", r.TargetString())
 		n.Tag = "terminate"
 		add("cert", r.Cert)
 		if len(r.CertDomains) > 0 {
@@ -299,7 +328,7 @@ func ruleNode(r *Rule, written map[string]string, toEditor func(int) int) treeNo
 			add("upstream", "plaintext")
 		}
 	default:
-		add("target", fmt.Sprintf("%s:%d", r.TargetHost, r.TargetPort))
+		add("target", r.TargetString())
 		n.Tag = "passthrough"
 	}
 	if r.Proxy {

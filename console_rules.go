@@ -8,14 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +139,8 @@ type consoleState struct {
 	AuthGroups []string `json:"authGroups"`
 	// OIDC are the oidc item names, for the same.
 	OIDC []string `json:"oidc"`
+	// Endpoints are the endpoint names, for the rule editor's relay targets.
+	Endpoints []string `json:"endpoints"`
 }
 
 // parsedFile is the config file as last read, re-read only when it changes.
@@ -337,7 +337,7 @@ func (c *Console) state() consoleState {
 				v.Routes = append(v.Routes, route.Describe())
 			}
 		case r.Allow:
-			v.Target = net.JoinHostPort(r.TargetHost, strconv.Itoa(r.TargetPort))
+			v.Target = r.TargetString()
 		}
 		if pf.cfg == nil {
 			v.Line = 0 // line numbers of a config that is not the file's
@@ -387,7 +387,7 @@ func (c *Console) state() consoleState {
 	}
 	host, _ := os.Hostname()
 	return consoleState{
-		Host: host, Version: version, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, AuthGroups: authGroupNames(shown), OIDC: slices.Sorted(maps.Keys(shown.OIDC)),
+		Host: host, Version: version, Started: st.Started.UnixMilli(), File: pf.view, Listeners: listeners, AuthGroups: authGroupNames(shown), OIDC: slices.Sorted(maps.Keys(shown.OIDC)), Endpoints: slices.Sorted(maps.Keys(shown.Endpoints)),
 		Status: statusView{Active: st.Active.Load(), Accepted: st.Accepted.Load(),
 			Completed: st.Completed.Load(), Denied: st.Denied.Load(), Failed: st.Failed.Load(), Rejected: st.Rejected.Load(),
 			MaxConnections: rt.cfg.MaxConnections, BytesUp: st.BytesUp.Load(), BytesDown: st.BytesDown.Load()},
@@ -899,7 +899,7 @@ func routeTarget(d Decision) string {
 	case d.Rule != nil && d.Rule.Serves():
 		return "served here"
 	}
-	return net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+	return d.Target()
 }
 
 // authGroupNames is cfg's basic_auth group names, sorted.

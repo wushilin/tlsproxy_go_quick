@@ -3,7 +3,8 @@
 # (domain: "*.example.com", target: "${1}.lan:443"). A list is a YAML list:
 # [a, b] or one "- item" per line. Unknown keys and keys given twice are errors.
 #
-# Sections: global, logging, listeners, routes, basic_auth, oidc. Every
+# Sections: global, logging, listeners, routes, basic_auth, oidc, exchanges,
+# endpoints. Every
 # commented-out setting below marked "(default: ...)" shows its DEFAULT
 # value: uncommenting the line (remove "# ") unchanged changes nothing (this
 # is checked by `go test`). Only a listener with a name and a port is
@@ -198,6 +199,8 @@ logging:
 # target      (required for allow) host:port, e.g. "10.0.0.5:443"; an IPv6 host in brackets,
 #             "[2001:db8::1]:443". There is no default port. ${1}, ${2}, ... = what each *
 #             matched, from the left; ${host} (or ${0}) = the whole SNI: "${1}.internal:443".
+#             Or relay://<name>: through a pf-simple tunnel, the endpoint of that name
+#             (see exchanges and endpoints at the end); no port, no ${...}.
 #             Always in braces: a bare $1 is an error
 #
 # TLS termination (optional; without cert the TLS stream is passed through untouched):
@@ -344,3 +347,25 @@ routes:
 #
 # tlsproxy config.yaml --test-oidc (or Check OIDC on the console's Config page)
 # checks each item against its provider without anyone signing in.
+
+# --- Relays: pf-simple tunnels (optional) -----------------------------------------
+# A rule with target: relay://<endpoint> connects through a tunnel of a
+# pf-simple relay hub (0.16.0 or later, its QUIC listener on) instead of to a
+# host:port. The tunnel's serving side (pf-client serve, pf-client-quic serve,
+# an SDK) decides where the connection lands. Passing TLS through, terminating
+# it, proxy: v1 | v2 and speed limits all work as with a host:port target.
+# exchanges are the hubs: name and hub are required; ca_file for a hub with
+# its own CA (pf-simple's self_signed ca.pem). endpoints are the tunnels on
+# them: name, exchange and word are required; client_token only if the
+# serving side asks for one. The word and the client token are secrets. The
+# console's Relays page edits both.
+#
+# exchanges:
+#   - name: home-hub
+#     hub: https://relay.example.com/
+#     ca_file: /etc/tlsproxy/relay-ca.pem
+# endpoints:
+#   - name: office
+#     exchange: home-hub
+#     word: k3f9-x2mq-7hpa
+#     client_token: "correct-horse-battery"

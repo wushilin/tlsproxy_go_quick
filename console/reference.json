@@ -234,7 +234,7 @@
       {
         "key": "target",
         "default": "(required for allow)",
-        "meaning": "host:port to connect to; an IPv6 host in brackets, [2001:db8::1]:443. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces."
+        "meaning": "host:port to connect to; an IPv6 host in brackets, [2001:db8::1]:443. ${1}, ${2}, ... are what each * matched; ${host} (or ${0}) is the whole name. Always in braces. Or relay://\u003cname\u003e: through that endpoint's tunnel (no port, no ${...})."
       },
       {
         "key": "cert",
@@ -463,6 +463,53 @@
         "key": "roles_claim",
         "default": "roles",
         "meaning": "Where require_roles and X-Forwarded-Roles find the user's roles, the same way: Keycloak realm roles are realm_access.roles, a client's resource_access.\u003cclient id\u003e.roles."
+      }
+    ]
+  },
+  {
+    "section": "exchanges",
+    "about": "A list of pf-simple relay hubs (0.16.0 or later, their QUIC listener on) that endpoints are on. Only the connecting side: no serve token is needed.",
+    "keys": [
+      {
+        "key": "name",
+        "default": "(required)",
+        "meaning": "What an endpoint's exchange: names; unique."
+      },
+      {
+        "key": "hub",
+        "default": "(required)",
+        "meaning": "The hub's https address, e.g. https://relay.example.com/ (the console's /pf path may be included). Its QUIC listener is found there, and that listener's certificate pinned from the answer."
+      },
+      {
+        "key": "ca_file",
+        "default": "(system roots)",
+        "meaning": "Extra root CA for the hub's https, e.g. its self-signed ca.pem; read at load."
+      }
+    ]
+  },
+  {
+    "section": "endpoints",
+    "about": "A list of tunnels on exchanges that rules connect through: target: relay://\u003cname\u003e, over QUIC (tunnel protocol 3). The tunnel's serving side, pf-client or pf-client-quic, decides where a connection lands; passing through, terminating TLS, PROXY headers and speed limits work as with a host:port. One QUIC connection per endpoint, each connection a stream on it.",
+    "keys": [
+      {
+        "key": "name",
+        "default": "(required)",
+        "meaning": "What target: relay://\u003cname\u003e names; unique. The console makes new names from letters, digits and _+- only."
+      },
+      {
+        "key": "exchange",
+        "default": "(required)",
+        "meaning": "The name of the exchanges item the tunnel is on."
+      },
+      {
+        "key": "word",
+        "default": "(required)",
+        "meaning": "The tunnel's word, e.g. k3f9-x2mq-7hpa. Anyone who knows it can connect: keep it secret."
+      },
+      {
+        "key": "client_token",
+        "default": "(none)",
+        "meaning": "The client token the serving side asks for (pf-client serve --client-token), 8 to 128 printable characters."
       }
     ]
   },

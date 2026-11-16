@@ -204,9 +204,9 @@ routes:
 port 443 the [web console](#web-console) owns that port on all addresses,
 on its listener `$console`: route these rules to `$console` instead.)
 
-- **The file has five sections**, each optional but `listeners` (unless the
-  console provides the only one): `global`, `logging`, `listeners`, `routes`
-  and `basic_auth`. `routes` is a list of items, one per listener: its name in
+- **The file has these sections**, each optional but `listeners` (unless the
+  console provides the only one): `global`, `logging`, `listeners`, `routes`,
+  `basic_auth`, `oidc`, `exchanges` and `endpoints`. `routes` is a list of items, one per listener: its name in
   `listener:` and its `rules`, a list. An unknown key, or a key given twice,
   is a load error with its line.
 - **Coming from `config.toml`** (before v1.5.0): there is no built-in
@@ -794,6 +794,79 @@ routes:
   From anybody else a header is never looked for (it is simply a bad
   ClientHello): otherwise any client could choose the address you log, evade
   the per-source limit, and lie to your backends.
+
+## Through a pf-simple relay hub (`exchanges`, `endpoints`)
+
+A target can be a tunnel of a [pf-simple](https://github.com/wushilin/pf-simple)
+relay hub instead of a host:port: `target: relay://<endpoint>`. This reaches
+a backend that cannot be reached directly, behind NAT or a firewall that
+allows only outgoing connections, as long as it can reach the hub too. That
+side runs `pf-client serve` or `pf-client-quic serve` (or a pf-simple SDK),
+and that side decides where each connection lands.
+
+```yaml
+routes:
+  - listener: https
+    rules:
+      - domain: office.example.com     # passed through: the client's TLS goes all the way
+        target: relay://office
+
+      - domain: wiki.example.com       # terminated here, plaintext through the tunnel
+        cert: auto
+        upstream_tls: false
+        target: relay://wiki
+        proxy: v2                      # the header goes through the tunnel too
+
+exchanges:                             # the hubs
+  - name: home-hub
+    hub: https://relay.example.com:18222/
+    ca_file: /etc/tlsproxy/relay-ca.pem     # the hub's own CA (pf-simple tls = "self_signed")
+
+endpoints:                             # the tunnels on them
+  - name: office
+    exchange: home-hub
+    word: k3f9-x2mq-7hpa
+  - name: wiki
+    exchange: home-hub
+    word: h7cq-m2xe-9tka
+    client_token: "correct-horse-battery"   # only if the serving side asks for one
+```
+
+- **The console's Relays page** adds, edits and deletes exchanges and
+  endpoints, and checks them: an exchange's **Check** reaches the hub over
+  https and sees that it offers QUIC, sending no word (so the hub never
+  counts it as a wrong guess); an endpoint's **Check** asks the hub over
+  QUIC whether the tunnel is served. Renaming one renames it where it is
+  used. The rule editor offers the endpoints as a target.
+- **Over QUIC only** (tunnel protocol 3): the hub must be pf-simple 0.16.0
+  or later with its QUIC listener on (`[tunnel.quic]`), and UDP must get
+  from this proxy to it. The serving side may use QUIC or WebSockets
+  (`pf-client` or `pf-client-quic`): the hub joins the two.
+- **Only the connecting side**: an exchange needs no serve token. (Serving
+  this proxy's own listeners through a hub may come later.)
+- **Everything a rule does works through a tunnel**, as with a host:port:
+  passing TLS through, terminating it with a plaintext or TLS upstream
+  (`upstream_tls`, `upstream_tls_verify`, `upstream_sni`), `proxy: v1 | v2`,
+  and speed limits. Only splice(2) is out: the bytes are copied.
+- **One QUIC connection per endpoint**, made at the first connection and
+  made again when it is lost; every connection is a stream on it. A reload
+  keeps it while the endpoint's settings (its exchange's included) stay the
+  same. An endpoint a reload removes or changes is closed once its last
+  connection ends.
+- **`hub`** is the hub's https address, where the QUIC listener is found.
+  The listener's own certificate is pinned from that answer, so only the
+  https certificate needs to be trusted: from the system roots, or
+  `ca_file`.
+- **`word` and `client_token` are secrets**: whoever knows them can connect
+  to the tunnel. Logs and the console show only the word's first group, and
+  the console never sends either back to the browser.
+- **A failure on the far side** (the serving side gone, or unable to reach
+  its target) arrives as the reason the connection closed, in the log and
+  the flow log, since the hub answers before the serving side does. A wrong
+  word or client token is `connect failed: endpoint <name>: access denied`.
+- The connection's peer in the log and the console is the hub's QUIC
+  address and the hub's id of the connection (`conn ab12cd34`), the same id
+  the hub's console and the serving side show.
 
 ## Speed limits
 
