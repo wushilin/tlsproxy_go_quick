@@ -22,6 +22,7 @@
 #> console.example.com    => CONSOLE
 #> other.org              => DENY
 #> alt: www.example.com   => 192.168.1.31:443
+#> alt: office.example.com => relay://office
 #> alt: console.example.com => DENY
 
 global:
@@ -184,6 +185,26 @@ routes:
     rules:
       - domain: www.example.com
         target: "192.168.1.31:443"
+
+      # Through a pf-simple tunnel (the endpoint office, below): the
+      # serving side of the tunnel decides where it lands. Terminated here,
+      # plaintext through the tunnel.
+      - domain: office.example.com
+        cert: auto
+        upstream_tls: false
+        target: relay://office
+
+# pf-simple relay hubs, and the tunnels on them that rules connect through
+# with target: relay://<endpoint> (over QUIC).
+exchanges:
+  - name: home-hub
+    hub: https://relay.example.com/
+    # ca_file: /etc/tlsproxy/relay-ca.pem              # the hub's own CA (read at load)
+endpoints:
+  - name: office
+    exchange: home-hub
+    word: k3f9-x2mq-7hpa
+    client_token: "correct-horse-battery"              # only if the serving side asks for one
 
 # Who serve entries with basic_auth: team let in. Make a hash with tlsproxy --hash-password.
 basic_auth:

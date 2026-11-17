@@ -23,6 +23,13 @@ package main
 //	oidc:            identity providers that serve entries can ask for
 //	  - name: corp
 //	    issuer: https://id.example.com/rust-oidc/example.com/v2.0
+//	exchanges:       pf-simple relay hubs
+//	  - name: home-hub
+//	    hub: https://relay.example.com/
+//	endpoints:       tunnels on them, that rules connect through (target: relay://office)
+//	  - name: office
+//	    exchange: home-hub
+//	    word: k3f9-x2mq-7hpa
 //
 // A list is a YAML list ("; " joined inside, which every list key reads).
 // Unknown keys and keys given twice are errors, with their line.
@@ -38,7 +45,7 @@ import (
 )
 
 // topLevel are the file's sections, in the order a new file lists them.
-var topLevel = []string{"global", "logging", "listeners", "routes", "basic_auth", "oidc"}
+var topLevel = []string{"global", "logging", "listeners", "routes", "basic_auth", "oidc", "exchanges", "endpoints"}
 
 // parseYAML reads text into its document node; an empty file is an empty
 // mapping.
@@ -114,9 +121,9 @@ func yamlValue(key string, v *yaml.Node) (string, error) {
 }
 
 // walkYAML reads the file into apply (global, logging, listener and rule
-// keys), raws (the rules, built once the listeners are known), auths and
-// providers.
-func walkYAML(cfg *Config, text string, apply func(section, key, value string, line int) error, raws *[]rawRule, auths *[]*BasicAuth, providers *[]*OIDCProvider) error {
+// keys), raws (the rules, built once the listeners are known), auths,
+// providers, exchanges and endpoints.
+func walkYAML(cfg *Config, text string, apply func(section, key, value string, line int) error, raws *[]rawRule, auths *[]*BasicAuth, providers *[]*OIDCProvider, exchanges *[]*Exchange, endpoints *[]*Endpoint) error {
 	doc, err := parseYAML(text)
 	if err != nil {
 		return err
@@ -185,6 +192,22 @@ func walkYAML(cfg *Config, text string, apply func(section, key, value string, l
 				p, err := walkOIDC(item)
 				if err == nil {
 					*providers = append(*providers, p)
+				}
+				return err
+			})
+		case "exchanges":
+			err = eachItem(v, "exchanges", func(item *yaml.Node) error {
+				x, err := walkExchange(item)
+				if err == nil {
+					*exchanges = append(*exchanges, x)
+				}
+				return err
+			})
+		case "endpoints":
+			err = eachItem(v, "endpoints", func(item *yaml.Node) error {
+				e, err := walkEndpoint(item)
+				if err == nil {
+					*endpoints = append(*endpoints, e)
 				}
 				return err
 			})
@@ -336,6 +359,72 @@ func walkServe(r *rawRule, v *yaml.Node) error {
 		r.serviceRules = append(r.serviceRules, raw)
 		return nil
 	})
+}
+
+// relayItem reads the keys of an exchanges or endpoints item into set,
+// which returns false for a key it does not know.
+func relayItem(item *yaml.Node, what, keys string, set func(key, value string) bool) (name string, err error) {
+	items, err := pairs(item, "an "+what+" item")
+	if err != nil {
+		return "", err
+	}
+	for _, it := range items {
+		value, err := yamlValue(it[0].Value, it[1])
+		if err != nil {
+			return "", err
+		}
+		if it[0].Value == "name" {
+			if name = value; !listenerName.MatchString(value) {
+				return "", fmt.Errorf("line %d: name must be 1-64 letters, digits, spaces or -_@#~()[]<>\"' (no space at either end), got %q", it[0].Line, value)
+			}
+			continue
+		}
+		if !set(it[0].Value, value) {
+			return "", fmt.Errorf("line %d: unknown key %q in an %s item (%s)", it[0].Line, it[0].Value, what, keys)
+		}
+	}
+	if name == "" {
+		return "", fmt.Errorf("line %d: an %s item needs name: <name>", item.Line, what)
+	}
+	return name, nil
+}
+
+// walkExchange reads one exchanges item; checkExchange validates it.
+func walkExchange(item *yaml.Node) (*Exchange, error) {
+	x := &Exchange{Line: item.Line}
+	name, err := relayItem(item, "exchanges", "name, hub, ca_file", func(key, value string) bool {
+		switch key {
+		case "hub":
+			x.Hub = value
+		case "ca_file":
+			x.CAFile = value
+		default:
+			return false
+		}
+		return true
+	})
+	x.Name = name
+	return x, err
+}
+
+// walkEndpoint reads one endpoints item; checkEndpoint validates it.
+func walkEndpoint(item *yaml.Node) (*Endpoint, error) {
+	e := &Endpoint{Line: item.Line}
+	name, err := relayItem(item, "endpoints", "name, exchange, word, client_token", func(key, value string) bool {
+		switch key {
+		case "exchange":
+			e.ExchangeName = value
+		case "word":
+			e.Word = value
+		case "client_token":
+			e.ClientToken = value
+		default:
+			return false
+		}
+		return true
+	})
+	e.Name = name
+	return e, err
 }
 
 // walkBasicAuth reads one basic_auth item.

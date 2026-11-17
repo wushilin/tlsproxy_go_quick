@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,6 +123,7 @@ type Server struct {
 	oidc   *oidcAuth // sign-in with oidc items: the cookie key and providers' keys
 
 	dialer *targetDialer // resolves targets (cached) and connects
+	relays *relayPool    // the clients of relay targets' tunnels (relay.go)
 
 	// Connections per source address that have not sent their ClientHello yet.
 	handshakes *sourceCounts // per source, still sending a ClientHello
@@ -217,7 +217,7 @@ func (s *Server) sessionTicketKeys() [][32]byte {
 
 // NewServer fails if a CA a rule names cannot be opened.
 func NewServer(cfg *Config) (*Server, error) {
-	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), handshakes: newSourceCounts(), nonces: newNonceCache(), auth: newAuthChecker(), oidc: newOIDCAuth()}
+	s := &Server{stats: NewStats(), certs: NewCertManager(), reloadNow: make(chan chan<- []string, 1), dialer: newTargetDialer(), relays: newRelayPool(), handshakes: newSourceCounts(), nonces: newNonceCache(), auth: newAuthChecker(), oidc: newOIDCAuth()}
 	if err := s.certs.Apply(cfg); err != nil {
 		return nil, err
 	}
@@ -535,6 +535,7 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 	s.stats.prepare(cfg) // before it goes live: connections only read these counters
 	s.runtime.Store(rt)
 	s.retire(old.serve)
+	s.relays.sync(cfg)                                   // tunnels no longer used close once their connections end
 	problems = append(problems, s.syncListeners(cfg)...) // after the store: a new listener's connections need its config
 	extra := ""
 	if rt.pool != old.pool {
@@ -817,8 +818,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		client.Write(alertAccessDenied)
 		return
 	}
-	dest := net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
-	destDisp := dest // [2001:db8::1]:443 for an IPv6 target
+	destDisp := d.Target() // [2001:db8::1]:443 for an IPv6 target, relay://<name> through a tunnel
 	if d.Rule.Serves() {
 		destDisp = "served here"
 	}
@@ -863,7 +863,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	}
 
 	t0 := time.Now()
-	up, err := s.dialer.Dial(d.Host, d.Port, cfg.ConnectTimeout)
+	up, err := s.dialTarget(d, cfg)
 	if err != nil {
 		rt.pool.Put(helloBuf)
 		s.stats.Failed.Add(1)
@@ -873,11 +873,14 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	}
 	defer up.Close()
 	peer := up.RemoteAddr().String()
+	if rc, ok := up.(*relayConn); ok {
+		peer = rc.Peer()
+	}
 	c.mu.Lock()
 	c.Peer, c.UpLocal = peer, up.LocalAddr().String()
 	c.mu.Unlock()
 
-	var clientSide, serverSide duplex = client, up.(*net.TCPConn)
+	var clientSide, serverSide duplex = client, up
 	mode := ""
 	terminateHere := d.Rule != nil && d.Rule.Terminates()
 	if terminateHere && info.offers(acme.ALPNProto) {
@@ -1046,6 +1049,19 @@ func withLimits(mode string, r *Rule) string {
 type duplex interface {
 	net.Conn
 	CloseWrite() error
+}
+
+// dialTarget connects to where d says: a TCP connection to its host and
+// port, or a stream through its relay's tunnel.
+func (s *Server) dialTarget(d Decision, cfg *Config) (duplex, error) {
+	if e := d.Rule.endpoint; e != nil {
+		return s.relays.dial(e, cfg.ConnectTimeout)
+	}
+	up, err := s.dialer.Dial(d.Host, d.Port, cfg.ConnectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return up.(*net.TCPConn), nil
 }
 
 // prefixConn replays bytes that were already read from the socket (the

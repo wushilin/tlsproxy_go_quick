@@ -233,7 +233,7 @@ func route(t *testing.T, c *Config, sni string) string {
 	case d.Allow && d.Rule != nil && d.Rule.Serves():
 		return "SERVED"
 	case d.Allow:
-		return net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+		return d.Target()
 	}
 	return "DENY"
 }
@@ -624,7 +624,7 @@ func parserSource() ([]byte, error) {
 
 // parserNotOptions are the strings in the parser's case clauses that are
 // sections, values or retired keys, not options.
-var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, "listeners": true, "routes": true, "rules": true, // sections
+var parserNotOptions = map[string]bool{"global": true, "logging": true, "console": true, "host": true, "listeners": true, "routes": true, "rules": true, "exchanges": true, "endpoints": true, // sections
 	"allow": true, "deny": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true, "auto": true, "none": true, "v1": true, "v2": true, "": true, // values
 	"proxy_protocol_from": true,                    // renamed: a load error that names proxy_trust_source
 	"ca_root":             true, "cert_path": true, // renamed cert_root, and gone: load errors that say so
@@ -879,6 +879,8 @@ func TestConfigReference(t *testing.T) {
 		"serve entries": "listeners:\n  - {name: a, port: 1}\nroutes:\n  - listener: a\n    rules:\n      - {domain: x.test, cert: local-ca, serve: [{%s: x}]}\n",
 		"basic_auth":    "basic_auth:\n  - %s: x\n",
 		"oidc":          "oidc:\n  - %s: x\n",
+		"exchanges":     "exchanges:\n  - %s: x\n",
+		"endpoints":     "endpoints:\n  - %s: x\n",
 	}
 	for _, sec := range configReference {
 		form, ok := where[sec.Section]

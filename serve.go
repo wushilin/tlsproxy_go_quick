@@ -189,6 +189,7 @@ func (s *Server) stopServing() {
 	for _, st := range all {
 		st.close()
 	}
+	s.relays.closeAll()
 }
 
 // close lets go of everything a state holds, now.
