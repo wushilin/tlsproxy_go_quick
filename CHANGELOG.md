@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8.0
+
+- pf-simple 0.16.3. An exchange's hub may be at a path of its own: give
+  the path in `hub`, e.g. `hub: https://gate.example.com/xzfe-aeeg-e2da/`.
+  With no path it is `/pf`, as before. The console's exchange Check now
+  asks the hub at that path (it always asked `/pf`). If nothing answers
+  there, it says the hub may be at another path.
+- pf-simple 0.16.2: when one side of a relayed connection half-closes and
+  then fails, the other side now gets the failure's reason instead of a
+  clean finish or an idle timeout.
+
 ## v1.7.0
 
 - Relay targets: `target: relay://<endpoint>` connects through a tunnel of

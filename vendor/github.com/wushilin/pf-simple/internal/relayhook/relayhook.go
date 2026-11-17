@@ -13,7 +13,7 @@ import (
 
 // Params are what a transport needs of the Client, read at each call.
 type Params struct {
-	Base        string // https://host[:port]
+	Base        string // https://host[:port]/prefix, the hub's endpoints under Base + tunnel.APIPath
 	Word        string
 	ServeToken  string
 	Name        string

@@ -15,13 +15,17 @@ import (
 // The relay's endpoints and headers. Everything secret travels in headers,
 // which reverse proxies do not log by default; URLs they do.
 const (
-	Path         = "/pf/api/tunnel"   // + "/serve", "/connect", "/accept", "/check"
-	HeaderWord   = "X-PF-Tunnel-Word" // the tunnel's secret word
-	HeaderServe  = "X-PF-Serve-Token" // permission to register; only "serve" sends it
-	HeaderConn   = "X-PF-Tunnel-Conn"
-	HeaderName   = "X-PF-Tunnel-Name" // what the tunnel is called in the console; URL-escaped
-	HeaderTarget = "X-PF-Tunnel-Target"
-	HeaderError  = "X-PF-Tunnel-Error"
+	// A hub is mounted at a prefix, DefaultPrefix unless its admin chose
+	// another (PROTOCOL.md §2); its endpoints are under prefix + APIPath.
+	DefaultPrefix = "/pf"
+	APIPath       = "/api/tunnel"           // + "/serve", "/connect", "/accept", "/check", ...
+	Path          = DefaultPrefix + APIPath // the endpoints of a hub at the default prefix
+	HeaderWord    = "X-PF-Tunnel-Word"      // the tunnel's secret word
+	HeaderServe   = "X-PF-Serve-Token"      // permission to register; only "serve" sends it
+	HeaderConn    = "X-PF-Tunnel-Conn"
+	HeaderName    = "X-PF-Tunnel-Name" // what the tunnel is called in the console; URL-escaped
+	HeaderTarget  = "X-PF-Tunnel-Target"
+	HeaderError   = "X-PF-Tunnel-Error"
 	// A serving side may ask for a client token on top of the word. It
 	// registers the token's SHA-256, and the connecting side sends the token.
 	HeaderClientHash  = "X-PF-Client-Token-SHA256"
@@ -155,4 +159,31 @@ func Fingerprint(cert *x509.Certificate) string {
 func HashClientToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// MaxPrefix is the longest prefix a hub may be mounted at.
+const MaxPrefix = 200
+
+var prefixSegment = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,64}$`)
+
+// CleanPrefix checks the path a hub is mounted at (PROTOCOL.md §2) and
+// returns it without a trailing "/". An empty path, or "/", is
+// DefaultPrefix.
+func CleanPrefix(p string) (string, error) {
+	if p == "" || p == "/" {
+		return DefaultPrefix, nil
+	}
+	p = strings.TrimSuffix(p, "/")
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("invalid path %q: it starts with /", p)
+	}
+	if len(p) > MaxPrefix {
+		return "", fmt.Errorf("invalid path %q: longer than %d characters", p, MaxPrefix)
+	}
+	for _, seg := range strings.Split(p[1:], "/") {
+		if !prefixSegment.MatchString(seg) || seg == "." || seg == ".." {
+			return "", fmt.Errorf("invalid path %q: each part between slashes is 1 to 64 of A-Z a-z 0-9 . _ ~ -, and not . or ..", p)
+		}
+	}
+	return p, nil
 }

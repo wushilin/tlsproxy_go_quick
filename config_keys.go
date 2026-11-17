@@ -122,7 +122,7 @@ var configReference = []sectionDoc{
 	}},
 	{"exchanges", "A list of pf-simple relay hubs (0.16.0 or later, their QUIC listener on) that endpoints are on. Only the connecting side: no serve token is needed.", []keyDoc{
 		{"name", "(required)", "What an endpoint's exchange: names; unique."},
-		{"hub", "(required)", "The hub's https address, e.g. https://relay.example.com/ (the console's /pf path may be included). Its QUIC listener is found there, and that listener's certificate pinned from the answer."},
+		{"hub", "(required)", "The hub's https address, e.g. https://relay.example.com/. A hub at a path of its own (pf-simple 0.16.3 or later, [console] path) has it in the address: https://relay.example.com/xzfe-aeeg-e2da/; with none, /pf. Its QUIC listener is found there, and that listener's certificate pinned from the answer."},
 		{"ca_file", "(system roots)", "Extra root CA for the hub's https, e.g. its self-signed ca.pem; read at load."},
 	}},
 	{"endpoints", "A list of tunnels on exchanges that rules connect through: target: relay://<name>, over QUIC (tunnel protocol 3). The tunnel's serving side, pf-client or pf-client-quic, decides where a connection lands; passing through, terminating TLS, PROXY headers and speed limits work as with a host:port. One QUIC connection per endpoint, each connection a stream on it.", []keyDoc{

@@ -105,7 +105,7 @@ func (t *transport) Close() error {
 // discover asks the hub's HTTPS endpoint where its QUIC listener is
 // (§13.2). op is "serve" or "connect", and the credentials are the run's.
 func (t *transport) discover(ctx context.Context, p relayhook.Params, op string) (*quictun.Discovery, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.Base+tunnel.Path+"/quic", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.Base+tunnel.APIPath+"/quic", nil)
 	if err != nil {
 		return nil, err
 	}

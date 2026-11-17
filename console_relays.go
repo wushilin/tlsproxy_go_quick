@@ -377,6 +377,15 @@ func (c *Console) relayCheck(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// hubPath is where a hub's address says it is mounted: the address's path
+// without its trailing slash, or /pf when it has none (as the SDK reads it).
+func hubPath(p string) string {
+	if p = strings.TrimSuffix(p, "/"); p == "" {
+		return "/pf"
+	}
+	return p
+}
+
 // checkHub asks x's hub where its QUIC listener is, without saying what
 // for: a pf-simple hub that offers QUIC answers 400 (no X-PF-Op), one
 // without it 404.
@@ -391,7 +400,7 @@ func checkHub(ctx context.Context, x *Exchange) (bool, string) {
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
 	defer client.CloseIdleConnections()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+u.Host+"/pf/api/tunnel/quic", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+u.Host+hubPath(u.Path)+"/api/tunnel/quic", nil)
 	if err != nil {
 		return false, err.Error()
 	}
@@ -413,7 +422,7 @@ func checkHub(ctx context.Context, x *Exchange) (bool, string) {
 	case http.StatusBadRequest:
 		return true, "a pf-simple hub with QUIC (0.16.0 or later)" + until + ". Check an endpoint to try a tunnel over QUIC"
 	case http.StatusNotFound:
-		return false, "the https answers" + until + ", but offers no QUIC tunnels: not a pf-simple hub, one older than 0.16.0, or its relay hub is off"
+		return false, "the https answers" + until + ", but offers no QUIC tunnels at " + hubPath(u.Path) + ": not a pf-simple hub, one older than 0.16.0, its relay hub is off, or the hub is at another path (put it in the address: https://host/<path>/)"
 	default:
 		return false, fmt.Sprintf("the https answers %s%s: not what a pf-simple hub says", resp.Status, until)
 	}
