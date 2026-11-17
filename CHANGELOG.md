@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.7.0
 
 - Relay targets: `target: relay://<endpoint>` connects through a tunnel of
   a pf-simple relay hub (0.16.0 or later), over QUIC, instead of to a
@@ -24,6 +24,14 @@
   console's rule editor takes it as a field, with Show, Copy and Generate
   (made in the browser), and masks it in a rule's preview; it no longer
   writes secret files.
+- pf-simple 0.16.1, with the Go QUIC SDK's review fixes. A client's QUIC
+  connection window starts at 16 MiB, so stalled streams no longer block
+  the hub's answers and opens. Closing a stream after our eof no longer
+  discards data already written. Close and reconnects follow the caller's
+  context.
+- TLS top-up: each read gets its own deadline, rather than one deadline for
+  the whole loop, so the records waiting in the socket are all read when
+  reads are slow (seen on Windows).
 
 ## v1.6.0
 
