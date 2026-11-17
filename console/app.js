@@ -3843,7 +3843,7 @@ $("relay-dlg-form").addEventListener("submit", (ev) => {
   if (d.op === "update" && name !== it.name) c.newName = name;
   if (d.kind === "exchange") {
     c.hub = val("relay-hub");
-    if (!/^https:\/\//i.test(c.hub)) return setText($("relay-dlg-error"), "The hub is an https:// address, e.g. https://relay.example.com/.");
+    if (!/^https:\/\//i.test(c.hub)) return setText($("relay-dlg-error"), "The hub is an https:// address, e.g. https://relay.example.com/ (with the hub's path if it has one).");
     c.caFile = val("relay-ca");
   } else {
     c.exchange = $("relay-exchange").value;

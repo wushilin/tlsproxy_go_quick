@@ -478,7 +478,7 @@
       {
         "key": "hub",
         "default": "(required)",
-        "meaning": "The hub's https address, e.g. https://relay.example.com/ (the console's /pf path may be included). Its QUIC listener is found there, and that listener's certificate pinned from the answer."
+        "meaning": "The hub's https address, e.g. https://relay.example.com/. A hub at a path of its own (pf-simple 0.16.3 or later, [console] path) has it in the address: https://relay.example.com/xzfe-aeeg-e2da/; with none, /pf. Its QUIC listener is found there, and that listener's certificate pinned from the answer."
       },
       {
         "key": "ca_file",

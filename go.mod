@@ -7,7 +7,7 @@ require golang.org/x/crypto v0.57.0
 require github.com/wushilin/go-named-queue v0.1.0
 
 require (
-	github.com/wushilin/pf-simple v0.16.1
+	github.com/wushilin/pf-simple v0.16.3
 	go.yaml.in/yaml/v3 v3.0.5
 )
 

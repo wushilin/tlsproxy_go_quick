@@ -104,20 +104,28 @@ func NewClient(base, word string, tlsConfig *tls.Config) (*Client, error) {
 	}, nil
 }
 
-// normalizeBase accepts the relay's address with or without the console's
-// /pf path, and insists on https.
+// normalizeBase checks the relay's address, https://host[:port] and an
+// optional path that is where the hub is mounted (PROTOCOL.md §2), and
+// returns it with that path: https://host[:port]/pf when there is none.
 func normalizeBase(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("invalid server URL %q: use https://host[:port]/", raw)
+		return "", fmt.Errorf("invalid server URL %q: use https://host[:port]/, with the hub's path if it has one", raw)
 	}
 	if u.Scheme != "https" {
 		return "", fmt.Errorf("invalid server URL %q: only https:// is supported", raw)
 	}
-	if p := strings.TrimSuffix(u.Path, "/"); p != "" && p != "/pf" {
-		return "", fmt.Errorf("invalid server URL %q: give the server's address only, like https://%s/", raw, u.Host)
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" {
+		return "", fmt.Errorf("invalid server URL %q: give the server's address and the hub's path only, like https://%s/ or https://%s/my-hub-path/", raw, u.Host, u.Host)
 	}
-	return "https://" + u.Host, nil
+	if u.RawPath != "" || strings.Contains(u.EscapedPath(), "%") {
+		return "", fmt.Errorf("invalid server URL %q: the path may not hold %%-escapes", raw)
+	}
+	prefix, err := tunnel.CleanPrefix(u.Path)
+	if err != nil {
+		return "", fmt.Errorf("invalid server URL %q: %w", raw, err)
+	}
+	return "https://" + u.Host + prefix, nil
 }
 
 // needs lists what a request to endpoint depends on beyond protocol 0.
@@ -214,7 +222,7 @@ func (c *Client) connectHeader() http.Header {
 
 func (c *Client) dial(ctx context.Context, endpoint string, h http.Header) (*tunnel.Conn, error) {
 	c.offer(endpoint, h)
-	ws, err := tunnel.Dial(ctx, c.base+tunnel.Path+"/"+endpoint, h, c.tls)
+	ws, err := tunnel.Dial(ctx, c.base+tunnel.APIPath+"/"+endpoint, h, c.tls)
 	var se *tunnel.StatusError
 	switch {
 	case err == nil:
@@ -233,7 +241,7 @@ func (c *Client) dial(ctx context.Context, endpoint string, h http.Header) (*tun
 
 // get makes a plain request; anything but 2xx is a *StatusError.
 func (c *Client) get(ctx context.Context, endpoint string, h http.Header) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+tunnel.Path+"/"+endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+tunnel.APIPath+"/"+endpoint, nil)
 	if err != nil {
 		return err
 	}
@@ -287,7 +295,7 @@ var ErrNoProbe = errors.New("this server does not answer a version probe: it is 
 // speaks. It needs a valid serve token: without one the server says
 // nothing about itself.
 func (c *Client) Probe(ctx context.Context) (*ServerInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+tunnel.Path+"/version", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+tunnel.APIPath+"/version", nil)
 	if err != nil {
 		return nil, err
 	}

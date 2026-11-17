@@ -149,3 +149,37 @@ endpoints:
 		}
 	}
 }
+
+// A hub at a path of its own (pf-simple [console] path): the exchange's hub
+// has the path in it, and the checks and the tunnel go there; without the
+// path the hub is not found.
+func TestRelayHubAtPath(t *testing.T) {
+	const path = "/xzfe-aeeg-e2da"
+	hub := startHubAt(t, path)
+	echo := backend(t, func(c *net.TCPConn) {})
+	served := hub.serve(t, true, fmt.Sprintf("127.0.0.1:%d", echo), "")
+	root := strings.TrimSuffix(hub.url, path+"/") + "/"
+	cfg := mustLoadYAML(t, relayListener+hub.exchange()+fmt.Sprintf(`  - {name: no-path, hub: %q, ca_file: %q}
+  - {name: no-slash, hub: %q, ca_file: %q}
+endpoints:
+%s  - {name: wrong-hub, exchange: no-path, word: %s}
+`, root, hub.caFile, strings.TrimSuffix(hub.url, "/"), hub.caFile, endpointItem("served", served, ""), served))
+	ctx := context.Background()
+
+	for name, want := range map[string]string{
+		"hub":      "a pf-simple hub with QUIC",
+		"no-slash": "a pf-simple hub with QUIC",
+		"no-path":  "the hub is at another path",
+	} {
+		good, msg := checkHub(ctx, cfg.Exchanges[name])
+		if good != (name != "no-path") || !strings.Contains(msg, want) {
+			t.Errorf("exchange %s (%s): %v %s", name, cfg.Exchanges[name].Hub, good, msg)
+		}
+	}
+	if good, msg := checkTunnel(ctx, cfg.Endpoints["served"], "test"); !good {
+		t.Errorf("the tunnel through %s: %s", hub.url, msg)
+	}
+	if good, msg := checkTunnel(ctx, cfg.Endpoints["wrong-hub"], "test"); good {
+		t.Errorf("the tunnel without the hub's path: %s", msg)
+	}
+}

@@ -101,7 +101,8 @@ func TestRelayConfigErrors(t *testing.T) {
 		{exchange("hub: \"https://h.example/\""), "an exchanges item needs name: <name>"},
 		{exchange("name: h"), "exchange h: hub is required"},
 		{exchange("name: h, hub: \"http://h.example/\""), "exchange h: hub:"},
-		{exchange("name: h, hub: \"https://h.example/some/path\""), "exchange h: hub:"},
+		{exchange("name: h, hub: \"https://h.example/a%20b/\""), "exchange h: hub:"},
+		{exchange("name: h, hub: \"https://h.example/../\""), "exchange h: hub:"},
 		{exchange("name: h, hub: \"https://h.example/\", ca_file: " + missingCA), "exchange h: ca_file:"},
 		{exchange("name: h, hub: \"https://h.example/\", ca_file: " + notPEM), "holds no PEM certificate"},
 		{exchange("name: h, hub: \"https://h.example/\", serve_token: x"), `unknown key "serve_token" in an exchanges item (name, hub, ca_file)`},
@@ -214,6 +215,13 @@ func (s *syncBuffer) String() string {
 // relay hub on with anonymous serving, and QUIC on 127.0.0.1.
 func startHub(t *testing.T) *pfHub {
 	t.Helper()
+	return startHubAt(t, "")
+}
+
+// startHubAt is startHub with the hub at path ([console] path), or at its
+// default /pf when path is empty; the hub's url has the path in it.
+func startHubAt(t *testing.T, path string) *pfHub {
+	t.Helper()
 	bin, err := pfSimpleBinary()
 	if err != nil {
 		if os.Getenv("TLSPROXY_LIVE") != "" {
@@ -227,7 +235,7 @@ func startHub(t *testing.T) *pfHub {
 listen = "127.0.0.1:%d"
 password = "test"
 tls = "self_signed"
-
+%s
 [tunnel]
 enabled = true
 anonymous_serve = true
@@ -236,7 +244,7 @@ anonymous_serve = true
 enabled = true
 listen = "127.0.0.1:%d"
 advertise_host = "127.0.0.1"
-`, httpsPort, quicPort)
+`, httpsPort, pathLine(path), quicPort)
 	if err := os.WriteFile(filepath.Join(dir, "pf-simple.toml"), []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +261,7 @@ advertise_host = "127.0.0.1"
 			t.Logf("pf-simple hub's log:\n%s", out.String())
 		}
 	})
-	hub := &pfHub{url: fmt.Sprintf("https://127.0.0.1:%d/", httpsPort), caFile: filepath.Join(dir, "certs", "ca.pem")}
+	hub := &pfHub{url: fmt.Sprintf("https://127.0.0.1:%d%s/", httpsPort, path), caFile: filepath.Join(dir, "certs", "ca.pem")}
 	deadline := time.Now().Add(T)
 	for {
 		if pem, err := os.ReadFile(hub.caFile); err == nil && strings.Contains(out.String(), "QUIC listener on") {
@@ -274,6 +282,13 @@ advertise_host = "127.0.0.1"
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func pathLine(path string) string {
+	if path == "" {
+		return ""
+	}
+	return fmt.Sprintf("path = %q\n", path)
 }
 
 // serve serves a new tunnel to target from this process, over QUIC or

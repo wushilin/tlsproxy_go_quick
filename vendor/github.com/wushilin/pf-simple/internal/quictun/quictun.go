@@ -143,8 +143,10 @@ func NewCertificate(host string) (certPEM, keyPEM []byte, err error) {
 		return nil, nil, err
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "pf-simple relay hub"},
+		SerialNumber: serial,
+		// Only the advertised host, so the certificate tells nobody what
+		// serves it (§13.3).
+		Subject:               pkix.Name{CommonName: strings.TrimSpace(host)},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(CertLifetime),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
