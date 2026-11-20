@@ -361,7 +361,7 @@ func (s *Server) serveHere(c *ConnState, client net.Conn, hello, helloBuf []byte
 	if err != nil {
 		s.stats.Failed.Add(1)
 		c.setEnd(flowFailed, fmt.Sprintf("client TLS handshake failed: %v", err))
-		logf("[#%d] closed src=%s sni=%s: client TLS handshake failed: %v", c.ID, src, sniDisp, err)
+		vlogf("[#%d] closed src=%s sni=%s: client TLS handshake failed: %v", c.ID, src, sniDisp, err)
 		return
 	}
 	tc.SetDeadline(time.Time{})
@@ -377,7 +377,7 @@ func (s *Server) serveHere(c *ConnState, client net.Conn, hello, helloBuf []byte
 	c.how.TLS, c.how.ClientTLS, c.how.ALPN, c.how.Resumed, c.how.Upstream = "terminated", tls.VersionName(st.Version), st.NegotiatedProtocol, st.DidResume, "served"
 	c.mu.Unlock()
 	c.touch()
-	logf("[#%d] connected %s -> served here (%s)", c.ID, src, withLimits(how, rule))
+	vlogf("[#%d] connected %s -> served here (%s)", c.ID, src, withLimits(how, rule))
 	s.stats.flows.emit("route", c)
 
 	s.served.Store(tc, sc)
@@ -402,7 +402,7 @@ func (s *Server) serveHere(c *ConnState, client net.Conn, hello, helloBuf []byte
 	}
 	s.stats.Completed.Add(1)
 	c.setEnd(flowClosed, reason)
-	logf("[#%d] closed src=%s sni=%s dst=served here up=%s down=%s duration=%s reason=%s",
+	vlogf("[#%d] closed src=%s sni=%s dst=served here up=%s down=%s duration=%s reason=%s",
 		c.ID, src, sniDisp, humanBytes(c.BytesUp.Load()), humanBytes(c.BytesDown.Load()), humanDuration(time.Since(c.Start)), reason)
 }
 
@@ -418,7 +418,7 @@ func (s *Server) webFor(rt *Runtime, listener string) *webServer {
 type webHandler struct{ s *Server }
 
 func (h webHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Server", serverName)
+	setServerHeader(w.Header())
 	sc, _ := r.Context().Value(servedKey{}).(*servedConn)
 	if sc == nil {
 		http.Error(w, "not a served connection", http.StatusInternalServerError)
@@ -430,7 +430,11 @@ func (h webHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sw.status == 0 {
 		sw.status = http.StatusOK
 	}
-	logf("[#%d] %s %s %s%s -> %d%s, %d bytes, %s", sc.c.ID, r.Proto, r.Method, r.Host, r.URL.RequestURI(), sw.status, note, sw.bytes, humanDuration(time.Since(start)))
+	took := time.Since(start)
+	vlogf("[#%d] %s %s %s%s -> %d%s, %d bytes, %s", sc.c.ID, r.Proto, r.Method, r.Host, r.URL.RequestURI(), sw.status, note, sw.bytes, humanDuration(took))
+	accessRequest(sc.c, r.Method, r.Host, r.URL.RequestURI(), r.Proto, sw.status, int64(sw.bytes), took,
+		accessField{"ua", r.UserAgent()}, accessField{"referer", r.Referer()},
+		accessField{"note", accessNote(note)})
 }
 
 // requestName is the name a request's Host routes as: "" for an IP
@@ -710,6 +714,22 @@ func (d rootDir) Open(name string) (http.File, error) {
 // reverseProxy is the proxy for one reverse_proxy route. The client's
 // address comes from the connection; the X-Forwarded-* headers and Forwarded
 // it sent itself are replaced or removed, never passed on.
+// viaName is a signature as a Via pseudonym: a token, so up to the first
+// character that cannot be in one ("nginx/1.24.0" is "nginx").
+func viaName(sig string) string {
+	for i := 0; i < len(sig); i++ {
+		c := sig[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0) {
+			sig = sig[:i]
+			break
+		}
+	}
+	if sig == "" {
+		return "proxy"
+	}
+	return sig
+}
+
 func reverseProxy(rule *Rule, route *ServiceRoute, transport *http.Transport) *httputil.ReverseProxy {
 	target := route.TargetAddr()
 	return &httputil.ReverseProxy{
@@ -765,13 +785,21 @@ func reverseProxy(rule *Rule, route *ServiceRoute, transport *http.Transport) *h
 				out.Header.Set(identityHeader, identityAssertion(rule, route, id, client, out.Method, out.URL.Path, time.Now()))
 			}
 			out.Header.Set("Forwarded", forwardedHeader(client, pr.In.Host)) // RFC 7239
-			out.Header.Set("X-Forwarded-By", serverName+"/"+strings.TrimPrefix(version, "v"))
-			out.Header.Add("Via", fmt.Sprintf("%d.%d %s", pr.In.ProtoMajor, pr.In.ProtoMinor, serverName))
+			switch sig := currentSignature(); sig {
+			case "":
+			case serverName:
+				out.Header.Set("X-Forwarded-By", serverName+"/"+strings.TrimPrefix(version, "v"))
+				out.Header.Add("Via", fmt.Sprintf("%d.%d %s", pr.In.ProtoMajor, pr.In.ProtoMinor, serverName))
+			default:
+				out.Header.Set("X-Forwarded-By", sig)
+				out.Header.Add("Via", fmt.Sprintf("%d.%d %s", pr.In.ProtoMajor, pr.In.ProtoMinor, viaName(sig)))
+			}
 		},
-		// The response is this proxy's: its name replaces the upstream's, as
-		// nginx does.
+		// The response is this proxy's: the upstream's Server goes, and the
+		// one webHandler already set (the signature, or none) stays, as nginx
+		// does. Setting it here too would send it twice.
 		ModifyResponse: func(resp *http.Response) error {
-			resp.Header.Set("Server", serverName)
+			resp.Header.Del("Server")
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.9.0
+
+- Access log: every connection gets one `access` record when it ends,
+  whatever happened to it: passed through, terminated, served, relayed,
+  denied, rejected before its ClientHello, or an ACME challenge. Every
+  HTTP request the proxy answers itself (served rules, the port 80
+  redirect) gets one too. Records are on by default and go with the
+  activity stream (stdout). `logging:` gets `access` (stdout, stderr, off
+  or a file of its own, rotated like the others), `access_format` (logfmt
+  or json), `access_tag` (`node=` on every record; `hostname` for this
+  machine's name) and `verbose` (default true; false drops the
+  accepted / route / connected / closed lines).
+- Failures on the upstream side (a target that can't be reached or
+  written to, a failed PROXY protocol header to the backend) now go to the
+  error stream (stderr). A client's own failures stay in its access record.
+- `server_signature` in `global`: what the proxy calls itself, the same
+  for every rule. It sets the `Server` header of everything it answers,
+  redirects or reverse-proxies (replacing the backend's) and the footer of
+  directory listings. `none` sends no `Server` header and names nothing.
+  Requests to reverse_proxy backends carry it in `Via` and
+  `X-Forwarded-By`. The default, `tlsproxy_go_quick`, changes nothing.
+- Fix: reverse-proxied responses carried the `Server` header twice.
+
 ## v1.8.0
 
 - pf-simple 0.16.3. An exchange's hub may be at a path of its own: give

@@ -127,7 +127,10 @@ func writeRedirectResponse(w io.Writer, status int, location string, keepAlive b
 		conn = "keep-alive"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\nServer: %s\r\n", status, http.StatusText(status), serverName)
+	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	if sig := currentSignature(); sig != "" {
+		fmt.Fprintf(&b, "Server: %s\r\n", sig)
+	}
 	if location != "" {
 		fmt.Fprintf(&b, "Location: %s\r\n", location)
 	}
@@ -164,7 +167,7 @@ func (s *Server) handleRedirect(id uint64, sock net.Conn, active int, cfg *Confi
 	}
 	if err != nil {
 		s.stats.Failed.Add(1)
-		logf("[#%d] closed src=%s: bad PROXY protocol header: %v after %s", id, sock.RemoteAddr(), err, humanDuration(time.Since(start)))
+		vlogf("[#%d] closed src=%s: bad PROXY protocol header: %v after %s", id, sock.RemoteAddr(), err, humanDuration(time.Since(start)))
 		s.stats.flows.refused(id, name, start, sock.RemoteAddr(), sock.LocalAddr(), "bad PROXY protocol header: "+err.Error())
 		return
 	}
@@ -181,7 +184,7 @@ func (s *Server) handleRedirect(id uint64, sock net.Conn, active int, cfg *Confi
 		slot = proxiedSlot
 	}
 	src := client.RemoteAddr().String()
-	logf("[#%d] accepted from %s on %s (active=%d)", id, src, name, active)
+	vlogf("[#%d] accepted from %s on %s (active=%d)", id, src, name, active)
 
 	c := &ConnState{ID: id, Src: src, Local: client.LocalAddr().String(), Start: start, Listener: name, lstats: s.stats.listener(name),
 		RuleKey: redirectKey, rulePattern: redirectPattern, rule: s.stats.rule(redirectKey)}
@@ -247,10 +250,12 @@ func (s *Server) handleRedirect(id uint64, sock net.Conn, active int, cfg *Confi
 			break
 		}
 		requests++
+		reqStart := time.Now()
 		host, ok := redirectHost(req.Host)
 		if !ok || req.RequestURI == "*" {
 			result, reason = flowFailed, fmt.Sprintf("cannot redirect %s %s (Host: %q)", req.Method, req.RequestURI, req.Host)
-			logf("[#%d] redirect %s %s Host=%q from %s: 400, no usable host or path", id, req.Method, req.RequestURI, req.Host, src)
+			vlogf("[#%d] redirect %s %s Host=%q from %s: 400, no usable host or path", id, req.Method, req.RequestURI, req.Host, src)
+			accessRequest(c, req.Method, req.Host, req.RequestURI, req.Proto, http.StatusBadRequest, 0, time.Since(reqStart))
 			sock.SetWriteDeadline(time.Now().Add(cfg.HandshakeTimeout))
 			answered = writeRedirectResponse(conn, http.StatusBadRequest, "", false) == nil
 			break
@@ -272,7 +277,9 @@ func (s *Server) handleRedirect(id uint64, sock net.Conn, active int, cfg *Confi
 		}
 		sock.SetWriteDeadline(time.Now().Add(cfg.HandshakeTimeout))
 		err = writeRedirectResponse(conn, status, location, keepAlive)
-		logf("[#%d] redirect %s http://%s%s -> %s (%d)", id, req.Method, req.Host, req.RequestURI, location, status)
+		vlogf("[#%d] redirect %s http://%s%s -> %s (%d)", id, req.Method, req.Host, req.RequestURI, location, status)
+		accessRequest(c, req.Method, req.Host, req.RequestURI, req.Proto, status, 0, time.Since(reqStart),
+			accessField{"ua", req.UserAgent()}, accessField{"location", location})
 		if err != nil {
 			result, reason = flowFailed, fmt.Sprintf("write error after %d request(s): %v", requests, err)
 			break
@@ -295,6 +302,6 @@ func (s *Server) handleRedirect(id uint64, sock net.Conn, active int, cfg *Confi
 		s.stats.Failed.Add(1)
 	}
 	c.setEnd(result, reason)
-	logf("[#%d] closed src=%s on %s requests=%d up=%s down=%s duration=%s reason=%s", id, src, name, requests,
+	vlogf("[#%d] closed src=%s on %s requests=%d up=%s down=%s duration=%s reason=%s", id, src, name, requests,
 		humanBytes(c.BytesUp.Load()), humanBytes(c.BytesDown.Load()), humanDuration(time.Since(start)), reason)
 }

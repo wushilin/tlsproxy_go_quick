@@ -130,6 +130,7 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		item(g, "allow_cache_size", strconv.Itoa(cfg.AllowCacheSize)),
 		item(g, "deny_cache_size", strconv.Itoa(cfg.DenyCacheSize)),
 		item(g, "low_latency", strconv.FormatBool(cfg.LowLatency)),
+		item(g, "server_signature", map[bool]string{true: "none", false: cfg.ServerSignature}[cfg.ServerSignature == ""]),
 		item(g, "reload_interval", secs(cfg.ReloadInterval, "never (console saves only)")),
 		item(g, "stats_interval", secs(cfg.StatsInterval, "never")),
 	} {
@@ -283,6 +284,10 @@ func configTree(cfg *Config, full string, toEditor func(int) int) []treeNode {
 		item(lg, "max_size", humanBytes(cfg.Log.MaxSize)),
 		item(lg, "max_keep", strconv.Itoa(cfg.Log.MaxKeep)),
 		item(lg, "compress_after", strconv.Itoa(cfg.Log.CompressAfter)),
+		item(lg, "access", map[bool]string{true: "with stdout", false: cfg.Log.Access}[cfg.Log.Access == ""]),
+		item(lg, "access_format", cfg.Log.AccessFormat),
+		item(lg, "access_tag", map[bool]string{true: "none", false: cfg.Log.AccessTag}[cfg.Log.AccessTag == ""]),
+		item(lg, "verbose", strconv.FormatBool(cfg.Log.Verbose)),
 	}
 	return append(out, logs)
 }

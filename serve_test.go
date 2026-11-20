@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -559,6 +560,77 @@ func TestServeForwardingHeaders(t *testing.T) {
 		want := map[string]string{"2001:db8::1": `for="[2001:db8::1]";host="www.test:8443";proto=https`, "192.0.2.1": "for=192.0.2.1;host=a.test;proto=https"}[client]
 		if got != want {
 			t.Errorf("Forwarded %s %s: %s, want %s", client, host, got, want)
+		}
+	}
+}
+
+// server_signature: what the proxy calls itself, the same everywhere. Not
+// parallel: the signature is the process's, and parallel tests expect the
+// default (they start only after this one has put it back).
+func TestServerSignature(t *testing.T) {
+	for in, want := range map[string]string{"": "", "none": "", " NONE ": "", "nginx": "nginx", "Apache/2.4.62 (Unix)": "Apache/2.4.62 (Unix)"} {
+		if got, err := parseServerSignature(in); err != nil || got != want {
+			t.Errorf("parseServerSignature(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"a\r\nX-Evil: 1", "café", strings.Repeat("x", 129)} {
+		if _, err := parseServerSignature(bad); err == nil {
+			t.Errorf("parseServerSignature(%q) accepted", bad)
+		}
+	}
+	for in, want := range map[string]string{"nginx/1.24.0": "nginx", "Apache 2": "Apache", "/x": "proxy", "my-proxy": "my-proxy"} {
+		if got := viaName(in); got != want {
+			t.Errorf("viaName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\nserver_signature = none\n"); cfg.ServerSignature != "" {
+		t.Errorf("none parsed as %q", cfg.ServerSignature)
+	}
+	if cfg := mustParse(t, "[[listener]]\nname=default\nport=1\n[global]\n"); cfg.ServerSignature != serverName {
+		t.Errorf("default %q", cfg.ServerSignature)
+	}
+
+	ca := newTestCA(t)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0o644)
+	l, port := listen(t)
+	var upstreamVia atomic.Value
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamVia.Store(r.Header.Get("Via") + "|" + r.Header.Get("X-Forwarded-By"))
+		w.Header().Set("Server", "backend/9")
+		io.WriteString(w, "up")
+	}))
+	text := "[[listener]]\nname=default\nport=1\n[global]\nstats_interval=0\nca_root=" + testCARoot() + "\n" +
+		"[[host]]\nlistener=default\npattern=www.test\ncert=" + ca.localCA(t) +
+		"\nservice_rule1 = type=static_content; prefix=/list/; base_dir=" + dir + "; directory_listing=true" +
+		fmt.Sprintf("\nservice_rule2 = type=reverse_proxy; prefix=/up/; target=http://127.0.0.1:%d\n", port)
+	p := startProxyText(t, text, "")
+	c := serveClient(p, ca, false)
+	t.Cleanup(func() { setSignature(serverName) })
+	for _, sig := range []string{"nginx/1.24.0", ""} {
+		setSignature(sig)
+		resp, body := httpsGet(t, c, "https://www.test/list/")
+		if got := resp.Header.Values("Server"); sig == "" && len(got) != 0 || sig != "" && (len(got) != 1 || got[0] != sig) {
+			t.Errorf("%q: listing Server %q", sig, got)
+		}
+		if strings.Contains(body, serverName) || strings.Contains(body, repoURL) {
+			t.Errorf("%q: listing names this proxy", sig)
+		}
+		if sig != "" && !strings.Contains(body, "Served by <b>"+sig+"</b>") {
+			t.Errorf("%q: listing without its signature", sig)
+		}
+		resp, _ = httpsGet(t, c, "https://www.test/up/x")
+		if got := resp.Header.Values("Server"); sig == "" && len(got) != 0 || sig != "" && (len(got) != 1 || got[0] != sig) {
+			t.Errorf("%q: reverse_proxy Server %q", sig, got)
+		}
+		want := map[string]string{"": "|", "nginx/1.24.0": "1.1 nginx|nginx/1.24.0"}[sig]
+		if got, _ := upstreamVia.Load().(string); got != want {
+			t.Errorf("%q: upstream got Via|X-Forwarded-By %q, want %q", sig, got, want)
+		}
+		var b strings.Builder
+		writeRedirectResponse(&b, 301, "https://x/", false)
+		if hasServer := strings.Contains(b.String(), "\r\nServer: "); hasServer != (sig != "") || sig != "" && !strings.Contains(b.String(), "Server: "+sig+"\r\n") {
+			t.Errorf("%q: redirect response %q", sig, b.String())
 		}
 	}
 }
