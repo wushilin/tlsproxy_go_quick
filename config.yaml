@@ -384,6 +384,8 @@ routes:
 #   - name: home-hub
 #     hub: https://relay.example.com/
 #     ca_file: /etc/tlsproxy/relay-ca.pem
+#   - name: gate-hub                                    # a hub at a path of its own (pf-simple
+#     hub: https://gate.example.com/xzfe-aeeg-e2da/     # 0.16.3 or later); with no path, /pf
 # endpoints:
 #   - name: office
 #     exchange: home-hub
