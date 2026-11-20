@@ -309,6 +309,7 @@ with its default, and a test keeps that file in step with the code:
 | `splice`               | true    | Linux only: relay passed-through connections with `splice(2)`, see [Zero-copy relaying](#zero-copy-relaying-linux) |
 | `http_to_https_redirect` | false | also listen on port 80 and redirect every plain HTTP request to `https://`, see [HTTP to HTTPS redirect](#http-to-https-redirect) |
 | `remember_nonce` | true | refuse a connection that is this proxy's own, come back to it: see [Loop detection](#loop-detection-remember_nonce) |
+| `server_signature` | tlsproxy_go_quick | what the proxy calls itself, the same for every rule: the `Server` header of every response it answers or reverse-proxies (replacing the backend's) and the footer of directory listings. Any text (`nginx`), or `none` for no `Server` header and no name. Passed-through TLS is untouched; Go's TLS and HTTP/2 fingerprints still show |
 
 The legacy keys `io_model`, `worker_threads` and `short_read_delay_us` (replaced
 by [batching](#batching-busy-streams)) are accepted and ignored (with a log
@@ -319,13 +320,13 @@ option is missing from it, from `config.yaml` or from this README):
 
 | section | options |
 |---|---|
-| `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `low_latency` `splice` · `http_to_https_redirect` `remember_nonce` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` `short_read_delay_us` |
+| `global:` | `handshake_timeout` `connect_timeout` `idle_timeout` `half_close_timeout` · `max_connections` `max_handshakes_per_ip` `proxy_trust_source` `buffer_size` `buffer_pool_max_idle` `low_latency` `splice` · `http_to_https_redirect` `remember_nonce` `server_signature` · `allow_cache_size` `deny_cache_size` · `reload_interval` `stats_interval` · `cert_root` `expiry_threshold_days` `acme_agree_tos` `acme_email` `acme_directory` `acme_ca_file` `public_ip_address` `dns_resolvers` · ignored for compatibility: `io_model` `worker_threads` `short_read_delay_us` |
 | `listeners:` (a list) | `name` `bind` `port` · `proxy_trust_source` `max_connections` `handshake_timeout` `idle_timeout` `half_close_timeout` `max_aggregated_speed` `max_single_connection_speed` |
 | `routes:` (a list) | `listener` · `rules` |
 | each of `rules` | `domain` `action` `target` · `cert` `cert_domains` `cert_validate_script` `cert_validate_args` `upstream_tls` `upstream_tls_verify` `upstream_sni` `proxy` · `max_aggregated_speed` `max_single_connection_speed` · `serve`, a list of (`type` `prefix` `target` `strip_prefix` `force_host` `tls_verify` `base_dir` `directory_listing` `basic_auth` `oidc` `require_mfa` `require_groups` `require_roles` `identity_secret` / `identity_secret_file`) |
 | `basic_auth:` (a list) | `name` · `users`, a list of (`username` with `password_hash` or `password_plain`; `disabled`, `expires`) |
 | `oidc:` (a list) | `name` `issuer` `client_id` · `client_secret` / `client_secret_file` / `client_certificate` + `client_key` · `scopes` `session` `mfa_acr_values` `ca_file` `username_claim` `groups_claim` `roles_claim` |
-| `logging:` | `stdout` `stderr` `max_size` `max_keep` `compress_after` |
+| `logging:` | `stdout` `stderr` `max_size` `max_keep` `compress_after` · `access` `access_format` `access_tag` `verbose` |
 | the web console (not in the file) | `-console_domain` / `$CONSOLE_DOMAIN` · `$CONSOLE_PASSWORD` · `-console_bind` / `$CONSOLE_BIND` · `-console_port` / `$CONSOLE_PORT` · `-console_cert` / `$CONSOLE_CERT` · `-noconsole` |
 
 `proxy_trust_source` was called `proxy_protocol_from` before v1.5.0; the old
@@ -1246,6 +1247,38 @@ logging:
   `max_size` in the meantime; nothing blocks and nothing is lost.
 - The settings follow hot reload. If a new log file can't be opened, the
   previous destinations stay in use.
+
+### Access log
+
+Every connection gets one **access record** when it ends, whatever happened
+to it: passed through, terminated, served here, relayed, denied, rejected
+before its ClientHello, or an ACME challenge. Every HTTP request the proxy
+answers itself (served rules, the port 80 redirect) gets one too. Records
+are on by default and go with the activity stream (stdout); each says
+`access` after its time, so they are easy to pick out:
+
+```
+2026-11-19T08:01:02.345Z access kind=conn id=12 listener=https src=203.0.113.9:51234 local=192.0.2.1:443 sni=www.example.com result=closed mode=pass rule=www.example.com dst=10.0.0.10:443 peer=10.0.0.10:443 alpn=h2,http/1.1 up=1840 down=53211 dur_ms=8421 reason="client closed"
+2026-11-19T08:01:03.002Z access kind=conn id=13 listener=https src=198.51.100.7:40022 local=192.0.2.1:443 sni=scan.invalid result=denied up=0 down=0 dur_ms=1 reason="no rule matched"
+2026-11-19T08:01:04.120Z access kind=http id=14 listener=https src=203.0.113.9:51240 method=GET host=files.example.com uri=/pub/ proto=HTTP/2.0 status=200 bytes=5120 dur_ms=3 ua=curl/8.5.0 note=listing
+```
+
+`result` is `closed`, `denied`, `failed`, `rejected` or `acme`; `mode` is
+`pass` (TLS passed through), `terminate`, `serve`, `relay` or `http`; `up` and
+`down` are bytes, `dur_ms` milliseconds; `via` is the load balancer when a
+PROXY header gave `src`. Fields that don't apply are left out.
+
+```yaml
+logging:
+  access: /var/log/tlsproxy/access.log   # default stdout; or stderr, off, or a file (rotated like the others)
+  access_format: json    # logfmt (default) or json: {"ts":"...","log":"access","kind":"conn",...}
+  access_tag: hostname   # node=<this machine's name> on every record, or any text; default none
+  verbose: false         # default true; false drops the accepted / route / connected / closed lines
+```
+
+Problems always go to the error stream (stderr), including a target that
+can't be reached or written to. A client's own failures (a bad ClientHello,
+a timeout, a denied name) are in its access record, not there.
 
 ## Web console
 

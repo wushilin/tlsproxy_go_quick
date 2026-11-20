@@ -311,6 +311,7 @@ func Run(cfg *Config, path string) error {
 	if err := ConfigureLogging(cfg.Log); err != nil {
 		return err
 	}
+	setSignature(cfg.ServerSignature)
 	srv, err := NewServer(cfg) // before binding: a bad certificate is a startup error
 	if err != nil {
 		return err
@@ -530,6 +531,7 @@ func (s *Server) reload(path string, lastHash *string, haveLast *bool) []string 
 	if err := ConfigureLogging(cfg.Log); err != nil {
 		errorf("config reload: %v; logging is unchanged", err)
 	}
+	setSignature(cfg.ServerSignature)
 	rt := newRuntime(cfg, old)
 	rt.serve = s.newServeState(cfg)
 	s.stats.prepare(cfg) // before it goes live: connections only read these counters
@@ -679,7 +681,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	}
 	if err != nil {
 		s.stats.Failed.Add(1)
-		logf("[#%d] closed src=%s: bad PROXY protocol header: %v after %s", id, sock.RemoteAddr(), err, humanDuration(time.Since(start)))
+		vlogf("[#%d] closed src=%s: bad PROXY protocol header: %v after %s", id, sock.RemoteAddr(), err, humanDuration(time.Since(start)))
 		s.stats.flows.refused(id, cfg.listener.Name, start, sock.RemoteAddr(), sock.LocalAddr(), "bad PROXY protocol header: "+err.Error())
 		return
 	}
@@ -697,7 +699,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		slot = proxiedSlot
 	}
 	src := client.RemoteAddr().String()
-	logf("[#%d] accepted from %s (active=%d)", id, src, active)
+	vlogf("[#%d] accepted from %s (active=%d)", id, src, active)
 
 	c := &ConnState{ID: id, Src: src, Local: client.LocalAddr().String(), Start: start, Listener: cfg.listener.Name, lstats: s.stats.listener(cfg.listener.Name)}
 	c.lastActivityUnixNano.Store(start.UnixNano())
@@ -718,10 +720,10 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		s.stats.Failed.Add(1)
 		if isTimeout(err) {
 			c.setEnd(flowFailed, fmt.Sprintf("no ClientHello within %s", humanDuration(cfg.HandshakeTimeout)))
-			logf("[#%d] closed src=%s: no ClientHello within %s", id, src, humanDuration(cfg.HandshakeTimeout))
+			vlogf("[#%d] closed src=%s: no ClientHello within %s", id, src, humanDuration(cfg.HandshakeTimeout))
 		} else {
 			c.setEnd(flowFailed, fmt.Sprintf("bad ClientHello: %v", err))
-			logf("[#%d] closed src=%s: bad ClientHello: %v after %s", id, src, err, humanDuration(time.Since(start)))
+			vlogf("[#%d] closed src=%s: bad ClientHello: %v after %s", id, src, err, humanDuration(time.Since(start)))
 		}
 		return
 	}
@@ -740,7 +742,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		c.SNI, c.routed = sni, true
 		c.mu.Unlock()
 		c.setEnd(flowDenied, "connection loop: this proxy forwarded this ClientHello itself moments ago (remember_nonce)")
-		logf("[#%d] route sni=%s src=%s -> DENY (connection loop: this proxy forwarded this ClientHello itself moments ago)", id, sniDisp, src)
+		vlogf("[#%d] route sni=%s src=%s -> DENY (connection loop: this proxy forwarded this ClientHello itself moments ago)", id, sniDisp, src)
 		client.Write(alertAccessDenied)
 		return
 	}
@@ -807,13 +809,13 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		switch {
 		case d.Err != "":
 			c.setEnd(flowDenied, "error: "+d.Err)
-			logf("[#%d] route sni=%s src=%s -> DENY (error: %s%s)", id, sniDisp, src, d.Err, cached)
+			vlogf("[#%d] route sni=%s src=%s -> DENY (error: %s%s)", id, sniDisp, src, d.Err, cached)
 		case d.RuleLine == 0:
 			c.setEnd(flowDenied, "no rule matched")
-			logf("[#%d] route sni=%s src=%s -> DENY (no rule matched%s)", id, sniDisp, src, cached)
+			vlogf("[#%d] route sni=%s src=%s -> DENY (no rule matched%s)", id, sniDisp, src, cached)
 		default:
 			c.setEnd(flowDenied, fmt.Sprintf("deny rule at line %d", d.RuleLine))
-			logf("[#%d] route sni=%s src=%s -> DENY (rule line %d%s)", id, sniDisp, src, d.RuleLine, cached)
+			vlogf("[#%d] route sni=%s src=%s -> DENY (rule line %d%s)", id, sniDisp, src, d.RuleLine, cached)
 		}
 		client.Write(alertAccessDenied)
 		return
@@ -822,7 +824,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	if d.Rule.Serves() {
 		destDisp = "served here"
 	}
-	logf("[#%d] route sni=%s -> %s (ALLOW, rule line %d%s)", id, sniDisp, destDisp, d.RuleLine, cached)
+	vlogf("[#%d] route sni=%s -> %s (ALLOW, rule line %d%s)", id, sniDisp, destDisp, d.RuleLine, cached)
 	ruleKey := d.Rule.Key()
 	l := cfg.listener
 	c.mu.Lock()
@@ -852,7 +854,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 			s.stats.Failed.Add(1)
 			reason := fmt.Sprintf("CA %s: %v", caID, err)
 			c.setEnd(flowFailed, reason)
-			logf("[#%d] closed src=%s sni=%s: %s", id, src, sniDisp, reason)
+			vlogf("[#%d] closed src=%s sni=%s: %s", id, src, sniDisp, reason)
 			client.Write(alertAccessDenied)
 			return
 		}
@@ -868,7 +870,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		rt.pool.Put(helloBuf)
 		s.stats.Failed.Add(1)
 		c.setEnd(flowFailed, fmt.Sprintf("connect failed: %v", err))
-		logf("[#%d] closed src=%s sni=%s dst=%s: connect failed: %v after %s", id, src, sniDisp, destDisp, err, humanDuration(time.Since(t0)))
+		errorf("[#%d] closed src=%s sni=%s dst=%s: connect failed: %v after %s", id, src, sniDisp, destDisp, err, humanDuration(time.Since(t0)))
 		return
 	}
 	defer up.Close()
@@ -892,7 +894,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 			rt.pool.Put(helloBuf)
 			s.stats.Failed.Add(1)
 			c.setEnd(flowFailed, "TLS-ALPN-01 challenge for a plaintext upstream")
-			logf("[#%d] closed src=%s sni=%s dst=%s: TLS-ALPN-01 challenge that this proxy did not start, and the upstream is plaintext so it cannot answer either", id, src, sniDisp, destDisp)
+			vlogf("[#%d] closed src=%s sni=%s dst=%s: TLS-ALPN-01 challenge that this proxy did not start, and the upstream is plaintext so it cannot answer either", id, src, sniDisp, destDisp)
 			return
 		}
 		terminateHere = false
@@ -908,7 +910,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		if err != nil {
 			s.stats.Failed.Add(1)
 			c.setEnd(flowFailed, err.Error())
-			logf("[#%d] closed src=%s sni=%s dst=%s (%s): %v", id, src, sniDisp, destDisp, peer, err)
+			vlogf("[#%d] closed src=%s sni=%s dst=%s (%s): %v", id, src, sniDisp, destDisp, peer, err)
 			return
 		}
 		clientSide, mode = tlsClient, how
@@ -929,7 +931,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		if tlsServer != nil {
 			serverSide = tlsServer
 		}
-		logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), withLimits(mode, d.Rule))
+		vlogf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), withLimits(mode, d.Rule))
 	} else {
 		c.mu.Lock()
 		c.how.TLS, c.how.ALPN = "passthrough", strings.Join(info.ALPN, ",") // what the client offered
@@ -948,7 +950,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 				rt.pool.Put(helloBuf)
 				s.stats.Failed.Add(1)
 				c.setEnd(flowFailed, fmt.Sprintf("upstream PROXY protocol header failed: %v", err))
-				logf("[#%d] closed src=%s sni=%s dst=%s: upstream PROXY protocol v%d header failed: %v", id, src, sniDisp, destDisp, d.Rule.ProxyVersion, err)
+				errorf("[#%d] closed src=%s sni=%s dst=%s: upstream PROXY protocol v%d header failed: %v", id, src, sniDisp, destDisp, d.Rule.ProxyVersion, err)
 				return
 			}
 			up.SetWriteDeadline(time.Time{})
@@ -958,9 +960,9 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 			mode += fmt.Sprintf("PROXY v%d header sent", d.Rule.ProxyVersion)
 		}
 		if mode = withLimits(mode, d.Rule); mode != "" {
-			logf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
+			vlogf("[#%d] connected %s -> %s (%s) in %s (%s)", id, src, destDisp, peer, humanDuration(time.Since(t0)), mode)
 		} else {
-			logf("[#%d] connected %s -> %s (%s) in %s", id, src, destDisp, peer, humanDuration(time.Since(t0)))
+			vlogf("[#%d] connected %s -> %s (%s) in %s", id, src, destDisp, peer, humanDuration(time.Since(t0)))
 		}
 		if cfg.IdleTimeout > 0 {
 			up.SetWriteDeadline(time.Now().Add(cfg.IdleTimeout))
@@ -979,7 +981,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 		if err != nil {
 			s.stats.Failed.Add(1)
 			c.setEnd(flowFailed, fmt.Sprintf("upstream write error: %v", err))
-			logf("[#%d] closed src=%s sni=%s dst=%s: upstream write error: %v", id, src, sniDisp, destDisp, err)
+			errorf("[#%d] closed src=%s sni=%s dst=%s: upstream write error: %v", id, src, sniDisp, destDisp, err)
 			return
 		}
 	}
@@ -1016,7 +1018,7 @@ func (s *Server) handle(id uint64, sock net.Conn, active int, rt *Runtime, cfg *
 	r.finish()
 	s.stats.Completed.Add(1)
 	c.setEnd(flowClosed, r.reason())
-	logf("[#%d] closed src=%s sni=%s dst=%s (%s) up=%s down=%s duration=%s reason=%s",
+	vlogf("[#%d] closed src=%s sni=%s dst=%s (%s) up=%s down=%s duration=%s reason=%s",
 		id, src, sniDisp, destDisp, peer, humanBytes(c.BytesUp.Load()), humanBytes(c.BytesDown.Load()),
 		humanDuration(time.Since(start)), r.reason())
 }

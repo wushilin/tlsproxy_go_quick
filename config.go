@@ -62,6 +62,7 @@ type Config struct {
 	LowLatency        bool          // never hold a short read back to batch it (see linger.go)
 	Splice            bool          // relay passed-through connections with splice(2) (Linux only)
 	RememberNonce     bool          // refuse a ClientHello this proxy itself forwarded seconds ago (a loop)
+	ServerSignature   string        // what this proxy calls itself to clients (Server header, listing page); "" = nothing
 	Log               LogConfig     // the [logging] section
 
 	// Certificates (only used by rules with cert = ...).
@@ -645,6 +646,7 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 		StatsInterval:      60 * time.Second,
 		Splice:             true,
 		RememberNonce:      true,
+		ServerSignature:    serverName,
 		Log:                defaultLogConfig(),
 
 		CARoot:              defaultCARoot,
@@ -739,6 +741,10 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 				if cfg.Splice, err = parseBool(value); err != nil {
 					err = fail("splice: %v", err)
 				}
+			case "server_signature":
+				if cfg.ServerSignature, err = parseServerSignature(value); err != nil {
+					err = fail("server_signature: %v", err)
+				}
 			case "remember_nonce":
 				if cfg.RememberNonce, err = parseBool(value); err != nil {
 					err = fail("remember_nonce: %v", err)
@@ -813,6 +819,31 @@ func LoadConfig(text string, console *ConsoleConfig) (*Config, error) {
 				err = count(&cfg.Log.MaxKeep)
 			case "compress_after":
 				err = count(&cfg.Log.CompressAfter)
+			case "access":
+				switch strings.ToLower(value) {
+				case "", "stdout":
+					cfg.Log.Access = ""
+				case "stderr", "off":
+					cfg.Log.Access = strings.ToLower(value)
+				case "none", "false":
+					cfg.Log.Access = "off"
+				default:
+					cfg.Log.Access = value
+				}
+			case "access_format":
+				if v := strings.ToLower(value); v == "logfmt" || v == "json" {
+					cfg.Log.AccessFormat = v
+				} else {
+					return fail("access_format: %q is not logfmt or json", value)
+				}
+			case "access_tag":
+				if cfg.Log.AccessTag, err = parseServerSignature(value); err != nil { // printable ASCII, "none" = none
+					return fail("access_tag: %v", err)
+				}
+			case "verbose":
+				if cfg.Log.Verbose, err = parseBool(value); err != nil {
+					return fail("verbose: %v", err)
+				}
 			default:
 				return fail("unknown key %q in logging", key)
 			}
@@ -1482,6 +1513,25 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// parseServerSignature reads server_signature: "none" (or empty) says
+// nothing, anything else is sent as it is. It goes into an HTTP header, so
+// only printable ASCII.
+func parseServerSignature(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.EqualFold(v, "none") {
+		return "", nil
+	}
+	if len(v) > 128 {
+		return "", fmt.Errorf("at most 128 characters")
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
+			return "", fmt.Errorf("%q: only printable ASCII characters", v)
+		}
+	}
+	return v, nil
 }
 
 func parseBool(v string) (bool, error) {

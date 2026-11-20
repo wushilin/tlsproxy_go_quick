@@ -89,6 +89,11 @@
         "meaning": "Log a one-line summary every N seconds. 0 = never."
       },
       {
+        "key": "server_signature",
+        "default": "tlsproxy_go_quick",
+        "meaning": "What this proxy calls itself, the same for every rule: the Server header of everything it answers or reverse-proxies (replacing the upstream's), and the footer of directory listings. Any text (e.g. nginx), or none to send no Server header and name nothing. Requests passed to a reverse_proxy upstream carry it in Via and X-Forwarded-By (neither with none). Passed-through TLS is never touched."
+      },
+      {
         "key": "cert_root",
         "default": "./certs",
         "meaning": "Where all certificates live: your CAs, one folder each (ca001, the default CA, made at start-up; ca002, ...) with what they issued, and acme/ with the automatic certificates and the ACME account key. Was ca_root (and cert_path) before v1.5.0."
@@ -515,7 +520,7 @@
   },
   {
     "section": "logging",
-    "about": "Where the two log streams go: activity (stdout) and problems (stderr).",
+    "about": "Where the log streams go: activity (stdout), problems (stderr) and access records (with stdout unless access says otherwise).",
     "keys": [
       {
         "key": "stdout",
@@ -541,6 +546,26 @@
         "key": "compress_after",
         "default": "3",
         "meaning": "Generations above this number are gzip-compressed."
+      },
+      {
+        "key": "access",
+        "default": "stdout",
+        "meaning": "Access records: one line per connection (passed through, terminated, served, relayed, denied, rejected) and one per HTTP request this proxy answers. stdout (with the activity stream, wherever it goes), stderr, off, or a file of its own (rotated like the others). Each line says access first, after the time."
+      },
+      {
+        "key": "access_format",
+        "default": "logfmt",
+        "meaning": "logfmt (key=value, quoted where needed), or json (one object per line, with ts and log: access)."
+      },
+      {
+        "key": "access_tag",
+        "default": "(none)",
+        "meaning": "node=\u003ctag\u003e on every access record, to tell machines apart in one place: any text, or hostname for this machine's name."
+      },
+      {
+        "key": "verbose",
+        "default": "true",
+        "meaning": "Also the per-connection activity lines (accepted, route, connected, closed, each request). false leaves them out: the access records say the same in one line. Problems are always logged."
       }
     ]
   },

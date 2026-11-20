@@ -163,6 +163,7 @@ func (f *flowLog) refused(id uint64, listener string, start time.Time, src, loca
 }
 
 func (f *flowLog) record(v flowView) {
+	accessConn(&v)
 	f.closed[(f.next.Add(1)-1)%flowHistory].Store(&v)
 	if f.viewers.Load() > 0 {
 		f.publish(flowEvent{Type: "close", Flow: v})

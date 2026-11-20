@@ -22,13 +22,20 @@ import (
 // (or maxPendingLines) are dropped and counted rather than held. Without
 // StartAsyncLogging (tests, --test) lines are written synchronously.
 var (
-	flushMu sync.Mutex             // serialises flushes, keeps lines in order; taken before logMu
-	logMu   sync.Mutex             // the destinations below, and synchronous writes
-	logOut  io.Writer  = os.Stdout // where logf goes without a file (tests swap it)
-	logErr  io.Writer  = os.Stderr
-	sinkCfg *LogConfig
-	sinkOut *FileLogger
-	sinkErr *FileLogger
+	flushMu  sync.Mutex             // serialises flushes, keeps lines in order; taken before logMu
+	logMu    sync.Mutex             // the destinations below, and synchronous writes
+	logOut   io.Writer  = os.Stdout // where logf goes without a file (tests swap it)
+	logErr   io.Writer  = os.Stderr
+	sinkCfg  *LogConfig
+	sinkOut  *FileLogger
+	sinkErr  *FileLogger
+	sinkAcc  *FileLogger // access records in a file of their own; nil: they follow accessTo
+	accessTo = streamOut // where access records go without a file of their own; streamAccess = off
+
+	accessOff    atomic.Bool // logging.access: off
+	logVerbose   atomic.Bool // logging.verbose: the per-connection activity lines (vlogf)
+	accessJSON   atomic.Bool // logging.access_format: json
+	accessTagVal atomic.Pointer[string]
 
 	logAsync      atomic.Bool
 	logQueue      = newRing[queuedLine](maxPendingLines) // both streams, in the order logged
@@ -44,10 +51,19 @@ const (
 	logFlushInterval = 100 * time.Millisecond
 )
 
+// The streams a line can be on.
+const (
+	streamOut    uint8 = iota // activity
+	streamErr                 // problems
+	streamAccess              // access records
+)
+
 type queuedLine struct {
-	text    string
-	problem bool
+	text   string
+	stream uint8
 }
+
+func init() { logVerbose.Store(true) }
 
 // StartAsyncLogging moves writing out of the callers' way (see above). Call
 // FlushLogs before the process exits.
@@ -78,22 +94,18 @@ func FlushLogs() {
 func flushLocked() {
 	problemQueued.Store(false)
 	logMu.Lock()
-	outFile, errFile, outW, errW := sinkOut, sinkErr, logOut, logErr
+	dests := currentDestsLocked()
 	logMu.Unlock()
 	// Consecutive lines of a stream are written together, so a flush is a few
-	// large writes, and the two streams come out in the order they were
-	// logged when they share a destination.
+	// large writes, and the streams come out in the order they were logged
+	// when they share a destination.
 	var buf strings.Builder
-	problem := false
+	stream := streamOut
 	write := func() {
 		if buf.Len() == 0 {
 			return
 		}
-		if problem {
-			writeLog(errFile, errW, buf.String())
-		} else {
-			writeLog(outFile, outW, buf.String())
-		}
+		dests[stream].write(buf.String())
 		buf.Reset()
 	}
 	for {
@@ -102,17 +114,42 @@ func flushLocked() {
 			break
 		}
 		pendingBytes.Add(-int64(len(l.text)))
-		if l.problem != problem || buf.Len() > 1<<20 {
+		if l.stream != stream || buf.Len() > 1<<20 {
 			write()
-			problem = l.problem
+			stream = l.stream
 		}
 		buf.WriteString(l.text)
 	}
 	write()
 	if dropped := droppedLog.Swap(0); dropped > 0 {
-		writeLog(errFile, errW, time.Now().UTC().Format("2006-01-02T15:04:05.000Z")+
+		dests[streamErr].write(time.Now().UTC().Format("2006-01-02T15:04:05.000Z") +
 			fmt.Sprintf(" log: %d lines were dropped: the log destination could not keep up\n", dropped))
 	}
+}
+
+// logDest is where one stream's lines go: a file, else a writer, else
+// nowhere (access records with access: off).
+type logDest struct {
+	file *FileLogger
+	w    io.Writer
+}
+
+func (d logDest) write(text string) {
+	if d.file != nil || d.w != nil {
+		writeLog(d.file, d.w, text)
+	}
+}
+
+// currentDestsLocked is each stream's destination. Callers hold logMu.
+func currentDestsLocked() [3]logDest {
+	d := [3]logDest{{sinkOut, logOut}, {sinkErr, logErr}}
+	switch {
+	case sinkAcc != nil:
+		d[streamAccess] = logDest{sinkAcc, logOut}
+	case accessTo != streamAccess:
+		d[streamAccess] = d[accessTo]
+	}
+	return d
 }
 
 // writeLog writes whole lines to a stream's destination.
@@ -135,10 +172,18 @@ func ConfigureLogging(cfg LogConfig) error {
 	flushLocked() // what was logged so far belongs to the old destinations
 	logMu.Lock()
 	defer logMu.Unlock()
+	logVerbose.Store(cfg.Verbose)
+	accessOff.Store(cfg.Access == "off")
+	accessJSON.Store(cfg.AccessFormat == "json")
+	tag := cfg.AccessTag
+	if tag == "hostname" {
+		tag, _ = os.Hostname()
+	}
+	accessTagVal.Store(&tag)
 	if sinkCfg != nil && *sinkCfg == cfg {
 		return nil
 	}
-	var out, errl *FileLogger
+	var out, errl, acc *FileLogger
 	var err error
 	if cfg.Stdout != "" {
 		if out, err = OpenFileLogger(cfg.Stdout, cfg); err != nil {
@@ -157,8 +202,30 @@ func ConfigureLogging(cfg LogConfig) error {
 			return fmt.Errorf("cannot open log file %s: %w", cfg.Stderr, err)
 		}
 	}
-	oldOut, oldErr := sinkOut, sinkErr
-	sinkCfg, sinkOut, sinkErr = &cfg, out, errl
+	to := streamOut
+	switch cfg.Access {
+	case "", "stdout":
+	case "stderr":
+		to = streamErr
+	case "off":
+		to = streamAccess
+	case cfg.Stdout:
+		acc = out // with the activity, in its file
+	case cfg.Stderr:
+		acc = errl
+	default:
+		if acc, err = OpenFileLogger(cfg.Access, cfg); err != nil {
+			if out != nil {
+				out.Close()
+			}
+			if errl != nil && errl != out {
+				errl.Close()
+			}
+			return fmt.Errorf("cannot open log file %s: %w", cfg.Access, err)
+		}
+	}
+	oldOut, oldErr, oldAcc := sinkOut, sinkErr, sinkAcc
+	sinkCfg, sinkOut, sinkErr, sinkAcc, accessTo = &cfg, out, errl, acc, to
 	// A reload may redirect either stream. Do this after publishing the new
 	// sinks, and only once when stdout and stderr shared one logger. Close also
 	// waits for background compression: a replacement using the same path must
@@ -168,6 +235,9 @@ func ConfigureLogging(cfg LogConfig) error {
 	}
 	if oldErr != nil && oldErr != oldOut {
 		oldErr.Close()
+	}
+	if oldAcc != nil && oldAcc != oldOut && oldAcc != oldErr {
+		oldAcc.Close()
 	}
 	return nil
 }
@@ -211,17 +281,25 @@ func RecentLog(n int, filter string) []string {
 
 // emit records one line. In the running proxy it takes no lock.
 func emit(problem bool, format string, args []any) {
-	line := time.Now().UTC().Format("2006-01-02T15:04:05.000Z") + " " + fmt.Sprintf(format, args...) + "\n"
+	stream := streamOut
+	if problem {
+		stream = streamErr
+	}
+	emitLine(stream, time.Now().UTC().Format("2006-01-02T15:04:05.000Z")+" "+fmt.Sprintf(format, args...)+"\n")
+}
+
+// emitLine records one whole line (with its newline) on stream.
+func emitLine(stream uint8, line string) {
+	problem := stream == streamErr
+	if stream == streamAccess && accessOff.Load() {
+		return
+	}
 	n := recentNext.Add(1) - 1
 	recentLines[n%recentLogSize].Store(&recentLine{n: n, text: strings.TrimSuffix(line, "\n")})
 	if !logAsync.Load() {
 		logMu.Lock()
 		defer logMu.Unlock()
-		if problem {
-			writeLog(sinkErr, logErr, line)
-		} else {
-			writeLog(sinkOut, logOut, line)
-		}
+		currentDestsLocked()[stream].write(line)
 		return
 	}
 	if pendingBytes.Add(int64(len(line))) > maxPendingLog {
@@ -229,7 +307,7 @@ func emit(problem bool, format string, args []any) {
 		droppedLog.Add(1)
 		return
 	}
-	if !logQueue.TryPush(queuedLine{line, problem}) {
+	if !logQueue.TryPush(queuedLine{line, stream}) {
 		pendingBytes.Add(-int64(len(line)))
 		droppedLog.Add(1)
 		return
@@ -245,6 +323,15 @@ func emit(problem bool, format string, args []any) {
 
 // logf writes one timestamped line of normal activity.
 func logf(format string, args ...any) { emit(false, format, args) }
+
+// vlogf is logf for the per-connection activity lines (accepted, route,
+// connected, closed, each request), which logging.verbose: false leaves out:
+// the access records say the same in one line.
+func vlogf(format string, args ...any) {
+	if logVerbose.Load() {
+		emit(false, format, args)
+	}
+}
 
 // errorf writes one timestamped line about a problem.
 func errorf(format string, args ...any) { emit(true, format, args) }

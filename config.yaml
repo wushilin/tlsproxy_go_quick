@@ -62,6 +62,16 @@ global:
 #                               #   redirected; the rules on 443 decide from there. Listener name
 #                               #   http-to-https-redirect (reserved); Stop/Start in the console
 
+# --- Server signature ---------------------------------------------------------------
+#   server_signature: tlsproxy_go_quick
+#                               # (default: tlsproxy_go_quick) what this proxy calls itself, the same
+#                               #   for every rule: the Server header of every response it answers or
+#                               #   reverse-proxies (replacing the upstream's) and the footer of
+#                               #   directory listings. Any text, e.g. nginx or "Apache"; none = no
+#                               #   Server header and no name on listings. reverse_proxy upstreams get
+#                               #   it in Via / X-Forwarded-By (neither with none). Passed-through TLS
+#                               #   is never touched. Go's TLS / HTTP/2 fingerprint still shows
+
 # --- Loop detection -----------------------------------------------------------------
 #   remember_nonce: true        # (default: true) remember a hash of every ClientHello passed
 #                               #   through for 10 s (at most 1M, newest win) and refuse one that
@@ -122,6 +132,16 @@ logging:
 #                               #   (>= max_keep: never compress). Compression runs in-process in
 #                               #   the background under a guard: until it finishes the log does
 #                               #   not rotate again, the live file just grows past max_size.
+#   access: stdout              # (default: stdout, with the activity stream wherever it goes)
+#                               #   access records: one line per connection (passed through,
+#                               #   terminated, served, relayed, denied, rejected) and per HTTP
+#                               #   request answered here. stderr, off, or a file of its own
+#   access_format: logfmt       # (default: logfmt) key=value; or json, one object per line
+#   access_tag: none            # (default: none) node=<tag> on every record: any text, or
+#                               #   hostname for this machine's name
+#   verbose: true               # (default: true) also the per-connection activity lines (accepted /
+#                               #   route / connected / closed / each request); false leaves them to
+#                               #   the access records. Problems (stderr) are always logged
 
 # --- Web console ----------------------------------------------------------------
 # Dashboard, connections, certificates, log and a config editor. Its settings

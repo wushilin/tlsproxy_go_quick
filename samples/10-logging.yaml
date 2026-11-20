@@ -21,6 +21,13 @@ logging:
                                     #   compress_after >= max_keep : never compress
                                     #   compress_after: 0          : compress every rotated file
                                     #   max_keep: 0                : keep nothing, just start the file over
+  access: /var/log/tlsproxy/access.log   # access records, one line per connection / served request;
+                                    #   default stdout (with the activity), or stderr, off
+  access_format: logfmt             # (default) key=value; or json, one object per line
+  access_tag: hostname              # node=<name> on every record (default: none)
+  verbose: false                    # (default: true) false drops the per-connection activity
+                                    #   lines (accepted / route / connected / closed): the access
+                                    #   record says the same in one line
 
 # Rotation is numbered (file -> file.1 -> file.2 ...). Compression runs
 # in-process in the background under a guard: until it finishes the log does

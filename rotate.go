@@ -16,10 +16,15 @@ type LogConfig struct {
 	MaxSize       int64  // rotate once the file has reached this many bytes
 	MaxKeep       int    // rotated generations kept: file.1 .. file.<MaxKeep>
 	CompressAfter int    // generations above this number are gzip-compressed
+
+	Access       string // access records: "" (with stdout), "stderr", "off", or a file
+	AccessFormat string // logfmt or json
+	AccessTag    string // node=<this> on every access record ("" = none; "hostname" = this machine's)
+	Verbose      bool   // also the per-connection activity lines (accepted, route, connected, closed)
 }
 
 func defaultLogConfig() LogConfig {
-	return LogConfig{MaxSize: 15 << 20, MaxKeep: 10, CompressAfter: 3}
+	return LogConfig{MaxSize: 15 << 20, MaxKeep: 10, CompressAfter: 3, AccessFormat: "logfmt", Verbose: true}
 }
 
 // FileLogger is a size-rotated log file with numbered generations (file.1 is

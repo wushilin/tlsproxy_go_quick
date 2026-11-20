@@ -14,12 +14,37 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 // serverName is what this proxy calls itself in a Server header and on its
 // own pages.
 const serverName = "tlsproxy_go_quick"
+
+// signature is server_signature from the configuration in use: what the
+// proxy calls itself to clients ("" = nothing). One for the whole process;
+// set at start-up and on every reload (setSignature).
+var signature atomic.Pointer[string]
+
+func setSignature(s string) { signature.Store(&s) }
+
+// currentSignature is the signature in use, serverName until one is set.
+func currentSignature() string {
+	if p := signature.Load(); p != nil {
+		return *p
+	}
+	return serverName
+}
+
+// setServerHeader sets h's Server header to the signature, or removes it.
+func setServerHeader(h http.Header) {
+	if s := currentSignature(); s != "" {
+		h.Set("Server", s)
+	} else {
+		h.Del("Server")
+	}
+}
 
 // repoURL is where it comes from, linked from the listing page.
 const repoURL = "https://github.com/wushilin/tlsproxy_go_quick"
@@ -72,7 +97,10 @@ func serveListing(w http.ResponseWriter, r *http.Request, root *os.Root, name st
 	if err != nil {
 		return err
 	}
-	d := listingData{Host: r.Host, Server: serverName, Repo: repoURL}
+	d := listingData{Host: r.Host, Server: currentSignature()}
+	if d.Server == serverName {
+		d.Repo = repoURL // only this proxy's own name links to where it comes from
+	}
 	var total int64
 	for _, e := range all {
 		n := e.Name()

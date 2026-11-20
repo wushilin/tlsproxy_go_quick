@@ -39,6 +39,7 @@ var configReference = []sectionDoc{
 		{"deny_cache_size", "4096", "Cached denied names, kept apart from the allowed ones. 0 = off."},
 		{"reload_interval", "5", "Check the file every N seconds and apply changes (minimum 5). 0 = only on console saves."},
 		{"stats_interval", "60", "Log a one-line summary every N seconds. 0 = never."},
+		{"server_signature", "tlsproxy_go_quick", "What this proxy calls itself, the same for every rule: the Server header of everything it answers or reverse-proxies (replacing the upstream's), and the footer of directory listings. Any text (e.g. nginx), or none to send no Server header and name nothing. Requests passed to a reverse_proxy upstream carry it in Via and X-Forwarded-By (neither with none). Passed-through TLS is never touched."},
 		{"cert_root", "./certs", "Where all certificates live: your CAs, one folder each (ca001, the default CA, made at start-up; ca002, ...) with what they issued, and acme/ with the automatic certificates and the ACME account key. Was ca_root (and cert_path) before v1.5.0."},
 		{"expiry_threshold_days", "15", "Renew this many days before expiry (or at a third of the lifetime left, if later)."},
 		{"acme_agree_tos", "false", "Must be true for cert: auto: you accept the CA's terms of service."},
@@ -131,12 +132,16 @@ var configReference = []sectionDoc{
 		{"word", "(required)", "The tunnel's word, e.g. k3f9-x2mq-7hpa. Anyone who knows it can connect: keep it secret."},
 		{"client_token", "(none)", "The client token the serving side asks for (pf-client serve --client-token), 8 to 128 printable characters."},
 	}},
-	{"logging", "Where the two log streams go: activity (stdout) and problems (stderr).", []keyDoc{
+	{"logging", "Where the log streams go: activity (stdout), problems (stderr) and access records (with stdout unless access says otherwise).", []keyDoc{
 		{"stdout", "the process's stdout", "File for activity: accepted, route, connected, closed, stats, reloads."},
 		{"stderr", "the process's stderr", "File for problems."},
 		{"max_size", "15MiB", "Rotate a file once it reaches this size (K, M, G)."},
 		{"max_keep", "10", "Rotated generations kept: file.1 (newest) .. file.N."},
 		{"compress_after", "3", "Generations above this number are gzip-compressed."},
+		{"access", "stdout", "Access records: one line per connection (passed through, terminated, served, relayed, denied, rejected) and one per HTTP request this proxy answers. stdout (with the activity stream, wherever it goes), stderr, off, or a file of its own (rotated like the others). Each line says access first, after the time."},
+		{"access_format", "logfmt", "logfmt (key=value, quoted where needed), or json (one object per line, with ts and log: access)."},
+		{"access_tag", "(none)", "node=<tag> on every access record, to tell machines apart in one place: any text, or hostname for this machine's name."},
+		{"verbose", "true", "Also the per-connection activity lines (accepted, route, connected, closed, each request). false leaves them out: the access records say the same in one line. Problems are always logged."},
 	}},
 	{"console", "The web console is not in this file: it is set at start-up, so nothing saved from it can change it. On by default; -noconsole turns it off.", []keyDoc{
 		{"-console_domain", "$CONSOLE_DOMAIN, or none", "The name it is served under, as a rule of its listener that this file can't override. Unset or none: that listener's $no_sni (clients by IP address), with a local CA's certificate; an IP address: the same, for that address."},
