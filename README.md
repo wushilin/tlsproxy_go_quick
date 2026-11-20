@@ -858,6 +858,28 @@ endpoints:                             # the tunnels on them
   The listener's own certificate is pinned from that answer, so only the
   https certificate needs to be trusted: from the system roots, or
   `ca_file`.
+- **A hub at a path of its own** (pf-simple 0.16.3 or later, its
+  `[console] path`) has the path in `hub`; with no path it is `/pf`. This
+  is a hub that shares its name and port with something else, or is kept
+  at a path that is hard to guess:
+
+  ```yaml
+  exchanges:
+    - name: home-hub                   # no path: the hub is at /pf
+      hub: https://relay.example.com/
+    - name: gate-hub                   # the hub at /xzfe-aeeg-e2da
+      hub: https://gate.example.com/xzfe-aeeg-e2da/
+
+  endpoints:
+    - name: office
+      exchange: gate-hub               # nothing else changes: the path is the exchange's
+      word: k3f9-x2mq-7hpa
+  ```
+
+  The path is the one the hub is set to, with or without the trailing
+  slash; each part between slashes is 1 to 64 of `A-Z a-z 0-9 . _ ~ -`. An
+  exchange's **Check** in the console asks the hub at that path, and says
+  the hub may be at another path if nothing answers there.
 - **`word` and `client_token` are secrets**: whoever knows them can connect
   to the tunnel. Logs and the console show only the word's first group, and
   the console never sends either back to the browser.
