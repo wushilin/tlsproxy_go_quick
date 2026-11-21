@@ -1441,9 +1441,12 @@ func (r *relay) endDirection(d direction, how string, forward bool) {
 		// must not be logged as the first.
 		defer to.CloseWrite()
 	}
-	r.dirState(d).Store(dirHalfClosed)
 	c := r.c
 	c.mu.Lock()
+	// Marked under the lock: when both ends close at once, the one that
+	// gets here first is on record as first, never "both directions ended"
+	// with no first.
+	r.dirState(d).Store(dirHalfClosed)
 	if c.closed {
 		c.mu.Unlock()
 		return
