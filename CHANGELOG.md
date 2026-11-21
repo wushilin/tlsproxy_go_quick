@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.10.0
+
+- A serve entry's reverse proxy can go through a pf-simple tunnel:
+  `target: relay://<endpoint>` is plain HTTP through it,
+  `relay+ssl://<endpoint>` TLS. `tls_verify` applies to `relay+ssl://` as
+  to `https://` (`false` = skip verify); the certificate is checked
+  against the Host sent on (`force_host`, else the client's), which is
+  also the SNI. `relay+ssl://` can use HTTP/2.
+- A target naming an endpoint that does not exist, a malformed relay
+  target, or `tls_verify` on a plain `relay://` target fails the config
+  load, so the console refuses to save it.
+- Console: the reverse proxy's target field offers the endpoints in both
+  forms and says what the target means or why it would not save; the
+  verify checkbox shows for `relay+ssl://`. The Relays page counts serve
+  entries as uses: they show under "used by", keep the endpoint from
+  being deleted, and follow a rename.
+
 ## v1.9.0
 
 - Access log: every connection gets one `access` record when it ends,

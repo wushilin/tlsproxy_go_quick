@@ -11,6 +11,53 @@ import (
 	"testing"
 )
 
+// A serve entry's relay:// and relay+ssl:// targets are uses of the
+// endpoint: renaming it renames them, keeping each one's scheme, and it
+// cannot be deleted while they use it.
+func TestEditRelaysServeEntries(t *testing.T) {
+	text := relayListener + `routes:
+  - listener: a
+    rules:
+      - domain: wiki.test
+        cert: local-ca
+        serve:
+          - {type: reverse_proxy, prefix: /, target: "relay+ssl://office", tls_verify: false}
+          - {type: reverse_proxy, prefix: /api/, target: "RELAY://office"}
+          - {type: reverse_proxy, prefix: /other/, target: "http://10.0.0.1:8080"}
+exchanges:
+  - {name: home, hub: "https://relay.example.com/"}
+endpoints:
+  - {name: office, exchange: home, word: k3f9-x2mq-7hpa}
+`
+	cfg, err := ParseConfig(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, endpoints := relayViews(cfg, nil)
+	if len(endpoints) != 1 || len(endpoints[0].UsedBy) != 2 || endpoints[0].UsedBy[0].Prefix == "" {
+		t.Fatalf("used by: %+v", endpoints)
+	}
+	if _, _, err := editRelays(text, relayEdit{Kind: "endpoint", Op: "delete", Name: "office"}); err == nil || !strings.Contains(err.Error(), "used by 2 rules and serve entries") {
+		t.Fatalf("delete: %v", err)
+	}
+	out, notes, err := editRelays(text, relayEdit{Kind: "endpoint", Op: "update", Name: "office", NewName: "head-office", Exchange: "home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "relay+ssl://head-office") || !strings.Contains(out, "RELAY://head-office") || strings.Contains(out, "//office") || len(notes) != 1 {
+		t.Fatalf("%v\n%s", notes, out)
+	}
+	cfg, err = ParseConfig(out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	for _, s := range cfg.Rules[0].Routes {
+		if s.Prefix != "/other/" && (s.endpoint == nil || s.EndpointName != "head-office") {
+			t.Errorf("%s: %+v", s.Prefix, s)
+		}
+	}
+}
+
 // The Relays page's edits: what they write, what they keep, what they
 // rename, and what they refuse.
 func TestEditRelays(t *testing.T) {
@@ -100,7 +147,7 @@ func TestEditRelays(t *testing.T) {
 
 	// Nothing used can go; the last item takes its section with it.
 	fails(relayEdit{Kind: "exchange", Op: "delete", Name: "home-hub"}, "exchange home-hub is used by 1 endpoint: change them first")
-	fails(relayEdit{Kind: "endpoint", Op: "delete", Name: "head-office"}, "endpoint head-office is used by 2 rules: change them first")
+	fails(relayEdit{Kind: "endpoint", Op: "delete", Name: "head-office"}, "endpoint head-office is used by 2 rules and serve entries: change them first")
 	text = regexp.MustCompile(`(?i)['"]?relay://head-office['"]?`).ReplaceAllString(text, `"10.0.0.2:443"`)
 	text = step(relayEdit{Kind: "endpoint", Op: "delete", Name: "head-office"})
 	text = step(relayEdit{Kind: "exchange", Op: "delete", Name: "home-hub"})

@@ -37,6 +37,7 @@ type endpointUseView struct {
 	Rule     string `json:"rule"` // the rule's domain
 	Listener string `json:"listener"`
 	Line     int    `json:"line"`
+	Prefix   string `json:"prefix,omitempty"` // a serve entry's reverse proxy (relay:// or relay+ssl://)
 }
 
 type endpointView struct {
@@ -74,6 +75,11 @@ func relayViews(cfg *Config, pool *relayPool) ([]exchangeView, []endpointView) {
 		for _, r := range cfg.Rules {
 			if r.EndpointName == name {
 				v.UsedBy = append(v.UsedBy, endpointUseView{Rule: r.Source, Listener: r.Listener, Line: r.Line})
+			}
+			for _, s := range r.Routes {
+				if s.EndpointName == name {
+					v.UsedBy = append(v.UsedBy, endpointUseView{Rule: r.Source, Listener: r.Listener, Line: r.Line, Prefix: s.Prefix})
+				}
 			}
 		}
 		endpoints = append(endpoints, v)
@@ -181,12 +187,21 @@ func (d *yamlDoc) exchangeRefs(name string) []*yaml.Node {
 	return out
 }
 
-// endpointRefs are the target: values of the rules that go through name.
+// endpointRefs are the target: values that go through name: of rules
+// (relay://) and of their serve entries (relay:// or relay+ssl://).
 func (d *yamlDoc) endpointRefs(name string) []*yaml.Node {
 	var out []*yaml.Node
 	routes := mapGet(d.root, "routes")
 	if routes == nil {
 		return nil
+	}
+	add := func(v *yaml.Node, schemes ...string) {
+		if v == nil {
+			return
+		}
+		if scheme, n := relayTargetName(v.Value, schemes...); scheme != "" && n == name {
+			out = append(out, v)
+		}
 	}
 	for _, g := range routes.Content {
 		rs := mapGet(g, "rules")
@@ -194,13 +209,29 @@ func (d *yamlDoc) endpointRefs(name string) []*yaml.Node {
 			continue
 		}
 		for _, r := range rs.Content {
-			if v := mapGet(r, "target"); v != nil && len(v.Value) > len(relayScheme) &&
-				strings.EqualFold(v.Value[:len(relayScheme)], relayScheme) && v.Value[len(relayScheme):] == name {
-				out = append(out, v)
+			add(mapGet(r, "target"), relayScheme)
+			if serve := mapGet(r, "serve"); serve != nil && serve.Kind == yaml.SequenceNode {
+				for _, e := range serve.Content {
+					if e.Kind == yaml.MappingNode {
+						add(mapGet(e, "target"), relayScheme, relaySSLScheme)
+					}
+				}
 			}
 		}
 	}
 	return out
+}
+
+// relayTargetName splits a target written with one of schemes into the
+// scheme as written and the endpoint's name; "" if it has none of them.
+func relayTargetName(v string, schemes ...string) (string, string) {
+	v = strings.TrimSpace(v)
+	for _, scheme := range schemes {
+		if len(v) > len(scheme) && strings.EqualFold(v[:len(scheme)], scheme) {
+			return v[:len(scheme)], strings.TrimSuffix(v[len(scheme):], "/")
+		}
+	}
+	return "", ""
 }
 
 func plural(n int, one, many string) string {
@@ -236,7 +267,7 @@ func editRelays(text string, e relayEdit) (string, []string, error) {
 	}
 	if e.Op == "delete" {
 		if n := len(refs(e.Name)); n > 0 {
-			users := map[string]string{"exchange": plural(n, "endpoint", "endpoints"), "endpoint": plural(n, "rule", "rules")}[e.Kind]
+			users := map[string]string{"exchange": plural(n, "endpoint", "endpoints"), "endpoint": plural(n, "rule or serve entry", "rules and serve entries")}[e.Kind]
 			return "", nil, fmt.Errorf("%s %s is used by %s: change them first", e.Kind, e.Name, users)
 		}
 		d.dropItem(section, item)
@@ -326,10 +357,11 @@ func editRelays(text string, e relayEdit) (string, []string, error) {
 				if e.Kind == "exchange" {
 					r.Value = name
 				} else {
-					r.Value = relayScheme + name
+					scheme, _ := relayTargetName(r.Value, relayScheme, relaySSLScheme)
+					r.Value = scheme + name // relay:// or relay+ssl://, as it was
 				}
 			}
-			users := map[string]string{"exchange": plural(len(rs), "endpoint", "endpoints"), "endpoint": plural(len(rs), "rule", "rules")}[e.Kind]
+			users := map[string]string{"exchange": plural(len(rs), "endpoint", "endpoints"), "endpoint": plural(len(rs), "target", "targets")}[e.Kind]
 			notes = append(notes, fmt.Sprintf("%s %s renamed %s in %s", e.Kind, e.Name, name, users))
 		}
 	}

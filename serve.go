@@ -145,11 +145,56 @@ func (s *Server) newServeState(cfg *Config) *serveState {
 				}
 				st.dirs[route] = d
 			case routeProxy:
-				st.proxies[route] = reverseProxy(r, route, transport(route.TLSVerify))
+				t := transport(route.TLSVerify)
+				if route.endpoint != nil {
+					t = st.relayTransport(s, cfg, route)
+				}
+				st.proxies[route] = reverseProxy(r, route, t)
 			}
 		}
 	}
 	return st
+}
+
+// relayTransport is a reverse_proxy route's own transport through its
+// endpoint's tunnel: every connection it makes is a stream on the tunnel,
+// wherever the request's URL says. With relay+ssl:// it speaks TLS through
+// the stream, checking the certificate against the request's URL host,
+// which reverseProxy sets to the Host sent on (see relayHost).
+func (st *serveState) relayTransport(s *Server, cfg *Config, route *ServiceRoute) *http.Transport {
+	e := route.endpoint
+	t := &http.Transport{
+		Proxy: nil,
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return s.relays.dial(e, cfg.ConnectTimeout)
+		},
+		ForceAttemptHTTP2:   route.RelayTLS, // h2 by ALPN; plaintext stays HTTP/1.1
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	if route.RelayTLS {
+		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: !route.TLSVerify, MinVersion: tls.VersionTLS12}
+	}
+	st.transports = append(st.transports, t)
+	return t
+}
+
+// relayHost is the URL host of a request sent through a tunnel: the name
+// the Host header sent on carries (force_host, else the client's), which a
+// relay+ssl:// target is sent as SNI and has its certificate checked
+// against. A request without one uses the name the client connected with.
+func relayHost(out, in *http.Request) string {
+	h := out.Host
+	if name, _, err := net.SplitHostPort(h); err == nil {
+		h = name
+	}
+	if h == "" && in.TLS != nil {
+		h = in.TLS.ServerName
+	}
+	if h == "" {
+		h = "localhost"
+	}
+	return h
 }
 
 // retire lets go of a state the configuration no longer uses: its web
@@ -526,7 +571,11 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request, sc *served
 		note += serveFile(w, r, route, root, files)
 	case routeProxy:
 		rt.serve.proxies[route].ServeHTTP(w, r)
-		note += " -> " + route.Target.Scheme + "://" + route.TargetAddr()
+		if route.EndpointName != "" {
+			note += " -> " + route.TargetAddr()
+		} else {
+			note += " -> " + route.Target.Scheme + "://" + route.TargetAddr()
+		}
 	}
 	return note
 }
@@ -754,6 +803,12 @@ func reverseProxy(rule *Rule, route *ServiceRoute, transport *http.Transport) *h
 			out.Host = pr.In.Host
 			if route.ForceHost != "" {
 				out.Host = route.ForceHost
+			}
+			if route.endpoint != nil { // the tunnel decides where it lands; the URL names the certificate
+				out.URL.Scheme, out.URL.Host = "http", relayHost(out, pr.In)
+				if route.RelayTLS {
+					out.URL.Scheme = "https"
+				}
 			}
 			client, _, err := net.SplitHostPort(pr.In.RemoteAddr)
 			if err != nil {

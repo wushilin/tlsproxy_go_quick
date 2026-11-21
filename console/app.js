@@ -1491,6 +1491,33 @@ function argsList(s) {
 
 // ---- serve entries: one row each ----
 
+// serveTarget reads a reverse proxy's target as the config file does
+// (serve_config.go parseTarget): { kind, name|host, problem }. kind is http,
+// https, relay or relay+ssl; problem is why it would not save ("" = none).
+const SERVE_TARGET_FORMS = "http://host:port, https://host:port, relay://<endpoint> or relay+ssl://<endpoint>";
+function serveTarget(v) {
+  const t = String(v ?? "").trim();
+  const names = ui.state && ui.state.endpoints;
+  const known = names ? ` (endpoints: ${names.length ? names.join(", ") : "none yet"})` : "";
+  if (!t) return { problem: `A reverse proxy needs its target: ${SERVE_TARGET_FORMS}.` };
+  const r = /^(relay|relay\+ssl):\/\/(.*)$/i.exec(t);
+  if (r) {
+    const kind = r[1].toLowerCase(), name = r[2].replace(/\/$/, "");
+    if (!name) return { kind, problem: `Name the endpoint after ${kind}://, e.g. ${kind}://office${known}.` };
+    if (!/^[A-Za-z0-9_+-]{1,64}$/.test(name)) return { kind, problem: `After ${kind}:// comes only an endpoint's name (no port or path: the tunnel's serving side decides where it lands)${known}.` };
+    if (names && !names.includes(name)) return { kind, name, problem: `There is no endpoint named ${name}${known}: add it on the Relays page, or pick one from the list.` };
+    return { kind, name, problem: "" };
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+._-]*):\/\//.exec(t);
+  if (scheme && /relay|ssl|tls/i.test(scheme[1])) return { problem: `Unknown scheme ${scheme[1]}://: write relay+ssl://<endpoint> for TLS through a tunnel, relay://<endpoint> for plain HTTP through it.` };
+  const u = /^(https?):\/\/([^/?#\s@]+)\/?$/i.exec(t);
+  if (!u) {
+    if (/^https?:\/\/[^/?#\s]*[/?#]./i.test(t)) return { problem: "A target is scheme://host:port only, no path: the request's path is sent as it is (or without the prefix, with Strip the prefix)." };
+    return { problem: `The target must be ${SERVE_TARGET_FORMS}.` };
+  }
+  return { kind: u[1].toLowerCase(), host: u[2], problem: "" };
+}
+
 const SERVE_KEYS = ["type", "prefix", "target", "base_dir", "directory_listing", "strip_prefix", "force_host", "tls_verify", "basic_auth", "oidc", "require_mfa", "require_groups", "require_roles", "identity_secret", "identity_secret_file"];
 const SERVE_LISTS = ["require_groups", "require_roles"];
 
@@ -1498,6 +1525,7 @@ const SERVE_LISTS = ["require_groups", "require_roles"];
 // or one text with ; or , between) or a form field.
 const listOf = (v) => (Array.isArray(v) ? v.map(String) : String(v || "").split(/[;,]/)).map((s) => s.trim()).filter(Boolean);
 
+let serveRowSeq = 0;
 function serveRow(e) {
   const row = el("div", "serve-row");
   const field = (label, input, cls, hint) => {
@@ -1537,6 +1565,16 @@ function serveRow(e) {
   const prefix = text("s-prefix", e.prefix, "/");
   const where = text("s-where", e.type === "static_content" ? e.base_dir : e.target, "");
   const whereField = field("", where, "grow");
+  // The endpoints, offered as relay://… and relay+ssl://… as the target is typed.
+  const targets = el("datalist");
+  targets.id = "serve-targets-" + (++serveRowSeq);
+  for (const n of (ui.state && ui.state.endpoints) || []) {
+    for (const [scheme, what] of [["relay://", "plain HTTP through the tunnel"], ["relay+ssl://", "TLS through the tunnel"]]) {
+      const o = el("option"); o.value = scheme + n; o.label = `endpoint ${n}: ${what}`; targets.appendChild(o);
+    }
+  }
+  const whereHint = el("em", "hint");
+  whereField.append(targets, whereHint);
   const main = el("div", "serve-grid");
   main.append(field("Path prefix", prefix, "", "the longest matching prefix serves a request"), whereField);
 
@@ -1545,7 +1583,8 @@ function serveRow(e) {
   const host = text("s-host", e.force_host, "unset: the Host the client sent");
   const hostField = field("Host header sent to the target", host, "wide");
   const [stripL, strip] = check("s-strip", "Strip the prefix before forwarding", String(e.strip_prefix) === "true");
-  const [verifyL, verify] = check("s-verify", "Verify the target's certificate (https:// targets)", String(e.tls_verify) !== "false");
+  const [verifyL, verify] = check("s-verify", "Verify the target's certificate", String(e.tls_verify) !== "false");
+  const verifyText = verifyL.lastChild;
   opts.append(hostField, stripL, verifyL);
 
   // Static options.
@@ -1622,17 +1661,39 @@ function serveRow(e) {
     ident.hidden = type.value !== "reverse_proxy" || !auth.value;
     const proxy = type.value === "reverse_proxy";
     whereField.firstChild.textContent = proxy ? "Target URL" : "Folder";
-    where.placeholder = proxy ? "http://127.0.0.1:8080" : "/opt/www/site";
+    where.placeholder = proxy ? "http://127.0.0.1:8080 or relay://<endpoint>" : "/opt/www/site";
     opts.hidden = !proxy;
     sopts.hidden = proxy;
-    verifyL.hidden = !/^https:/i.test(where.value.trim());
+    if (proxy) where.setAttribute("list", targets.id); else where.removeAttribute("list");
+    // What the target means, or why it would not save.
+    const t = proxy ? serveTarget(where.value) : { problem: "" };
+    const typed = where.value.trim() !== "";
+    const sentHost = host.value.trim() ? host.value.trim().replace(/:\d+$/, "") : "the Host the client sent";
+    let say = "";
+    if (!proxy) { /* a folder: nothing to say */ }
+    else if (!typed) say = `${SERVE_TARGET_FORMS}; a relay target goes through a tunnel of the Relays page` + (((ui.state && ui.state.endpoints) || []).length ? " (pick one from the list)" : " (none yet)");
+    else if (t.problem) say = t.problem;
+    else if (t.kind === "http") say = `Plain HTTP to ${t.host}.`;
+    else if (t.kind === "https") say = `TLS to ${t.host}` + (verify.checked ? ", its certificate checked against that name." : ": its certificate is NOT checked.");
+    else if (t.kind === "relay") say = `Plain HTTP through the tunnel of endpoint ${t.name}: its serving side decides where it lands. For TLS through it, write relay+ssl://${t.name}.`;
+    else say = `TLS through the tunnel of endpoint ${t.name} (its serving side decides where it lands)` + (verify.checked
+      ? `, the certificate checked against ${sentHost} (set the Host header below to check another name).`
+      : ": its certificate is NOT checked.");
+    setText(whereHint, say);
+    whereHint.hidden = !say;
+    whereHint.classList.toggle("bad", proxy && typed && !!t.problem);
+    where.classList.toggle("bad", proxy && typed && !!t.problem);
+    verifyL.hidden = !(t.kind === "https" || t.kind === "relay+ssl");
+    setText(verifyText, t.kind === "relay+ssl"
+      ? ` Verify the certificate presented through the tunnel (against ${sentHost}); off = skip verify`
+      : " Verify the target's certificate; off = skip verify");
     // An example request and where it goes: a static folder, like a proxy
     // with strip_prefix, gets the path after the prefix.
     const path = (prefix.value.trim() || "/").replace(/\/$/, "") + "/x";
     const sent = !proxy || strip.checked ? "/x" : path;
     summary.textContent = `${path} → ${(where.value.trim() || "…").replace(/\/$/, "")}${sent}`;
   };
-  for (const n of [type, prefix, where, strip, auth]) n.addEventListener(n.tagName === "SELECT" || n.type === "checkbox" ? "change" : "input", sync);
+  for (const n of [type, prefix, where, strip, auth, verify, host]) n.addEventListener(n.tagName === "SELECT" || n.type === "checkbox" ? "change" : "input", sync);
   sync();
   return row;
 }
@@ -1816,7 +1877,7 @@ function quickChecks(v) {
     if (!entries.length) out.push([1, "Add at least one entry: a reverse proxy or static files."]);
     entries.forEach((e, i) => {
       if (!e.prefix || !e.prefix.startsWith("/")) out.push([1, `Entry ${i + 1}: the prefix is a path starting with /.`]);
-      else if (e.type === "reverse_proxy" && !e.target) out.push([1, `Entry ${i + 1}: a reverse proxy needs its target, http://host:port.`]);
+      else if (e.type === "reverse_proxy" && serveTarget(e.target).problem) out.push([1, `Entry ${i + 1}: ${serveTarget(e.target).problem}`]);
       else if (e.type === "static_content" && !e.base_dir) out.push([1, `Entry ${i + 1}: static files need their folder.`]);
     });
     if (radio("f-certsrc") === "local" && !$("f-cert-ca").value) out.push([2, "Choose a certificate authority, or make one on the Certificates page first."]);
@@ -3768,12 +3829,12 @@ function renderRelays(d) {
     edit.addEventListener("click", () => openRelayDialog({ kind: "endpoint", op: "update", item: e }));
     const del = armedButton("Delete", () => relayChange({ kind: "endpoint", op: "delete", name: e.name }, `Deleted ${e.name}`).catch(() => {}));
     del.disabled = !editable || e.usedBy.length > 0;
-    del.title = e.usedBy.length ? "Rules go through it: change them first" : `Delete the endpoint ${e.name}`;
+    del.title = e.usedBy.length ? "Rules or serve entries go through it: change them first" : `Delete the endpoint ${e.name}`;
     act.append(relayCheckButton("endpoint", e.name, out, "Ask the hub over QUIC whether the tunnel is served (a wrong word counts as a guess there)"), edit, del);
     head.appendChild(act);
     main.appendChild(head);
     relayFact(main, [["exchange", e.exchange], ["word", e.word]]);
-    relayFact(main, [["used by", e.usedBy.length ? e.usedBy.map((u) => `${u.rule} on ${u.listener}` + (u.line ? ` (line ${u.line})` : "")).join(", ") : "no rule"]]);
+    relayFact(main, [["used by", e.usedBy.length ? e.usedBy.map((u) => `${u.rule}${u.prefix ? " " + u.prefix + " (reverse proxy)" : ""} on ${u.listener}` + (u.line ? ` (line ${u.line})` : "")).join(", ") : "no rule"]]);
     main.appendChild(out);
     card.appendChild(main);
     elist.appendChild(card);
@@ -3799,7 +3860,7 @@ function openRelayDialog(change) {
   setText($("relay-dlg-title"), (edit ? "Edit " : "Add ") + (x ? "an exchange" : "an endpoint") + (edit ? `: ${it.name}` : ""));
   setText($("relay-dlg-hint"), x
     ? "A pf-simple relay hub (0.16.0 or later, with its QUIC listener on). Renaming it renames it in its endpoints."
-    : "A tunnel on an exchange. Renaming it renames it in the rules that go through it (relay://<name>).");
+    : "A tunnel on an exchange. Renaming it renames it in the rules (relay://<name>) and reverse proxies (relay://<name>, relay+ssl://<name>) that go through it.");
   setText($("relay-name-label"), x ? "Name" : "Name (rules say relay://<name>)");
   $("relay-name").placeholder = x ? "home-hub" : "office";
   for (const id of ["relay-f-hub", "relay-f-ca"]) $(id).hidden = !x;

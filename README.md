@@ -849,6 +849,25 @@ endpoints:                             # the tunnels on them
   passing TLS through, terminating it with a plaintext or TLS upstream
   (`upstream_tls`, `upstream_tls_verify`, `upstream_sni`), `proxy: v1 | v2`,
   and speed limits. Only splice(2) is out: the bytes are copied.
+- **A reverse proxy through a tunnel**: a serve entry's `target` can be
+  `relay://<endpoint>` (plain HTTP through the tunnel) or
+  `relay+ssl://<endpoint>` (TLS through it). As with `https://`,
+  `tls_verify: false` skips checking the certificate; with it on, the
+  certificate is checked against the Host header sent on (`force_host`,
+  else the client's), which is also the SNI.
+
+  ```yaml
+      - domain: wiki.example.com
+        cert: auto
+        serve:
+          - {type: reverse_proxy, prefix: /, target: "relay+ssl://wiki", force_host: wiki.internal}
+          - {type: reverse_proxy, prefix: /metrics/, target: "relay://office"}   # plain HTTP through the tunnel
+  ```
+
+  Either of these is an error, so the file does not load and the console
+  does not save it: an endpoint that is not in `endpoints`, and
+  `tls_verify` with a `relay://` target (plaintext has no certificate).
+  The console's target field offers the endpoints in both forms. Plain HTTP stays HTTP/1.1; TLS offers HTTP/2.
 - **One QUIC connection per endpoint**, made at the first connection and
   made again when it is lost; every connection is a stream on it. A reload
   keeps it while the endpoint's settings (its exchange's included) stay the

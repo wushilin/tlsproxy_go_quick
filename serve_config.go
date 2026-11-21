@@ -43,11 +43,17 @@ type ServiceRoute struct {
 	Target      *url.URL
 	StripPrefix bool   // reverse_proxy: the prefix is cut from the path sent on
 	ForceHost   string // reverse_proxy: the Host sent on; "" = the client's
-	TLSVerify   bool   // reverse_proxy to https://: verify the target's certificate
-	BaseDir     string // static_content: the folder the prefix stands for
-	Listing     bool   // static_content: a folder without index.html or index.htm is listed (else 403)
-	BasicAuth   string // the basic_auth that guards it; "" = none
-	auth        *BasicAuth
+	TLSVerify   bool   // reverse_proxy to https:// or relay+ssl://: verify the target's certificate
+	// EndpointName is set by target: relay://<name> (plain HTTP through the
+	// tunnel) or relay+ssl://<name> (TLS through it, RelayTLS); Target is
+	// then that URL, and endpoint is set by resolveRelays.
+	EndpointName string
+	RelayTLS     bool
+	endpoint     *Endpoint
+	BaseDir      string // static_content: the folder the prefix stands for
+	Listing      bool   // static_content: a folder without index.html or index.htm is listed (else 403)
+	BasicAuth    string // the basic_auth that guards it; "" = none
+	auth         *BasicAuth
 	// OIDC is the oidc item a browser signs in with first; "" = none. The
 	// requirements apply to whoever signed in.
 	OIDC          string
@@ -63,8 +69,12 @@ type ServiceRoute struct {
 	identitySecret     []byte
 }
 
-// TargetAddr is the host:port a reverse_proxy route connects to.
+// TargetAddr is the host:port a reverse_proxy route connects to, or its
+// relay://<name> (relay+ssl://<name>).
 func (s *ServiceRoute) TargetAddr() string {
+	if s.EndpointName != "" {
+		return s.Target.String()
+	}
 	if s.Target.Port() != "" {
 		return s.Target.Host
 	}
@@ -134,6 +144,9 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 		case "target":
 			if s.Target, err = parseTarget(v); err != nil {
 				return nil, fmt.Errorf("target: %v", err)
+			}
+			if s.Target.Scheme == "relay" || s.Target.Scheme == "relay+ssl" {
+				s.EndpointName, s.RelayTLS = s.Target.Host, s.Target.Scheme == "relay+ssl"
 			}
 		case "strip_prefix":
 			if s.StripPrefix, err = parseBool(v); err != nil {
@@ -210,13 +223,13 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 	case s.Prefix == "":
 		return nil, fmt.Errorf("prefix is required, e.g. prefix: / for everything")
 	case s.Type == routeProxy && s.Target == nil:
-		return nil, fmt.Errorf("type: %s needs target: http://host:port (or https://)", routeProxy)
+		return nil, fmt.Errorf("type: %s needs target: http://host:port, https://host:port, relay://<endpoint> or relay+ssl://<endpoint>", routeProxy)
 	case s.Type == routeStatic && s.BaseDir == "":
 		return nil, fmt.Errorf("type: %s needs base_dir, the folder the prefix stands for", routeStatic)
 	case s.Type == routeStatic && !strings.HasSuffix(s.Prefix, "/"):
 		return nil, fmt.Errorf("a %s prefix is a folder and ends with /, got %q", routeStatic, s.Prefix)
-	case verify != nil && s.Target != nil && s.Target.Scheme != "https":
-		return nil, fmt.Errorf("tls_verify only applies to an https:// target")
+	case verify != nil && s.Target != nil && s.Target.Scheme != "https" && s.Target.Scheme != "relay+ssl":
+		return nil, fmt.Errorf("tls_verify only applies to an https:// or relay+ssl:// target: %s is plaintext", s.Target)
 	case s.OIDC != "" && s.BasicAuth != "":
 		return nil, fmt.Errorf("give basic_auth or oidc, not both")
 	case seen["identity_secret"] && seen["identity_secret_file"]:
@@ -244,15 +257,35 @@ func parseServiceRule(key string, opts [][2]string, line int) (*ServiceRoute, er
 	return s, nil
 }
 
+// Reverse proxy targets through a relay tunnel: plain HTTP, or TLS.
+const (
+	relaySSLScheme = "relay+ssl://"
+	targetForms    = "http://host:port, https://host:port, relay://<endpoint> or relay+ssl://<endpoint>"
+)
+
 // parseTarget reads a reverse_proxy target: http:// or https://, a host
-// and an optional port, nothing else.
+// and an optional port, nothing else; or relay:// or relay+ssl://, the name
+// of an endpoint (resolveRelays checks that there is one).
 func parseTarget(v string) (*url.URL, error) {
+	for _, scheme := range []string{relayScheme, relaySSLScheme} {
+		if len(v) < len(scheme) || !strings.EqualFold(v[:len(scheme)], scheme) {
+			continue
+		}
+		name := strings.TrimSuffix(v[len(scheme):], "/")
+		if name == "" {
+			return nil, fmt.Errorf("%q needs the name of an endpoint, e.g. %soffice (endpoints are on the console's Relays page)", v, scheme)
+		}
+		if !endpointName.MatchString(name) {
+			return nil, fmt.Errorf("%q: after %s comes only the name of an endpoint, 1-64 letters, digits or _+- (no port or path: the tunnel's serving side decides where it lands)", v, scheme)
+		}
+		return &url.URL{Scheme: strings.TrimSuffix(scheme, "://"), Host: name}, nil
+	}
 	u, err := url.Parse(v)
 	switch {
 	case err != nil:
-		return nil, err
+		return nil, fmt.Errorf("%q is not a URL: %s", v, targetForms)
 	case u.Scheme != "http" && u.Scheme != "https":
-		return nil, fmt.Errorf("%q must start with http:// or https://", v)
+		return nil, fmt.Errorf("%q must be %s", v, targetForms)
 	case u.Hostname() == "":
 		return nil, fmt.Errorf("%q has no host", v)
 	case u.User != nil:

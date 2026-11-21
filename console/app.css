@@ -849,6 +849,8 @@ textarea.pem:focus { outline: 2px solid var(--focus); outline-offset: 0; border-
 .serve-row .check { font-weight: 400; color: var(--fg); }
 .serve-row .check[hidden] { display: none; }
 .serve-row .hint { font-size: 11.5px; }
+.serve-row .hint.bad { color: var(--danger); }
+.serve-row input[type=text].bad { border-color: var(--danger); }
 .serve-row select, .serve-row input[type=text] { height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--fg); font: 13px var(--font-mono); min-width: 0; }
 .serve-opts input[type=text] { background: var(--surface); }
 .serve-head select { font-family: inherit; font-weight: 600; }

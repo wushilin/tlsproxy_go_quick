@@ -24,7 +24,9 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -724,5 +726,118 @@ func TestRelayReloadKeepsOpenConnections(t *testing.T) {
 	conn.Write([]byte("again"))
 	if got := string(readN(t, conn, len("again"))); got != "again" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// A serve entry's reverse proxy through a tunnel: relay:// is plain HTTP,
+// relay+ssl:// TLS whose SNI is the Host sent on (force_host, else the
+// client's), its certificate checked unless tls_verify: false. Upstream
+// certificates are checked against the system roots, which do not hold the
+// test CA: a checked one is refused.
+func TestReverseProxyThroughRelay(t *testing.T) {
+	hub := startHub(t)
+	ca := newTestCA(t)
+	httpBackend := func(t *testing.T, tag string, tlsCfg *tls.Config) int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tlsCfg != nil {
+			ln = tls.NewListener(ln, tlsCfg)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "%s %s host=%s proto=%s xfh=%s", tag, r.URL.Path, r.Host, r.Proto, r.Header.Get("X-Forwarded-Host"))
+		}), ErrorLog: log.New(io.Discard, "", 0)}
+		go srv.Serve(ln)
+		t.Cleanup(func() { srv.Close() })
+		return ln.Addr().(*net.TCPAddr).Port
+	}
+	certPEM, keyPEM := ca.issue(t, 12*time.Hour, "wiki.internal", "rp.relay.test")
+	cert, _ := tls.X509KeyPair(certPEM, keyPEM)
+	var sniMu sync.Mutex
+	var snis []string
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"},
+		GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+			sniMu.Lock()
+			snis = append(snis, h.ServerName)
+			sniMu.Unlock()
+			return nil, nil
+		}}
+	lastSNI := func() string {
+		sniMu.Lock()
+		defer sniMu.Unlock()
+		if len(snis) == 0 {
+			return ""
+		}
+		s := snis[len(snis)-1]
+		snis = nil
+		return s
+	}
+	plainWord := hub.serve(t, true, fmt.Sprintf("127.0.0.1:%d", httpBackend(t, "plain", nil)), "")
+	tlsWord := hub.serve(t, false, fmt.Sprintf("127.0.0.1:%d", httpBackend(t, "tls", tlsCfg)), "")
+
+	config := "global:\n  stats_interval: 0\n  max_handshakes_per_ip: 0\n  connect_timeout: 5\n" +
+		"listeners:\n  - name: default\n    port: 1\n" +
+		"routes:\n  - listener: default\n    rules:\n" +
+		"      - domain: rp.relay.test\n        cert: " + ca.localCA(t) + "\n        serve:\n" +
+		"          - {type: reverse_proxy, prefix: /plain/, target: \"relay://plain\"}\n" +
+		"          - {type: reverse_proxy, prefix: /verify/, target: \"relay+ssl://tls\", force_host: \"wiki.internal:8443\"}\n" +
+		"          - {type: reverse_proxy, prefix: /skip/, target: \"RELAY+SSL://tls\", tls_verify: false, strip_prefix: true}\n" +
+		"          - {type: reverse_proxy, prefix: /forced/, target: \"relay+ssl://tls\", tls_verify: false, force_host: wiki.internal}\n" +
+		hub.exchange() + "endpoints:\n" + endpointItem("plain", plainWord, "") + endpointItem("tls", tlsWord, "")
+	p := startProxyText(t, config, "")
+
+	for _, h2 := range []bool{false, true} {
+		c := serveClient(p, ca, h2)
+		for _, tc := range []struct {
+			path   string
+			status int
+			want   string
+			sni    string // what the backend was asked for ("" = no TLS)
+		}{
+			{"/plain/a", 200, "plain /plain/a host=rp.relay.test proto=HTTP/1.1 xfh=rp.relay.test", ""},
+			{"/verify/b", 502, "", "wiki.internal"},
+			{"/skip/c", 200, "tls /c host=rp.relay.test proto=HTTP/2.0 xfh=rp.relay.test", "rp.relay.test"},
+			{"/forced/d", 200, "tls /forced/d host=wiki.internal proto=HTTP/2.0 xfh=rp.relay.test", "wiki.internal"},
+		} {
+			resp, body := httpsGet(t, c, "https://rp.relay.test"+tc.path)
+			if resp.StatusCode != tc.status || body != tc.want {
+				t.Errorf("h2=%v GET %s: %d %q, want %d %q", h2, tc.path, resp.StatusCode, body, tc.status, tc.want)
+			}
+			if got := lastSNI(); got != tc.sni && !(tc.sni != "" && got == "" && tc.status == 200) {
+				t.Errorf("h2=%v GET %s: the backend was asked for %q, want %q", h2, tc.path, got, tc.sni)
+			}
+		}
+	}
+	relayLogLine(t, "/verify/b", "upstream relay+ssl://tls", "certificate")
+}
+
+func TestReverseProxyRelayTargetErrors(t *testing.T) {
+	ca := newTestCA(t)
+	ok := "exchanges:\n  - {name: h, hub: \"https://h.example/\"}\nendpoints:\n  - {name: r, exchange: h, word: k3f9-x2mq-7hpa}\n"
+	entry := func(fields string) string {
+		return "routes:\n  - listener: a\n    rules:\n      - domain: x.test\n        cert: " + ca.localCA(t) +
+			"\n        serve:\n          - {type: reverse_proxy, prefix: /, " + fields + "}\n"
+	}
+	for _, tc := range []struct{ text, want string }{
+		{entry(`target: "relay://nope"`) + ok, "serve 1: target relay://nope: there is no endpoint named nope (endpoints: r)"},
+		{entry(`target: "relay+ssl://nope"`), "there is no endpoint named nope (endpoints: none)"},
+		{entry(`target: "relay+ssl://"`) + ok, "needs the name of an endpoint"},
+		{entry(`target: "relay://r:443"`) + ok, "comes only the name of an endpoint"},
+		{entry(`target: "relay://r/x"`) + ok, "comes only the name of an endpoint"},
+		{entry(`target: "relay_ssl://r"`) + ok, "is not a URL"},
+		{entry(`target: "relays://r"`) + ok, "must be http://host:port, https://host:port, relay://<endpoint> or relay+ssl://<endpoint>"},
+		{entry(`target: "relay://r", tls_verify: false`) + ok, "tls_verify only applies to an https:// or relay+ssl:// target"},
+		{"routes:\n  - listener: a\n    rules:\n      - {domain: x.test, target: \"relay+ssl://r\"}\n" + ok, "relay+ssl:// is for a serve entry's reverse proxy"},
+	} {
+		text := relayListener + tc.text
+		_, err := ParseConfig(text)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s\ngot %v\nwant %q", text, err, tc.want)
+		}
+	}
+	cfg := mustLoadYAML(t, relayListener+entry(`target: "relay+ssl://r", tls_verify: false`)+ok)
+	if s := cfg.Rules[0].Routes[0]; s.endpoint == nil || !s.RelayTLS || s.TLSVerify || s.Describe() != "/ → relay+ssl://r" {
+		t.Errorf("%+v %q", s, s.Describe())
 	}
 }
