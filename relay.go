@@ -186,7 +186,28 @@ func (c *Config) resolveRelays(exchanges []*Exchange, endpoints []*Endpoint) err
 			return fmt.Errorf("rule at line %d: target %s%s: there is no endpoint named %s (endpoints: %s)", rule.Line, relayScheme, rule.EndpointName, rule.EndpointName, namesOr(c.Endpoints, "none"))
 		}
 	}
+	for i := range c.Rules {
+		rule := &c.Rules[i]
+		for _, s := range rule.Routes {
+			if s.EndpointName == "" {
+				continue
+			}
+			if s.endpoint = c.Endpoints[s.EndpointName]; s.endpoint == nil {
+				return fmt.Errorf("rule at line %d: %s: target %s: there is no endpoint named %s (endpoints: %s)", rule.Line, s.Key, s.Target, s.EndpointName, namesOr(c.Endpoints, "none"))
+			}
+		}
+	}
 	return nil
+}
+
+// usesEndpoint reports whether a serve entry of r goes through name.
+func (r *Rule) usesEndpoint(name string) bool {
+	for _, s := range r.Routes {
+		if s.EndpointName == name {
+			return true
+		}
+	}
+	return false
 }
 
 // relayPool keeps one client per endpoint (Endpoint.key), across reloads.

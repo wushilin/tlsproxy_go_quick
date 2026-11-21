@@ -315,7 +315,7 @@
       {
         "key": "target",
         "default": "(required for reverse_proxy)",
-        "meaning": "http://host:port or https://host:port, no path."
+        "meaning": "http://host:port or https://host:port, no path; or relay://\u003cendpoint\u003e (plain HTTP through a pf-simple tunnel) or relay+ssl://\u003cendpoint\u003e (TLS through it), an endpoint of the endpoints list, else the file does not load."
       },
       {
         "key": "strip_prefix",
@@ -330,7 +330,7 @@
       {
         "key": "tls_verify",
         "default": "true",
-        "meaning": "reverse_proxy to https://: check the target's certificate."
+        "meaning": "reverse_proxy to https:// or relay+ssl://: check the target's certificate (false = skip verify). A relay+ssl:// target is checked against the Host header sent on: force_host, else the client's."
       },
       {
         "key": "base_dir",

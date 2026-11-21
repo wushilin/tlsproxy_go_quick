@@ -1028,6 +1028,9 @@ func buildRule(cfg *Config, r rawRule) (Rule, error) {
 		if len(r.serviceRules) > 0 || r.console {
 			break // served here: serveSettings checks the rest
 		}
+		if r.target != nil && strings.HasPrefix(strings.ToLower(*r.target), relaySSLScheme) {
+			return Rule{}, fmt.Errorf("line %d: target: %s is for a serve entry's reverse proxy; a rule writes %s<endpoint>, and upstream_tls decides whether it speaks TLS through the tunnel", r.targetLine, relaySSLScheme, relayScheme)
+		}
 		if r.target != nil && strings.HasPrefix(strings.ToLower(*r.target), relayScheme) {
 			name := (*r.target)[len(relayScheme):]
 			if name == "" {

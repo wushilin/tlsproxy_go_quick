@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -74,9 +75,9 @@ basic_auth:
 		serve("{prefix: /}"):                                                                                        "type is required",
 		serve("{type: reverse_proxy, target: \"http://h\"}"):                                                        "prefix is required",
 		serve("{type: reverse_proxy, prefix: /}"):                                                                   "needs target: http://host:port",
-		serve("{type: reverse_proxy, prefix: /, target: \"ftp://h\"}"):                                              "http:// or https://",
+		serve("{type: reverse_proxy, prefix: /, target: \"ftp://h\"}"):                                              "must be http://host:port, https://host:port, relay://<endpoint> or relay+ssl://<endpoint>",
 		serve("{type: reverse_proxy, prefix: /, target: \"http://h/base\"}"):                                        "scheme://host:port only",
-		serve("{type: reverse_proxy, prefix: /, target: \"http://h\", tls_verify: false}"):                          "only applies to an https:// target",
+		serve("{type: reverse_proxy, prefix: /, target: \"http://h\", tls_verify: false}"):                          "only applies to an https:// or relay+ssl:// target",
 		serve("{type: reverse_proxy, prefix: /, target: \"http://h\", base_dir: /x}"):                               "base_dir only applies to type: static_content",
 		serve("{type: static_content, prefix: /}"):                                                                  "needs base_dir",
 		serve("{type: static_content, prefix: /x, base_dir: /x}"):                                                   "ends with /",
@@ -446,7 +447,7 @@ func TestConsoleBasicAuthPage(t *testing.T) {
 	if g["name"] != "team" || g["users"].([]any)[0].(map[string]any)["plain"] != true || len(g["usedBy"].([]any)) != 1 {
 		t.Fatalf("groups: %v", list)
 	}
-	if strings.Contains(fmt.Sprint(list), "old") {
+	if raw, _ := json.Marshal(list); strings.Contains(string(raw), `"old"`) { // the value, not "/var/folders"
 		t.Fatal("no password is sent to the page")
 	}
 	f := list["file"].(map[string]any)

@@ -87,10 +87,10 @@ var configReference = []sectionDoc{
 	{"serve entries", "Each item of a rule's serve list. A reverse_proxy target gets X-Forwarded-For/-Proto/-Host/-Port/-Prefix, X-Real-IP, Forwarded, X-Forwarded-By and Via; what the client sent in those is replaced (Via is added to).", []keyDoc{
 		{"type", "(required)", "reverse_proxy or static_content."},
 		{"prefix", "(required)", "The request path it takes, starting with /. For /api/, a request for /api is redirected to /api/."},
-		{"target", "(required for reverse_proxy)", "http://host:port or https://host:port, no path."},
+		{"target", "(required for reverse_proxy)", "http://host:port or https://host:port, no path; or relay://<endpoint> (plain HTTP through a pf-simple tunnel) or relay+ssl://<endpoint> (TLS through it), an endpoint of the endpoints list, else the file does not load."},
 		{"strip_prefix", "false", "reverse_proxy: /api/x is sent as /x."},
 		{"force_host", "the client's Host", "reverse_proxy: the Host header sent on."},
-		{"tls_verify", "true", "reverse_proxy to https://: check the target's certificate."},
+		{"tls_verify", "true", "reverse_proxy to https:// or relay+ssl://: check the target's certificate (false = skip verify). A relay+ssl:// target is checked against the Host header sent on: force_host, else the client's."},
 		{"base_dir", "(required for static_content)", "The folder the prefix stands for: /assets/a.css is base_dir/a.css. A folder is served by its index.html, else index.htm, else a listing (directory_listing) or 403. No hidden files but .well-known, no symlinks out."},
 		{"directory_listing", "false", "static_content: true lists a folder that has no index.html or index.htm (hidden files left out); false answers 403."},
 		{"basic_auth", "(none)", "The name of a basic_auth item whose users may use it."},
